@@ -20,11 +20,11 @@ $$c(u, v) = \sum_{i,j} W_{ij}  k_u(u; U_i, \rho_{u,i})  k_v(v; V_j, \rho_{v,j})$
 
 Each 1-D basis function is the conditional density of a Gaussian copula:
 
-$$k(u; U_i, \rho_i) = \frac{\phi(a_i)}{s_i  \phi(z)}, \qquad z = \Phi^{-1}(u),\quad z_i = \Phi^{-1}(U_i),\quad s_i = \sqrt{1 - \rho_i^2},\quad a_i = \frac{z - \rho_i z_i}{s_i}$$
+$$k(u; U, \rho) = \frac{\phi(a)}{s  \phi(z)}, \qquad z = \Phi^{-1}(u),\quad z = \Phi^{-1}(U),\quad s = \sqrt{1 - \rho^2},\quad a = \frac{z - \rho z}{s}$$
 
 Its primitive is available in closed form:
 
-$$K(u; U_i, \rho_i) = \int_0^u k(t; U_i, \rho_i) dt = \Phi(a_i)$$
+$$K(u; U, \rho) = \int_0^u k(t; U, \rho) dt = \Phi(a)$$
 
 | Parameter | Form |
 | --- | --- |
@@ -67,11 +67,11 @@ Because the kernel primitives are explicit, all of the following are
 available in closed form:
 
 $$\begin{aligned}
-C(u, v) &= \sum_{i,j} W_{ij} F_{u,i}(u) F_{v,j}(v) \\
-h_1^(u,v) &= \sum_{i,j} W_{ij} F_{u,i}(u) f_{v,j}(v) \qquad \textstyle\left(\int_0^u c(s,v)ds\right) \\
-h_2^(u,v) &= \sum_{i,j} W_{ij} f_{u,i}(u) F_{v,j}(v) \qquad \textstyle\left(\int_0^v c(u,t)dt\right) \\
-f_1(u) &= \sum_i \alpha_i f_{u,i}(u) \qquad \textstyle\left(\int_0^1 c(u,s)ds\right)\\
-f_2(v) &= \sum_j \beta_j f_{v,j}(v) \qquad \textstyle\left(\int_0^1 c(t,v)ds\right)
+C(u, v) &= \sum_{i,j} W_{ij} K_{u,i}(u) K_{v,j}(v) \\
+h_1^(u,v) &= \sum_{i,j} W_{ij} K_{u,i}(u) k_{v,j}(v) \qquad \textstyle\left(\int_0^u c(s,v)ds\right) \\
+h_2^(u,v) &= \sum_{i,j} W_{ij} k_{u,i}(u) K_{v,j}(v) \qquad \textstyle\left(\int_0^v c(u,t)dt\right) \\
+f_1(u) &= \sum_i \alpha_i k_{u,i}(u) \qquad \textstyle\left(\int_0^1 c(u,s)ds\right)\\
+f_2(v) &= \sum_j \beta_j k_{v,j}(v) \qquad \textstyle\left(\int_0^1 c(t,v)ds\right)
 \end{aligned}$$
 
 This makes both classes natural building blocks for neural vine copulas,
