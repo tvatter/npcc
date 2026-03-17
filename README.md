@@ -44,9 +44,9 @@ $$c(u, v) = \frac{f_Z\left(\Phi^{-1}(u),\Phi^{-1}(v)\right)}{\phi\left(\Phi^{-1}
 
 The $Z$-space density is:
 
-$$f_Z(z_1, z_2) = \sum_{i,j} W_{ij} b_u(z_1; \mu_i, \sigma_{u,i})  b_v(z_2; \nu_j, \sigma_{v,j}) \qquad b(z; \mu, \sigma) = \frac{1}{\sigma}\phi\left(\frac{z - \mu}{\sigma}\right)$$
+$$f_Z(z_1, z_2) = \sum_{i,j} W_{ij} k_u(z_1; \mu_i, \sigma_{u,i})  k_v(z_2; \nu_j, \sigma_{v,j}) \qquad k(z; \mu, \sigma) = \frac{1}{\sigma}\phi\left(\frac{z - \mu}{\sigma}\right)$$
 
-Its primitive is $B(z; \mu, \sigma) = \Phi\left(\frac{z-\mu}{\sigma}\right)$, which yields
+Its primitive is $K(z; \mu, \sigma) = \Phi\left(\frac{z-\mu}{\sigma}\right)$, which yields
 closed-form CDF and h-function evaluations exactly as with `GCKBicop`.
 
 **Why GTKBicop?**  Smoothing in the unbounded $Z$-space is often better
