@@ -16,21 +16,21 @@ neural vine copulas.
 
 Kernels are defined directly on the copula scale $(0, 1)$.  The density is:
 
-$$c(u, v) = \sum_{i,j} W_{ij} \, k_u(u;\, U_i, \rho_{u,i}) \, k_v(v;\, V_j, \rho_{v,j})$$
+$$c(u, v) = \sum_{i,j} W_{ij}  k_u(u; U_i, \rho_{u,i})  k_v(v; V_j, \rho_{v,j})$$
 
 Each 1-D basis function is the conditional density of a Gaussian copula:
 
-$$k(u;\, U_i, \rho_i) = \frac{\phi(a_i)}{s_i \, \phi(z)}, \qquad z = \Phi^{-1}(u),\quad z_i = \Phi^{-1}(U_i),\quad s_i = \sqrt{1 - \rho_i^2},\quad a_i = \frac{z - \rho_i z_i}{s_i}$$
+$$k(u; U_i, \rho_i) = \frac{\phi(a_i)}{s_i  \phi(z)}, \qquad z = \Phi^{-1}(u),\quad z_i = \Phi^{-1}(U_i),\quad s_i = \sqrt{1 - \rho_i^2},\quad a_i = \frac{z - \rho_i z_i}{s_i}$$
 
 Its primitive is available in closed form:
 
-$$K(u;\, U_i, \rho_i) = \int_0^u k(t;\, U_i, \rho_i)\, dt = \Phi(a_i)$$
+$$K(u; U_i, \rho_i) = \int_0^u k(t; U_i, \rho_i) dt = \Phi(a_i)$$
 
 | Parameter | Form |
 | --- | --- |
 | Weights | $W_{ij} = \exp(L_{ij}) \big/ \sum_{kl} \exp(L_{kl})$ (softmax) |
 | Correlations | $\rho_{u,i} = \rho_{\max} \tanh(\eta_{u,i})$, one per center |
-| Grid centers | $\Phi\left(\mathrm{linspace}(-3.25,\, 3.25,\, m)\right)$ in $(0, 1)$ |
+| Grid centers | $\Phi\left(\mathrm{linspace}(-3.25, 3.25, m)\right)$ in $(0, 1)$ |
 
 ---
 
@@ -44,9 +44,9 @@ $$c(u, v) = \frac{f_Z\left(\Phi^{-1}(u),\Phi^{-1}(v)\right)}{\phi\left(\Phi^{-1}
 
 The $Z$-space density is:
 
-$$f_Z(z_1, z_2) = \sum_{i,j} W_{ij} b_u(z_1;\, \mu_i, \sigma_{u,i}) \, b_v(z_2;\, \nu_j, \sigma_{v,j}) \qquad b(z;\, \mu, \sigma) = \frac{1}{\sigma}\,\phi\left(\frac{z - \mu}{\sigma}\right)$$
+$$f_Z(z_1, z_2) = \sum_{i,j} W_{ij} b_u(z_1; \mu_i, \sigma_{u,i})  b_v(z_2; \nu_j, \sigma_{v,j}) \qquad b(z; \mu, \sigma) = \frac{1}{\sigma}\phi\left(\frac{z - \mu}{\sigma}\right)$$
 
-Its primitive is $B(z;\, \mu, \sigma) = \Phi\left(\frac{z-\mu}{\sigma}\right)$, which yields
+Its primitive is $B(z; \mu, \sigma) = \Phi\left(\frac{z-\mu}{\sigma}\right)$, which yields
 closed-form CDF and h-function evaluations exactly as with `GCKBicop`.
 
 **Why GTKBicop?**  Smoothing in the unbounded $Z$-space is often better
@@ -57,7 +57,7 @@ is closer in spirit to TLL-type nonparametric copula estimators.
 | --- | --- |
 | Weights | $W_{ij} = \exp(L_{ij}) \big/ \sum_{kl} \exp(L_{kl})$ (softmax) |
 | Scales | $\sigma_{u,i} = \sigma_{\min} + \mathrm{softplus}(\eta_{u,i})$, one per center |
-| Grid centers | $\mathrm{linspace}(-3.25,\, 3.25,\, m)$ in $Z$-space |
+| Grid centers | $\mathrm{linspace}(-3.25, 3.25, m)$ in $Z$-space |
 
 ---
 
@@ -67,11 +67,11 @@ Because the kernel primitives are explicit, all of the following are
 available in closed form:
 
 $$\begin{aligned}
-C(u, v) &= \sum_{i,j} W_{ij}\, F_{u,i}(u)\, F_{v,j}(v) \\
-h_1^(u,v) &= \sum_{i,j} W_{ij}\, F_{u,i}(u)\, f_{v,j}(v) \qquad \textstyle\left(\int_0^u c(s,v)\,ds\right) \\
-h_2^(u,v) &= \sum_{i,j} W_{ij}\, f_{u,i}(u)\, F_{v,j}(v) \qquad \textstyle\left(\int_0^v c(u,t)\,dt\right) \\
-f_1(u) &= \sum_i \alpha_i\, f_{u,i}(u) \qquad \textstyle\left(\int_0^1 c(u,s)\,ds\right)\\
-f_2(v) &= \sum_j \beta_j\, f_{v,j}(v) \qquad \textstyle\left(\int_0^1 c(t,v)\,ds\right)
+C(u, v) &= \sum_{i,j} W_{ij} F_{u,i}(u) F_{v,j}(v) \\
+h_1^(u,v) &= \sum_{i,j} W_{ij} F_{u,i}(u) f_{v,j}(v) \qquad \textstyle\left(\int_0^u c(s,v)ds\right) \\
+h_2^(u,v) &= \sum_{i,j} W_{ij} f_{u,i}(u) F_{v,j}(v) \qquad \textstyle\left(\int_0^v c(u,t)dt\right) \\
+f_1(u) &= \sum_i \alpha_i f_{u,i}(u) \qquad \textstyle\left(\int_0^1 c(u,s)ds\right)\\
+f_2(v) &= \sum_j \beta_j f_{v,j}(v) \qquad \textstyle\left(\int_0^1 c(t,v)ds\right)
 \end{aligned}$$
 
 This makes both classes natural building blocks for neural vine copulas,
