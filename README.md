@@ -68,10 +68,10 @@ available in closed form:
 
 $$\begin{aligned}
 C(u, v) &= \sum_{i,j} W_{ij}\, F_{u,i}(u)\, F_{v,j}(v) \\
-f_1^{\mathrm{raw}}(u,v) &= \sum_{i,j} W_{ij}\, F_{u,i}(u)\, f_{v,j}(v) \qquad \textstyle\left(\int_0^u c(s,v)\,ds\right) \\
-f_2^{\mathrm{raw}}(u,v) &= \sum_{i,j} W_{ij}\, f_{u,i}(u)\, F_{v,j}(v) \qquad \textstyle\left(\int_0^v c(u,t)\,dt\right) \\
-m_u(u) &= \sum_i \alpha_i\, f_{u,i}(u) \qquad \text{(induced } u\text{-margin)} \\
-m_v(v) &= \sum_j \beta_j\, f_{v,j}(v) \qquad \text{(induced } v\text{-margin)}
+h_1^(u,v) &= \sum_{i,j} W_{ij}\, F_{u,i}(u)\, f_{v,j}(v) \qquad \textstyle\left(\int_0^u c(s,v)\,ds\right) \\
+h_2^(u,v) &= \sum_{i,j} W_{ij}\, f_{u,i}(u)\, F_{v,j}(v) \qquad \textstyle\left(\int_0^v c(u,t)\,dt\right) \\
+f_1(u) &= \sum_i \alpha_i\, f_{u,i}(u) \qquad \textstyle\left(\int_0^1 c(u,s)\,ds\right)\\
+f_2(v) &= \sum_j \beta_j\, f_{v,j}(v) \qquad \textstyle\left(\int_0^1 c(t,v)\,ds\right)
 \end{aligned}$$
 
 This makes both classes natural building blocks for neural vine copulas,
