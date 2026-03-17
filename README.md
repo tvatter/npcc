@@ -30,7 +30,7 @@ $$K(u;\, U_i, \rho_i) = \int_0^u k(t;\, U_i, \rho_i)\, dt = \Phi(a_i)$$
 | --- | --- |
 | Weights | $W_{ij} = \exp(L_{ij}) \big/ \sum_{kl} \exp(L_{kl})$ (softmax) |
 | Correlations | $\rho_{u,i} = \rho_{\max} \tanh(\eta_{u,i})$, one per center |
-| Grid centers | $\Phi\!\left(\mathrm{linspace}(-3.25,\, 3.25,\, m)\right)$ in $(0, 1)$ |
+| Grid centers | $\Phi\left(\mathrm{linspace}(-3.25,\, 3.25,\, m)\right)$ in $(0, 1)$ |
 
 ---
 
@@ -40,13 +40,13 @@ First transforms to Gaussian margins $z_1 = \Phi^{-1}(u)$, $z_2 = \Phi^{-1}(v)$,
 then models a density in $Z$-space with separable Gaussian kernels, and maps
 back to the copula scale via the Jacobian correction:
 
-$$c(u, v) = \frac{f_Z\!\left(\Phi^{-1}(u),\, \Phi^{-1}(v)\right)}{\phi\!\left(\Phi^{-1}(u)\right) \cdot \phi\!\left(\Phi^{-1}(v)\right)}$$
+$$c(u, v) = \frac{f_Z\left(\Phi^{-1}(u),\Phi^{-1}(v)\right)}{\phi\left(\Phi^{-1}(u)\right) \cdot \phi\left(\Phi^{-1}(v)\right)}$$
 
 The $Z$-space density is:
 
-$$f_Z(z_1, z_2) = \sum_{i,j} W_{ij} \, b_u(z_1;\, \mu_i, \sigma_{u,i}) \, b_v(z_2;\, \nu_j, \sigma_{v,j}), \qquad b(z;\, \mu, \sigma) = \frac{1}{\sigma}\,\phi\!\left(\frac{z - \mu}{\sigma}\right)$$
+$$f_Z(z_1, z_2) = \sum_{i,j} W_{ij} b_u(z_1;\, \mu_i, \sigma_{u,i}) \, b_v(z_2;\, \nu_j, \sigma_{v,j}) \qquad b(z;\, \mu, \sigma) = \frac{1}{\sigma}\,\phi\left(\frac{z - \mu}{\sigma}\right)$$
 
-Its primitive is $B(z;\, \mu, \sigma) = \Phi\!\left(\frac{z-\mu}{\sigma}\right)$, which yields
+Its primitive is $B(z;\, \mu, \sigma) = \Phi\left(\frac{z-\mu}{\sigma}\right)$, which yields
 closed-form CDF and h-function evaluations exactly as with `GCKBicop`.
 
 **Why GTKBicop?**  Smoothing in the unbounded $Z$-space is often better
@@ -67,10 +67,10 @@ Because the kernel primitives are explicit, all of the following are
 available in closed form:
 
 $$\begin{aligned}
-C(u, v) &= \sum_{i,j} W_{ij}\, F_{u,i}(u)\, F_{v,j}(v) \\[4pt]
-H_1^{\mathrm{raw}}(u,v) &= \sum_{i,j} W_{ij}\, F_{u,i}(u)\, f_{v,j}(v) \qquad \textstyle\left(\int_0^u c(s,v)\,ds\right) \\[4pt]
-H_2^{\mathrm{raw}}(u,v) &= \sum_{i,j} W_{ij}\, f_{u,i}(u)\, F_{v,j}(v) \qquad \textstyle\left(\int_0^v c(u,t)\,dt\right) \\[4pt]
-m_u(u) &= \sum_i \alpha_i\, f_{u,i}(u) \qquad \text{(induced } u\text{-margin)} \\[4pt]
+C(u, v) &= \sum_{i,j} W_{ij}\, F_{u,i}(u)\, F_{v,j}(v) \\
+f_1^{\mathrm{raw}}(u,v) &= \sum_{i,j} W_{ij}\, F_{u,i}(u)\, f_{v,j}(v) \qquad \textstyle\left(\int_0^u c(s,v)\,ds\right) \\
+f_2^{\mathrm{raw}}(u,v) &= \sum_{i,j} W_{ij}\, f_{u,i}(u)\, F_{v,j}(v) \qquad \textstyle\left(\int_0^v c(u,t)\,dt\right) \\
+m_u(u) &= \sum_i \alpha_i\, f_{u,i}(u) \qquad \text{(induced } u\text{-margin)} \\
 m_v(v) &= \sum_j \beta_j\, f_{v,j}(v) \qquad \text{(induced } v\text{-margin)}
 \end{aligned}$$
 
