@@ -30,7 +30,7 @@ interactive = [
   # For data wrangling
   "pandas>=2.0",
   # For notebooks
-  "jupyter>=1.0.0",
+  "marimo>=0.10",
   "notebook>=7.0.0",
   "ipykernel>=6.25.0",
   # Visualization
@@ -92,6 +92,11 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 extend-select = ["ANN"]
+
+[tool.ruff.lint.per-file-ignores]
+# Marimo cell functions have a reactive-graph signature style that makes
+# ANN annotations on cell arguments extremely verbose and unidiomatic.
+"notebooks/**" = ["ANN"]
 
 # Type checking with ty
 [tool.ty.environment]
