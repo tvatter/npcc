@@ -1,0 +1,102 @@
+[build-system]
+requires = ["hatchling>=1.18.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "npcc"
+version = "0.1.0"
+description = "Neural Pair-Copulas Constructions (NPCCs) for multivariate conditional density estimation."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["numpy>=2.0", "pyvinecopulib>=0.7.5"]
+
+[project.optional-dependencies]
+cpu = ["torch>=2.10"]
+cu126 = ["torch>=2.10"]
+cu128 = ["torch>=2.10"]
+cu130 = ["torch>=2.10"]
+
+[dependency-groups]
+dev = [
+  # Linters and formatters
+  "ruff>=0.9",
+  "ty>=0.0.14",
+  # Unit testing
+  "pytest>=7.0.0",
+  "pytest-cov>=4.0.0",
+  "pytest-xdist>=3.0.0",
+]
+interactive = [
+  # For data wrangling
+  "pandas>=2.0",
+  # For notebooks
+  "jupyter>=1.0.0",
+  "notebook>=7.0.0",
+  "ipykernel>=6.25.0",
+  # Visualization
+  "matplotlib>=3.7.0",
+  "seaborn>=0.12.0",
+  "plotnine",
+  # Tables
+  "great-tables>=0.18.0",
+  "tabulate>=0.9.0",
+]
+
+[tool.uv]
+default-groups = ["dev", "interactive"]
+conflicts = [
+  [
+    { extra = "cpu" },
+    { extra = "cu126" },
+    { extra = "cu128" },
+    { extra = "cu130" },
+  ],
+]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu", extra = "cpu" },
+  { index = "pytorch-cu126", extra = "cu126" },
+  { index = "pytorch-cu128", extra = "cu128" },
+  { index = "pytorch-cu130", extra = "cu130" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.ruff]
+line-length = 80
+target-version = "py311"
+indent-width = 2
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+extend-select = ["ANN"]
+
+# Type checking with ty
+[tool.ty.environment]
+python = ".venv"
+python-version = "3.11"
+
+[tool.ty.src]
+include = ["src", "tests"]
