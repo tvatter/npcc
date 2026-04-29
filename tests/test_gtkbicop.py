@@ -9,7 +9,7 @@ from .conftest import random_uv, unit_grid
 
 
 def make_gtk(m_u: int = 10, m_v: int = 10, **kwargs: object) -> GTKBicop:
-  return GTKBicop(m_u=m_u, m_v=m_v, **kwargs)  # type: ignore[arg-type]
+  return GTKBicop(m_u=m_u, m_v=m_v, **kwargs)  # ty: ignore[invalid-argument-type]
 
 
 # ===========================================================================
