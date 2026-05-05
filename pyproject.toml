@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Neural Pair-Copulas Constructions (NPCCs) for multivariate conditional density estimation."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["numpy>=2.0", "pyvinecopulib>=0.7.5"]
+dependencies = ["numpy>=2.0", "pyvinecopulib>=0.7.5", "tabpfn>=2.0"]
 
 [project.optional-dependencies]
 cpu = ["torch>=2.10"]
@@ -25,6 +25,8 @@ dev = [
   "pytest>=7.0.0",
   "pytest-cov>=4.0.0",
   "pytest-xdist>=3.0.0",
+  # For loading TABPFN_TOKEN from .env in the integration test
+  "python-dotenv>=1.0",
 ]
 interactive = [
   # For data wrangling
