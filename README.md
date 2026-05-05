@@ -1,168 +1,250 @@
 # Neural Pair-Copulas Constructions (NPCCs)
 
-A Python library for multivariate conditional density estimation via
-neural vine copulas, using differentiable nonparametric pair-copula components.
-
-## Models
-
-Two related bivariate pair-copula families are provided.  Both use a
-positive softmax-weighted mixture of separable basis functions and expose
-identical public APIs, making them interchangeable building blocks in
-neural vine copulas.
+A Python library for **conditional bivariate copula density estimation**
+backed by [TabPFN](https://github.com/PriorLabs/TabPFN).  The package
+exposes one outer estimator — `PFNRBicop` — and two interchangeable
+inner univariate-conditional-density estimators that read the density
+out of a fitted TabPFN regressor in two complementary ways.
 
 ---
 
-### `GCKBicop` — Gaussian-Copula-Kernel Bicop
+## TabPFN-Rosenblatt conditional bivariate copula
 
-Kernels are defined directly on the copula scale $(0, 1)$.  The density is:
+Let $(U, V, X)$ denote observations with $U, V \in (0, 1)$ and
+$X \in \mathbb{R}^p$.  We want to estimate the conditional copula
+density $c(u, v \mid x)$.
 
-$$c(u, v) = \sum_{i,j} W_{ij}  k_u(u; U_i, \rho_{u,i})  k_v(v; V_j, \rho_{v,j})$$
+### Rosenblatt factorisation
 
-Each 1-D basis function is the conditional density of a Gaussian copula:
+Because $U$ is uniform on the copula scale, the Rosenblatt construction
+collapses the bivariate density into a single univariate conditional
+density,
 
-$$k(u; U, \rho) = \frac{\phi(a)}{s  \phi(z)}, \qquad z = \Phi^{-1}(u),\quad z = \Phi^{-1}(U),\quad s = \sqrt{1 - \rho^2},\quad a = \frac{z - \rho z}{s}$$
+$$c(u, v \mid x) = f_{V \mid U, X}(v \mid u, x).$$
 
-Its primitive is available in closed form:
+So estimating $c$ reduces to estimating $f_{V \mid U, X}$, which is
+exactly what a flexible distributional regressor like TabPFN provides.
+The features fed to the regressor are simply $W = [u, x]$ (or $[v, x]$
+for the reverse direction).
 
-$$K(u; U, \rho) = \int_0^u k(t; U, \rho) dt = \Phi(a)$$
+### Symmetric variant
 
-| Parameter | Form |
-| --- | --- |
-| Weights | $W_{ij} = \exp(L_{ij}) \big/ \sum_{kl} \exp(L_{kl})$ (softmax) |
-| Correlations | $\rho_{u,i} = \rho_{\max} \tanh(\eta_{u,i})$, one per center |
-| Grid centers | $\Phi\left(\mathrm{linspace}(-3.25, 3.25, m)\right)$ in $(0, 1)$ |
+The naive estimator factorises in a single direction and is therefore
+ordering-dependent: it satisfies $\int_0^1 \hat c (u, v \mid x) \, dv =
+1$ by construction but generally not $\int_0^1 \hat c (u, v \mid x) \,
+du = 1$.  Setting `symmetric=True` (the default) also fits the reverse
+direction $f_{U \mid V, X}$ and averages,
+
+$$\hat c_S(u, v \mid x)
+= \tfrac{1}{2} \, \hat f_{V \mid U, X}(v \mid u, x)
++ \tfrac{1}{2} \, \hat f_{U \mid V, X}(u \mid v, x),$$
+
+which reduces directional bias.  It still does not impose exact uniform
+copula margins; if you need that, evaluate the density on a grid and
+apply iterative-proportional-fitting / Sinkhorn projection.
+
+### Logit transform
+
+Both copula scores live in $(0, 1)$.  By default the inner density
+estimator fits TabPFN on $Z = \mathrm{logit}(Y)$ — the unbounded image —
+and converts back via the standard Jacobian,
+
+$$f_Y(y \mid w) = f_Z(\mathrm{logit}(y) \mid w) \, \tfrac{1}{y(1-y)}.$$
+
+This is generally numerically better behaved than estimating a density
+on a bounded interval.
 
 ---
 
-### `GTKBicop` — Gaussian-Transformation-Kernel Bicop
+## Two density-recovery methods
 
-First transforms to Gaussian margins $z_1 = \Phi^{-1}(u)$, $z_2 = \Phi^{-1}(v)$,
-then models a density in $Z$-space with separable Gaussian kernels, and maps
-back to the copula scale via the Jacobian correction:
+Both classes expose the same `fit(w, y)` / `density(w, y)` API and are
+drop-in interchangeable inside `PFNRBicop` via the `method=` argument.
 
-$$c(u, v) = \frac{f_Z\left(\Phi^{-1}(u),\Phi^{-1}(v)\right)}{\phi\left(\Phi^{-1}(u)\right) \cdot \phi\left(\Phi^{-1}(v)\right)}$$
+### `TabPFNDensity1D` — TabPFN's native distribution head (default)
 
-The $Z$-space density is:
+TabPFN's regressor is internally a classifier over a binned
+distribution.  Calling `predict(W, output_type="full")` returns logits
+over the bins plus a `criterion` object whose `pdf(logits, z)` method
+evaluates the density at arbitrary points,
 
-$$f_Z(z_1, z_2) = \sum_{i,j} W_{ij} k_u(z_1; \mu_i, \sigma_{u,i})  k_v(z_2; \nu_j, \sigma_{v,j}) \qquad k(z; \mu, \sigma) = \frac{1}{\sigma}\phi\left(\frac{z - \mu}{\sigma}\right)$$
+$$f(y \mid w) = \mathrm{criterion.pdf}\bigl( \mathrm{logits}(w), \, z = T(y) \bigr).$$
 
-Its primitive is $K(z; \mu, \sigma) = \Phi\left(\frac{z-\mu}{\sigma}\right)$, which yields
-closed-form CDF and h-function evaluations exactly as with `GCKBicop`.
+A single forward pass is needed per row of $W$.  The
+`density_grid(w, y_grid)` method exploits this — one forward pass per
+$w$ row, then evaluate at every $y$ value — to produce the full
+Cartesian-product density matrix in a single shot.
 
-**Why GTKBicop?**  Smoothing in the unbounded $Z$-space is often better
-behaved in the tails than smoothing on the compact $(0, 1)$ scale.  This
-is closer in spirit to TLL-type nonparametric copula estimators.
+### `TabPFNQuantileDensity1D` — numerical slope inversion
 
-| Parameter | Form |
-| --- | --- |
-| Weights | $W_{ij} = \exp(L_{ij}) \big/ \sum_{kl} \exp(L_{kl})$ (softmax) |
-| Scales | $\sigma_{u,i} = \sigma_{\min} + \mathrm{softplus}(\eta_{u,i})$, one per center |
-| Grid centers | $\mathrm{linspace}(-3.25, 3.25, m)$ in $Z$-space |
+Asks TabPFN for the conditional quantile function $Q(\alpha \mid w)$
+on a grid of $\alpha$ values, then recovers
 
----
+$$f(y \mid w) = 1 / Q'(\alpha) \quad \text{at} \quad \alpha = F(y \mid w).$$
 
-### Closed-form quantities (both models)
-
-Because the kernel primitives are explicit, all of the following are
-available in closed form:
-
-$$\begin{aligned}
-C(u, v) &= \sum_{i,j} W_{ij} K_{u,i}(u) K_{v,j}(v) \\
-h_1^(u,v) &= \sum_{i,j} W_{ij} K_{u,i}(u) k_{v,j}(v) \qquad \textstyle\left(\int_0^u c(s,v)ds\right) \\
-h_2^(u,v) &= \sum_{i,j} W_{ij} k_{u,i}(u) K_{v,j}(v) \qquad \textstyle\left(\int_0^v c(u,t)dt\right) \\
-f_1(u) &= \sum_i \alpha_i k_{u,i}(u) \qquad \textstyle\left(\int_0^1 c(u,s)ds\right)\\
-f_2(v) &= \sum_j \beta_j k_{v,j}(v) \qquad \textstyle\left(\int_0^1 c(t,v)ds\right)
-\end{aligned}$$
-
-This makes both classes natural building blocks for neural vine copulas,
-where tree-by-tree gradient-based training requires differentiable
-pair-copula components with explicit h-function evaluations.
+The class enforces monotonicity by sorting (rearrangement), clips the
+slope to a positive floor to avoid singularities at quantile plateaus,
+and uses linear interpolation in both lookup steps.  Slower and less
+direct than the criterion approach, but model-agnostic.
 
 ---
 
 ## Public API
 
-Both classes share the same interface:
+`PFNRBicop` is the main entry point.  Its key methods:
+
+| Method                              | What it returns                                                                  |
+| ----------------------------------- | -------------------------------------------------------------------------------- |
+| `fit(u, v, x=None)`                 | Fits the inner density estimator(s).  `x=None` → unconditional fit.              |
+| `density(u, v, x=None)`             | Pointwise $\hat c(u_i, v_i \mid x_i)$ (vectorised over rows).                    |
+| `log_density(u, v, x=None)`         | $\log$ of `density`, floored at the smallest positive float.                     |
+| `density_grid(u_grid, v_grid, x_row=None)` | Cartesian-grid density `out[i, j] = c(u_grid[i], v_grid[j] | x_row)`.  Requires `method="criterion"`. |
+| `conditional_cdf_v_given_u(u, v_grid, x=None)` | Trapezoidal CDF estimate of $C_{V \mid U, X}$ along `v_grid`. Diagnostic.  |
+| `as_bicop(x_row=None)`              | Returns a [`pyvinecopulib`](https://github.com/vinecopulib/pyvinecopulib)-compatible adapter (exposes `var_types = ["c", "c"]` and `pdf(uv)`). |
+| `plot(*, x_row=None, plot_type="contour", margin_type="norm", ...)` | Renders a contour or surface plot via `pyvinecopulib`'s plotter (lazy-imports `matplotlib`). |
+
+The two inner classes (`TabPFNDensity1D`, `TabPFNQuantileDensity1D`) are
+also exported and can be used directly for univariate conditional
+density estimation outside the copula context.
+
+### Quick start
 
 ```python
-from npcc import GCKBicop, GTKBicop
+from dotenv import load_dotenv
+load_dotenv()  # picks up TABPFN_TOKEN from .env
 
-# GCKBicop — copula-scale kernels
-model = GCKBicop(m_u=25, m_v=25)
+import numpy as np
+import pyvinecopulib as pv
 
-# GTKBicop — Z-space Gaussian kernels
-# gtk = GTKBicop(m_u=25, m_v=25)
+from npcc import PFNRBicop
 
-model.pdf(UV)                        # copula density,  shape [B]
-model.cdf(UV)                        # copula CDF,       shape [B]
-model.hfunc1(UV, normalized=False)   # int_0^u c(s,v) ds, shape [B]
-model.hfunc2(UV, normalized=False)   # int_0^v c(u,t) dt, shape [B]
-model.margin_u(u)                    # induced u-margin,  shape [B]
-model.margin_v(v)                    # induced v-margin,  shape [B]
-model.log_pdf(UV)                    # log density
-model.nll(UV)                        # mean negative log-likelihood
-model.marginal_penalty()             # soft uniformity penalty
-model.logit_smoothness_penalty()     # smooth logit surface penalty
+# Simulate from a Clayton bicop
+clayton = pv.Bicop(
+    family=pv.BicopFamily.clayton,
+    parameters=np.asarray([[3.0]], dtype=np.float64),
+)
+u = clayton.simulate(n=1000, seeds=[2, 2, 4])
 
-# GCKBicop only
-model.rho_smoothness_penalty()         # smooth rho-profile penalty
+# Fit the TabPFN-Rosenblatt copula (defaults: symmetric=True, method="criterion")
+model = PFNRBicop()
+model.fit(u[:, 0], u[:, 1])
 
-# GTKBicop only
-# model.scale_smoothness_penalty()       # smooth sigma-profile penalty
+# Pointwise density
+print(model.density(np.array([0.3, 0.5]), np.array([0.4, 0.6])))
+
+# Cartesian-grid density (fast path, criterion method only)
+u_grid = np.linspace(0.05, 0.95, 30)
+v_grid = np.linspace(0.05, 0.95, 30)
+grid = model.density_grid(u_grid, v_grid)   # shape (30, 30)
+
+# Plot via pyvinecopulib's helper (matplotlib)
+model.plot(plot_type="contour", margin_type="norm")
 ```
 
-A typical training loop:
+To switch to the quantile-based method:
 
 ```python
-import torch.optim as optim
+model = PFNRBicop(method="quantiles")
+```
 
-optimizer = optim.Adam(model.parameters(), lr=0.05)
-for _ in range(500):
-    optimizer.zero_grad()
-    loss = (
-        model.nll(UV)
-        + 0.1 * model.marginal_penalty()
-        + 0.5 * model.logit_smoothness_penalty()
-    )
-    loss.backward()
-    optimizer.step()
+To pass a covariate matrix:
+
+```python
+model.fit(u, v, x=X_train)               # X_train shape (n, p)
+model.density(u_query, v_query, x_query) # x_query shape (n_query, p)
+```
+
+To plot at a specific covariate row:
+
+```python
+model.plot(x_row=np.array([[1.5, -0.5]]))
+```
+
+---
+
+## Notebook
+
+A worked end-to-end demo lives at
+[`notebooks/pfnr_bicop_demo.ipynb`](notebooks/pfnr_bicop_demo.ipynb).
+It simulates from a Clayton copula, fits `PFNRBicop`, compares against
+the `pv.tll` benchmark on a regular grid (ISE / IAE / KL), and renders
+contour plots for the truth, `tll`, and `PFNRBicop`.
+
+```bash
+uv run jupyter lab notebooks/pfnr_bicop_demo.ipynb
 ```
 
 ---
 
 ## Setup
 
-### uv dependency groups
-
-- `dev`: linting, formatting, type checking, and tests.
-- `interactive`: marimo notebooks, pandas, matplotlib, etc.
-- `uv` defaults include both groups, so `uv sync` installs them.
-
-### Package extras (PyTorch variant)
-
-Extras are mutually exclusive — pick one:
+### Install
 
 ```bash
+# Pick exactly one of: cpu, cu126, cu128, cu130 (PyTorch flavour)
 uv sync --extra cpu
-uv sync --extra cu128
 ```
+
+The package depends on `numpy>=2.0`, `pyvinecopulib>=0.7.5`, and
+`tabpfn>=2.0`.  TabPFN pulls in PyTorch transitively; the extras above
+just pin its build (CPU-only or one of the CUDA variants).
+
+### Authenticate TabPFN (one-time)
+
+`tabpfn` runs locally but authenticates once via a token from the
+PriorLabs portal.
+
+1. Go to <https://ux.priorlabs.ai>, log in (or register), accept the
+   `priorlabs-1-1` license on the **Licenses** tab, and copy your API
+   key from the **Account** tab.
+2. Drop it into a `.env` file at the repo root:
+
+   ```
+   TABPFN_TOKEN="..."
+   ```
+
+3. Make sure your code calls `dotenv.load_dotenv()` before instantiating
+   `PFNRBicop`.  Alternatively, just `export TABPFN_TOKEN=...` in your
+   shell.
+
+The first call to `model.fit(...)` downloads the TabPFN-v2.5 regressor
+checkpoint from HuggingFace into the platform cache directory (Linux
+default: `~/.cache/tabpfn/`; override with `TABPFN_MODEL_CACHE_DIR`).
+Subsequent runs are fully offline.
+
+> **Why v2.5?**  `PFNRBicop` is locked to TabPFN-v2.5 because v2.6 has
+> reported regressions on tabular regression tasks.  Override via
+> `model_kwargs={...}` if needed.
+
+### CPU sample-size cap
+
+TabPFN refuses to fit on more than 1000 samples on CPU by default.  On
+larger samples either use a CUDA build, set the
+`TABPFN_ALLOW_CPU_LARGE_DATASET=1` environment variable, or pass
+`model_kwargs={"ignore_pretraining_limits": True}` to `PFNRBicop`.
 
 ---
 
 ## Commands
 
 ```bash
-# Lint / format
+# Lint + format (ANN ruleset → public functions must have annotations)
 uv run ruff check . --select ANN --fix
 uv run ruff format .
 
-# Type check
+# Type check (zero errors required)
 uv run ty check
 
 # Tests
 uv run pytest tests/ -v -n auto
 uv run pytest tests/ --cov=src/npcc --cov-report=term-missing -v -n auto
 
-# Demo notebook
-uv run marimo edit notebooks/gcbicop_demo.py
+# Run the demo notebook end-to-end
+uv run jupyter nbconvert --to notebook --execute --inplace notebooks/pfnr_bicop_demo.ipynb
 ```
+
+The test suite contains an integration test
+(`tests/test_pfnr_bicop.py::test_real_tabpfn_smoke`) that hits the real
+TabPFN-v2.5 model.  It is skipped automatically when `TABPFN_TOKEN` is
+unset or when the PriorLabs license endpoint is unreachable, so the
+default unit-test surface stays hermetic.
