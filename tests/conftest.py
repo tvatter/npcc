@@ -37,7 +37,7 @@ _TABPFN_REGRESSOR_TARGETS = (
 
 
 class _UniformCriterion:
-  """Fake ``criterion.pdf`` returning ``Z ~ Uniform(-2, 2)``."""
+  """Fake ``criterion`` for ``Z ~ Uniform(-2, 2)``: linear CDF and constant PDF."""
 
   Q_LO: float = -2.0
   Q_HI: float = 2.0
@@ -49,6 +49,20 @@ class _UniformCriterion:
       in_support,
       torch.full_like(z_flat, 1.0 / (self.Q_HI - self.Q_LO)),
       torch.zeros_like(z_flat),
+    )
+
+  def cdf(self, logits: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+    z_flat = z.reshape(-1)
+    return torch.clamp((z_flat - self.Q_LO) / (self.Q_HI - self.Q_LO), 0.0, 1.0)
+
+  def icdf(self, logits: torch.Tensor, left_prob: float) -> torch.Tensor:
+    """Inverse CDF: ``Q(alpha) = -2 + 4 * alpha``.  Returns shape ``(n,)``."""
+    n = logits.shape[0]
+    return torch.full(
+      (n,),
+      self.Q_LO + (self.Q_HI - self.Q_LO) * float(left_prob),
+      dtype=torch.float32,
+      device=logits.device,
     )
 
 

@@ -130,3 +130,72 @@ class TestQuantileDensity1D:
     qd = TabPFNQuantileDensity1D(transform=bad)
     with pytest.raises(ValueError, match="Unknown transform"):
       qd._transform_y(np.array([0.5]))
+
+  # CDF tests ---------------------------------------------------------
+
+  def test_cdf_rejects_length_mismatch(self, patch_uniform: None) -> None:
+    qd = TabPFNQuantileDensity1D(transform="logit")
+    qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
+    with pytest.raises(ValueError, match="incompatible"):
+      qd.cdf(np.zeros((5, 1)), np.full(6, 0.5))
+
+  def test_cdf_logit_matches_analytic(self, patch_uniform: None) -> None:
+    """F_Y(y) = clip((logit(y)+2)/4, 0, 1) under the uniform fake."""
+    qd = TabPFNQuantileDensity1D(transform="logit")
+    qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
+
+    y = np.array([0.3, 0.5, 0.7])
+    w = np.zeros((len(y), 1))
+    actual = qd.cdf(w, y)
+    expected = np.clip((np.log(y / (1 - y)) + 2.0) / 4.0, 0.0, 1.0)
+    np.testing.assert_allclose(actual, expected, atol=1e-3)
+
+  def test_cdf_outside_support_clips_to_alpha_bounds(
+    self, patch_uniform: None
+  ) -> None:
+    """Below qi[0] returns alpha_min; above qi[-1] returns alpha_max."""
+    qd = TabPFNQuantileDensity1D(transform="logit")
+    qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
+
+    y = np.array([0.02, 0.98])  # logit ≈ ±3.89, outside (-2, 2)
+    w = np.zeros((len(y), 1))
+    out = qd.cdf(w, y)
+    cfg = qd.config
+    np.testing.assert_allclose(
+      out, np.array([cfg.alpha_min, cfg.alpha_max]), atol=1e-12
+    )
+
+  def test_cdf_monotone_in_y(self, patch_uniform: None) -> None:
+    qd = TabPFNQuantileDensity1D(transform="logit")
+    qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
+
+    y_sorted = np.linspace(0.05, 0.95, 20)
+    w = np.zeros((len(y_sorted), 1))
+    cdf_vals = qd.cdf(w, y_sorted)
+    assert (np.diff(cdf_vals) >= -1e-9).all()
+
+  # icdf tests --------------------------------------------------------
+
+  def test_icdf_matches_analytic(self, patch_uniform: None) -> None:
+    """Q(α | w) = sigmoid(-2 + 4α) under Z ~ Uniform(-2, 2) + logit."""
+    qd = TabPFNQuantileDensity1D(transform="logit")
+    qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
+
+    alphas = np.array([0.1, 0.3, 0.5, 0.7, 0.9])
+    w = np.zeros((len(alphas), 1))
+    y_hat = qd.icdf(w, alphas)
+    z_expected = -2.0 + 4.0 * alphas
+    expected = 1.0 / (1.0 + np.exp(-z_expected))
+    np.testing.assert_allclose(y_hat, expected, atol=1e-3)
+
+  def test_icdf_rejects_alpha_outside_unit(self, patch_uniform: None) -> None:
+    qd = TabPFNQuantileDensity1D(transform="logit")
+    qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
+    with pytest.raises(ValueError, match="strictly inside"):
+      qd.icdf(np.zeros((2, 1)), np.array([0.5, 0.0]))
+
+  def test_icdf_rejects_length_mismatch(self, patch_uniform: None) -> None:
+    qd = TabPFNQuantileDensity1D(transform="logit")
+    qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
+    with pytest.raises(ValueError, match="incompatible"):
+      qd.icdf(np.zeros((5, 1)), np.array([0.5]))
