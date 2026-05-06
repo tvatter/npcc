@@ -148,6 +148,14 @@ class TabPFNQuantileDensity1D:
       return 1.0 / (y_clip * (1.0 - y_clip))
     raise ValueError(f"Unknown transform: {self.transform}")
 
+  def _inverse_transform(self, z: np.ndarray) -> np.ndarray:
+    """Map z-space samples back to the y-scale (inverse of ``_transform_y``)."""
+    if self.transform == "identity":
+      return z
+    if self.transform == "logit":
+      return 1.0 / (1.0 + np.exp(-z))  # sigmoid
+    raise ValueError(f"Unknown transform: {self.transform}")
+
   def fit(self, w: ArrayLike, y: ArrayLike) -> Self:
     """Fit a TabPFN-v2.5 regressor on ``(w, transform(y))``.
 
@@ -168,23 +176,19 @@ class TabPFNQuantileDensity1D:
     self.model_.fit(w_arr, z)
     return self
 
-  def density(self, w: ArrayLike, y: ArrayLike) -> np.ndarray:
-    """Return ``f(y_i | w_i)`` for each row ``i``.
+  def _predict_quantile_table(
+    self, w_arr: np.ndarray
+  ) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(q_sorted [n_obs, n_alphas], alphas [n_alphas])``.
 
-    ``w`` and ``y`` must have the same number of rows.  Out-of-support
-    queries (``z`` outside the predicted quantile range) return ``0``.
+    Single TabPFN forward pass; rows of ``q_sorted`` are sorted to
+    enforce monotonicity (rearrangement) regardless of TabPFN's
+    output orientation.
     """
     if self.model_ is None:
       raise RuntimeError("The model is not fitted.")
 
-    w_arr = _as_2d(w)
-    y_arr = np.asarray(y, dtype=float).reshape(-1)
-    if len(y_arr) != w_arr.shape[0]:
-      raise ValueError("w and y have incompatible lengths.")
-
-    z = self._transform_y(y_arr)
     alphas = self.config.alphas()
-
     q_pred = self.model_.predict(
       w_arr,
       output_type="quantiles",
@@ -208,10 +212,27 @@ class TabPFNQuantileDensity1D:
         f"or {(n_obs, len(alphas))}."
       )
 
+    return np.sort(q, axis=1), alphas
+
+  def density(self, w: ArrayLike, y: ArrayLike) -> np.ndarray:
+    """Return ``f(y_i | w_i)`` for each row ``i``.
+
+    ``w`` and ``y`` must have the same number of rows.  Out-of-support
+    queries (``z`` outside the predicted quantile range) return ``0``.
+    """
+    w_arr = _as_2d(w)
+    y_arr = np.asarray(y, dtype=float).reshape(-1)
+    if len(y_arr) != w_arr.shape[0]:
+      raise ValueError("w and y have incompatible lengths.")
+
+    z = self._transform_y(y_arr)
+    q_sorted, alphas = self._predict_quantile_table(w_arr)
+    n_obs = w_arr.shape[0]
+
     dens_z = np.empty(n_obs, dtype=float)
 
     for i in range(n_obs):
-      qi = np.sort(q[i])
+      qi = q_sorted[i]
       dq_da = np.gradient(qi, alphas)
       dq_da = np.maximum(dq_da, self.config.min_qprime)
       f_at_q = 1.0 / dq_da
@@ -224,3 +245,54 @@ class TabPFNQuantileDensity1D:
         dens_z[i] = np.interp(alpha_i, alphas, f_at_q)
 
     return dens_z * self._jacobian_inverse(y_arr)
+
+  def cdf(self, w: ArrayLike, y: ArrayLike) -> np.ndarray:
+    """Return ``F(y_i | w_i) = P(Y <= y_i | W = w_i)`` per row.
+
+    Computed by inverting the quantile table: ``F(y | w) = α`` such
+    that ``Q(α | w) = transform(y)``.  Linear interpolation between
+    grid alphas; ``np.interp``'s flat extrapolation outside the
+    empirical quantile range yields ``alpha_min`` / ``alpha_max``,
+    matching the support of the alpha grid.
+
+    No Jacobian correction: monotone transforms preserve the CDF, so
+    ``F_Y(y | w) = F_Z(transform(y) | w)``.
+    """
+    w_arr = _as_2d(w)
+    y_arr = np.asarray(y, dtype=float).reshape(-1)
+    if len(y_arr) != w_arr.shape[0]:
+      raise ValueError("w and y have incompatible lengths.")
+
+    z = self._transform_y(y_arr)
+    q_sorted, alphas = self._predict_quantile_table(w_arr)
+    n_obs = w_arr.shape[0]
+
+    cdf_z = np.empty(n_obs, dtype=float)
+    for i in range(n_obs):
+      cdf_z[i] = np.interp(z[i], q_sorted[i], alphas)
+
+    return cdf_z
+
+  def icdf(self, w: ArrayLike, alphas: ArrayLike) -> np.ndarray:
+    """Per-row conditional quantile ``F^{-1}(alphas_i | w_i)`` on the y-scale.
+
+    For each row ``i``, returns ``y`` such that
+    ``F(y | w_i) = alphas_i``.  Implemented as linear interpolation in
+    the predicted quantile table: ``Q(alphas_i | w_i)``.  Used by the
+    Rosenblatt simulation recipe behind :py:meth:`PFNRBicop.tau`.
+    """
+    w_arr = _as_2d(w)
+    alpha_arr = np.asarray(alphas, dtype=float).reshape(-1)
+    if len(alpha_arr) != w_arr.shape[0]:
+      raise ValueError("w and alphas have incompatible lengths.")
+    if np.any((alpha_arr <= 0.0) | (alpha_arr >= 1.0)):
+      raise ValueError("alphas must lie strictly inside (0, 1).")
+
+    q_sorted, table_alphas = self._predict_quantile_table(w_arr)
+    n_obs = w_arr.shape[0]
+
+    z_out = np.empty(n_obs, dtype=float)
+    for i in range(n_obs):
+      z_out[i] = np.interp(alpha_arr[i], table_alphas, q_sorted[i])
+
+    return self._inverse_transform(z_out)

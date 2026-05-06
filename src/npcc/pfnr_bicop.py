@@ -270,18 +270,358 @@ class PFNRBicop:
 
     return 0.5 * (c_v_given_u + c_u_given_v)
 
+  # -------------------------------------------------------------------
+  # h-functions (conditional CDFs along one axis)
+  #
+  # We follow pyvinecopulib's numbering convention: ``hfunc_i``
+  # conditions on the i-th argument:
+  #
+  #   hfunc1(u, v | x) = P(V <= v | U = u, X = x) = F_{V | U, X}(v|u,x)
+  #   hfunc2(u, v | x) = P(U <= u | V = v, X = x) = F_{U | V, X}(u|v,x)
+  #
+  # Equivalently, hfunc1 = ∂C/∂u and hfunc2 = ∂C/∂v.
+  # -------------------------------------------------------------------
+
+  def hfunc1(
+    self,
+    u: ArrayLike,
+    v: ArrayLike,
+    x: ArrayLike | None = None,
+  ) -> np.ndarray:
+    """``h_1(u, v | x) = P(V ≤ v | U = u, X = x) = F_{V | U, X}(v | u, x)``.
+
+    Always available (the V|U regressor is always fitted).  This is a
+    direct read of the inner regressor's conditional CDF — no
+    integration, one batched ``criterion.cdf`` (or quantile-table
+    interpolation) call.
+
+    Convention matches :py:meth:`pyvinecopulib.Bicop.hfunc1`:
+    ``hfunc1`` conditions on the first argument.
+    """
+    u_arr, v_arr = _check_uv(u, v, self.density_config.eps)
+    x_arr = self._default_x(len(u_arr)) if x is None else _as_2d(x)
+
+    if x_arr.shape[0] != len(u_arr):
+      raise ValueError("x, u, and v must have the same number of observations.")
+
+    return self.v_given_ux_.cdf(self._features(u_arr, x_arr), v_arr)
+
+  def hfunc2(
+    self,
+    u: ArrayLike,
+    v: ArrayLike,
+    x: ArrayLike | None = None,
+  ) -> np.ndarray:
+    """``h_2(u, v | x) = P(U ≤ u | V = v, X = x) = F_{U | V, X}(u | v, x)``.
+
+    Requires ``symmetric=True`` (the U|V regressor must have been
+    fitted).  For ``symmetric=False`` this raises with a clear pointer
+    to the workaround: fit a second :class:`PFNRBicop` with
+    ``(u, v)`` swapped.
+
+    Convention matches :py:meth:`pyvinecopulib.Bicop.hfunc2`:
+    ``hfunc2`` conditions on the second argument.
+    """
+    if self.u_given_vx_ is None:
+      raise RuntimeError(
+        "hfunc2 requires symmetric=True. Refit with "
+        "PFNRBicop(symmetric=True), or fit a second PFNRBicop with "
+        "(u, v) arguments swapped."
+      )
+
+    u_arr, v_arr = _check_uv(u, v, self.density_config.eps)
+    x_arr = self._default_x(len(u_arr)) if x is None else _as_2d(x)
+
+    if x_arr.shape[0] != len(u_arr):
+      raise ValueError("x, u, and v must have the same number of observations.")
+
+    return self.u_given_vx_.cdf(self._features(v_arr, x_arr), u_arr)
+
+  # -------------------------------------------------------------------
+  # Joint CDF
+  # -------------------------------------------------------------------
+
+  def cdf(
+    self,
+    u: ArrayLike,
+    v: ArrayLike,
+    x: ArrayLike | None = None,
+    *,
+    n_int: int = 64,
+  ) -> np.ndarray:
+    """Joint CDF ``C(u_i, v_i | x_i)`` evaluated row-by-row.
+
+    Trapezoidal integration of the inner conditional CDF over the
+    Rosenblatt direction:
+
+        C(u, v | x) = ∫_0^u F_{V | U, X}(v | s, x) ds       (asymmetric)
+        C^sym(u, v | x) = 0.5 (∫_0^u F_{V|U,X}(v|s,x) ds
+                               + ∫_0^v F_{U|V,X}(u|t,x) dt) (symmetric)
+
+    ``n_int`` is the number of trapezoid steps along the integration
+    axis; 64 is plenty for the typical bivariate copula.
+    """
+    if n_int < 2:
+      raise ValueError("n_int must be at least 2.")
+
+    u_arr, v_arr = _check_uv(u, v, self.density_config.eps)
+    x_arr = self._default_x(len(u_arr)) if x is None else _as_2d(x)
+
+    if x_arr.shape[0] != len(u_arr):
+      raise ValueError("x, u, and v must have the same number of observations.")
+
+    cdf_v_dir = self._integrate_one_direction(
+      upper=u_arr,
+      conditioned=v_arr,
+      x=x_arr,
+      module=self.v_given_ux_,
+      first_arg_is_integration_var=True,
+      n_int=n_int,
+    )
+
+    if not self.symmetric:
+      return cdf_v_dir
+
+    assert self.u_given_vx_ is not None
+    cdf_u_dir = self._integrate_one_direction(
+      upper=v_arr,
+      conditioned=u_arr,
+      x=x_arr,
+      module=self.u_given_vx_,
+      first_arg_is_integration_var=True,
+      n_int=n_int,
+    )
+    return 0.5 * (cdf_v_dir + cdf_u_dir)
+
+  def _integrate_one_direction(
+    self,
+    *,
+    upper: np.ndarray,
+    conditioned: np.ndarray,
+    x: np.ndarray,
+    module: _DensityModule,
+    first_arg_is_integration_var: bool,
+    n_int: int,
+  ) -> np.ndarray:
+    """Compute ∫_eps^{upper_i} F(conditioned_i | s, x_i) ds for each row.
+
+    ``first_arg_is_integration_var=True`` builds features as
+    ``[s | x_i]``, matching the inner regressor's expectation that the
+    first feature column is the conditioning copula coordinate.
+    """
+    eps = self.density_config.eps
+    n = len(upper)
+    upper_safe = np.maximum(upper, eps + 1e-12)
+
+    # s_grids[i, k] = linspace(eps, upper_safe[i], n_int+1)[k]
+    s_grids = np.linspace(eps, upper_safe, n_int + 1).T  # (n, n_int+1)
+
+    s_flat = s_grids.flatten()
+    cond_flat = np.repeat(conditioned, n_int + 1)
+    x_flat = np.repeat(x, n_int + 1, axis=0)
+
+    if first_arg_is_integration_var:
+      feats = self._features(s_flat, x_flat)
+    else:  # pragma: no cover - kept for future asymmetric h₁ extension
+      feats = self._features(cond_flat, x_flat)
+
+    F_flat = module.cdf(feats, cond_flat)
+    F_grid = F_flat.reshape(n, n_int + 1)
+
+    # Per-row trapezoidal integral over the s axis.
+    ds = np.diff(s_grids, axis=1)  # (n, n_int)
+    avgs = 0.5 * (F_grid[:, :-1] + F_grid[:, 1:])  # (n, n_int)
+    return np.sum(avgs * ds, axis=1)
+
+  def cdf_grid(
+    self,
+    u_grid: ArrayLike,
+    v_grid: ArrayLike,
+    x_row: ArrayLike | None = None,
+    *,
+    n_int: int = 64,
+  ) -> np.ndarray:
+    """Cartesian-grid joint CDF ``out[i, j] = C(u_grid[i], v_grid[j] | x_row)``.
+
+    Requires ``method="criterion"`` (uses the inner ``cdf_grid`` fast
+    path).  Builds a single shared fine ``s``-grid covering
+    ``[eps, max(u_grid)]``, evaluates the inner CDF on the
+    Cartesian product ``(s_fine × v_grid)`` in one TabPFN forward
+    pass per row of ``s_fine``, then for each ``u_grid[i]`` reads off
+    the cumulative trapezoidal integral up to ``u_grid[i]`` via
+    interpolation. Symmetric case averages the analogous ``v``-axis
+    integral.
+    """
+    if self.method != "criterion" or not isinstance(
+      self.v_given_ux_, TabPFNDensity1D
+    ):
+      raise RuntimeError("cdf_grid is only available when method='criterion'.")
+    if n_int < 2:
+      raise ValueError("n_int must be at least 2.")
+
+    u_arr = np.asarray(u_grid, dtype=float).reshape(-1)
+    v_arr = np.asarray(v_grid, dtype=float).reshape(-1)
+    if np.any((u_arr <= 0.0) | (u_arr >= 1.0)) or np.any(
+      (v_arr <= 0.0) | (v_arr >= 1.0)
+    ):
+      raise ValueError("u_grid and v_grid must lie strictly inside (0, 1).")
+
+    eps = self.density_config.eps
+    u_arr = np.clip(u_arr, eps, 1.0 - eps)
+    v_arr = np.clip(v_arr, eps, 1.0 - eps)
+
+    if x_row is None:
+      x_row_arr = np.ones((1, 1), dtype=float)
+    else:
+      x_row_arr = _as_2d(x_row)
+      if x_row_arr.shape[0] != 1:
+        raise ValueError("x_row must contain exactly one row.")
+
+    cdf_v_dir = self._integrate_grid_one_direction(
+      upper_grid=u_arr,
+      conditioned_grid=v_arr,
+      x_row=x_row_arr,
+      module=self.v_given_ux_,
+      n_int=n_int,
+    )
+
+    if not self.symmetric:
+      return cdf_v_dir
+
+    assert isinstance(self.u_given_vx_, TabPFNDensity1D)
+    # Returns (n_v, n_u); transpose to align with cdf_v_dir.
+    cdf_u_dir = self._integrate_grid_one_direction(
+      upper_grid=v_arr,
+      conditioned_grid=u_arr,
+      x_row=x_row_arr,
+      module=self.u_given_vx_,
+      n_int=n_int,
+    ).T
+
+    return 0.5 * (cdf_v_dir + cdf_u_dir)
+
+  def _integrate_grid_one_direction(
+    self,
+    *,
+    upper_grid: np.ndarray,
+    conditioned_grid: np.ndarray,
+    x_row: np.ndarray,
+    module: TabPFNDensity1D,
+    n_int: int,
+  ) -> np.ndarray:
+    """Compute ∫_0^{upper_grid[i]} F(conditioned_grid[j] | s, x_row) ds.
+
+    Returns shape ``(len(upper_grid), len(conditioned_grid))``.
+    """
+    eps = self.density_config.eps
+    n_u, n_v = len(upper_grid), len(conditioned_grid)
+
+    # Shared fine s-grid covering [eps, max(upper_grid)].
+    s_fine = np.linspace(eps, max(upper_grid.max(), eps + 1e-12), n_int + 1)
+
+    x_for_s = np.repeat(x_row, len(s_fine), axis=0)
+    feats = self._features(s_fine, x_for_s)
+    # F_table[j, k] = F(conditioned_grid[k] | s_fine[j], x_row)
+    F_table = module.cdf_grid(feats, conditioned_grid)  # (n_int+1, n_v)
+
+    # Cumulative trapezoid along axis=0.
+    ds = np.diff(s_fine)  # (n_int,)
+    avgs = 0.5 * (F_table[:-1] + F_table[1:])  # (n_int, n_v)
+    cum = np.zeros((len(s_fine), n_v))
+    cum[1:] = np.cumsum(avgs * ds[:, None], axis=0)
+
+    # For each upper_grid[i], interpolate cum at s = upper_grid[i].
+    out = np.empty((n_u, n_v), dtype=float)
+    for j in range(n_v):
+      out[:, j] = np.interp(upper_grid, s_fine, cum[:, j])
+    return out
+
+  # -------------------------------------------------------------------
+  # Kendall's tau (sample-based, mirroring pyvinecopulib's KernelBicop)
+  # -------------------------------------------------------------------
+
+  # Default seeds used by pyvinecopulib's
+  # ``KernelBicop::parameters_to_tau``.  Reusing them gives
+  # byte-identical reproducibility against vinecopulib.
+  _GHALTON_DEFAULT_SEEDS: tuple[int, ...] = (
+    204967043,
+    733593603,
+    184618802,
+    399707801,
+    290266245,
+  )
+
+  def tau(
+    self,
+    x_row: ArrayLike | None = None,
+    *,
+    n: int = 1000,
+    seeds: list[int] | None = None,
+  ) -> float:
+    """Kendall's τ via the recipe used by ``pv.KernelBicop::parameters_to_tau``.
+
+    1. Draw a deterministic 2-D Generalised-Halton quasi-random sample
+       ``(u_i, alpha_i)`` of size ``n`` via :func:`pyvinecopulib.ghalton`.
+    2. Apply the inverse Rosenblatt transform along the first axis:
+       ``v_i = F_{V | U, X}^{-1}(alpha_i | u_i, x_row)``.  The
+       resulting ``(u_i, v_i)`` pairs are distributed according to the
+       fitted copula.
+    3. Return the weighted (rank-)Kendall ``τ`` of the sample via
+       :func:`pyvinecopulib.wdm`.
+
+    Quasi-random sampling and the closed-form ``criterion.icdf`` (or
+    interpolation in the quantile table) make this much more accurate
+    than a grid-based integral, especially when the copula has heavy
+    tail dependence (e.g. Clayton near the lower-left corner).
+    Available for both density-recovery methods.
+    """
+    if n < 10:
+      raise ValueError("n must be at least 10.")
+
+    if seeds is None:
+      seeds_list = list(self._GHALTON_DEFAULT_SEEDS)
+    else:
+      seeds_list = list(seeds)
+
+    from pyvinecopulib import ghalton, wdm
+
+    quasi = np.asarray(ghalton(n, 2, seeds_list), dtype=float)
+    u = np.clip(
+      quasi[:, 0], self.density_config.eps, 1.0 - self.density_config.eps
+    )
+    alpha = np.clip(
+      quasi[:, 1], self.density_config.eps, 1.0 - self.density_config.eps
+    )
+
+    if x_row is None:
+      x_arr = self._default_x(n)
+    else:
+      x_row_arr = _as_2d(x_row)
+      if x_row_arr.shape[0] != 1:
+        raise ValueError("x_row must contain exactly one row.")
+      x_arr = np.repeat(x_row_arr, n, axis=0)
+
+    # Inverse Rosenblatt: v = F_{V | U, X}^{-1}(alpha | u, x).
+    v = self.v_given_ux_.icdf(self._features(u, x_arr), alpha)
+
+    return float(wdm(u, v, "tau"))
+
+  # -------------------------------------------------------------------
+  # Diagnostic CDF (kept for backward compatibility)
+  # -------------------------------------------------------------------
+
   def conditional_cdf_v_given_u(
     self,
     u: ArrayLike,
     v_grid: ArrayLike,
     x: ArrayLike | None = None,
   ) -> np.ndarray:
-    """Numerical CDF estimate ``C_{V | U, X}(v | u_i, x_i)`` on a grid.
+    """``C_{V | U, X}(v_grid[j] | u_i, x_i)`` on a grid of ``v`` values.
 
-    Trapezoidal integration of :py:meth:`density` along ``v_grid``,
-    then renormalised so the last column equals one.  Mainly a
-    diagnostic; for production use, expose TabPFN quantiles directly
-    or fit a calibrated monotone CDF smoother.
+    Thin wrapper over :py:meth:`hfunc1` (which conditions on ``u`` per
+    pyvinecopulib convention) that broadcasts each ``u_i`` against
+    ``v_grid``.  Inputs are validated to lie strictly inside
+    ``(0, 1)`` and ``v_grid`` must be strictly increasing.
     """
     u_arr = np.asarray(u, dtype=float).reshape(-1)
     x_arr = self._default_x(len(u_arr)) if x is None else _as_2d(x)
@@ -294,23 +634,11 @@ class PFNRBicop:
     if v_arr[0] <= 0.0 or v_arr[-1] >= 1.0:
       raise ValueError("v_grid must lie strictly inside (0, 1).")
 
-    out = np.empty((len(u_arr), len(v_arr)), dtype=float)
-
-    for i in range(len(u_arr)):
-      ui = np.repeat(u_arr[i], len(v_arr))
-      xi = np.repeat(x_arr[i : i + 1], len(v_arr), axis=0)
-      dens = self.v_given_ux_.density(self._features(ui, xi), v_arr)
-      cdf = np.concatenate(
-        [
-          np.array([0.0]),
-          np.cumsum(0.5 * (dens[1:] + dens[:-1]) * np.diff(v_arr)),
-        ]
-      )
-      if cdf[-1] > 0:
-        cdf = cdf / cdf[-1]
-      out[i] = np.clip(cdf, 0.0, 1.0)
-
-    return out
+    n_u, n_v = len(u_arr), len(v_arr)
+    u_flat = np.repeat(u_arr, n_v)
+    v_flat = np.tile(v_arr, n_u)
+    x_flat = np.repeat(x_arr, n_v, axis=0)
+    return self.hfunc1(u_flat, v_flat, x_flat).reshape(n_u, n_v)
 
   # -------------------------------------------------------------------
   # pyvinecopulib-compatible plotting interface.

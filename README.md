@@ -99,7 +99,12 @@ direct than the criterion approach, but model-agnostic.
 | `density(u, v, x=None)`             | Pointwise $\hat c(u_i, v_i \mid x_i)$ (vectorised over rows).                    |
 | `log_density(u, v, x=None)`         | $\log$ of `density`, floored at the smallest positive float.                     |
 | `density_grid(u_grid, v_grid, x_row=None)` | Cartesian-grid density `out[i, j] = c(u_grid[i], v_grid[j] | x_row)`.  Requires `method="criterion"`. |
-| `conditional_cdf_v_given_u(u, v_grid, x=None)` | Trapezoidal CDF estimate of $C_{V \mid U, X}$ along `v_grid`. Diagnostic.  |
+| `cdf(u, v, x=None, *, n_int=64)`    | Pointwise joint CDF $\hat C(u_i, v_i \mid x_i)$, trapezoidal in $s$ (and $t$ for symmetric). |
+| `cdf_grid(u_grid, v_grid, x_row=None, *, n_int=64)` | Cartesian-grid joint CDF.  Requires `method="criterion"`.            |
+| `hfunc1(u, v, x=None)`              | $h_1(u, v \mid x) = \partial C / \partial u = F_{V \mid U, X}(v \mid u, x)$.  Always available.  Conditions on the first argument (matches `pyvinecopulib`). |
+| `hfunc2(u, v, x=None)`              | $h_2(u, v \mid x) = \partial C / \partial v = F_{U \mid V, X}(u \mid v, x)$.  Requires `symmetric=True`. |
+| `tau(x_row=None, *, n=1000, seeds=None)` | Kendall's $\tau(x)$ via [pyvinecopulib](https://github.com/vinecopulib/pyvinecopulib)'s recipe: quasi-random `ghalton(n, 2)` + inverse-Rosenblatt + `wdm`. Matches `pv.KernelBicop::parameters_to_tau`. |
+| `conditional_cdf_v_given_u(u, v_grid, x=None)` | Diagnostic: $C_{V \mid U, X}(v \mid u_i)$ broadcast over `v_grid`.  Wraps `hfunc2`. |
 | `as_bicop(x_row=None)`              | Returns a [`pyvinecopulib`](https://github.com/vinecopulib/pyvinecopulib)-compatible adapter (exposes `var_types = ["c", "c"]` and `pdf(uv)`). |
 | `plot(*, x_row=None, plot_type="contour", margin_type="norm", ...)` | Renders a contour or surface plot via `pyvinecopulib`'s plotter (lazy-imports `matplotlib`). |
 
@@ -137,6 +142,15 @@ u_grid = np.linspace(0.05, 0.95, 30)
 v_grid = np.linspace(0.05, 0.95, 30)
 grid = model.density_grid(u_grid, v_grid)   # shape (30, 30)
 
+# Joint CDF and h-functions (pyvinecopulib convention: h_i conditions on i-th arg)
+C = model.cdf_grid(u_grid, v_grid)            # shape (30, 30)
+h1 = model.hfunc1(np.array([0.3, 0.5]), np.array([0.4, 0.6]))   # F_{V|U,X}
+# h2 = model.hfunc2(...)  # F_{U|V,X}, requires symmetric=True
+
+# Kendall's tau via the pyvinecopulib quasi-random recipe.
+tau = model.tau()
+# Clayton(theta=3) analytic: theta / (theta + 2) = 0.6.
+
 # Plot via pyvinecopulib's helper (matplotlib)
 model.plot(plot_type="contour", margin_type="norm")
 ```
@@ -167,8 +181,9 @@ model.plot(x_row=np.array([[1.5, -0.5]]))
 A worked end-to-end demo lives at
 [`notebooks/pfnr_bicop_demo.ipynb`](notebooks/pfnr_bicop_demo.ipynb).
 It simulates from a Clayton copula, fits `PFNRBicop`, compares against
-the `pv.tll` benchmark on a regular grid (ISE / IAE / KL), and renders
-contour plots for the truth, `tll`, and `PFNRBicop`.
+the `pv.tll` benchmark on a regular grid (ISE / IAE / KL), renders
+contour plots for the truth, `tll`, and `PFNRBicop`, then prints
+Kendall's tau and a side-by-side joint-CDF heatmap.
 
 ```bash
 uv run jupyter lab notebooks/pfnr_bicop_demo.ipynb

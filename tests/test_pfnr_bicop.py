@@ -306,6 +306,226 @@ class TestPFNRConditionalCdf:
 
 
 # ===========================================================================
+# h-functions
+# ===========================================================================
+
+
+def _analytic_F_y(y: np.ndarray) -> np.ndarray:
+  """F_Y(y) = clip((logit(y) + 2) / 4, 0, 1) under the uniform fake."""
+  return np.clip((np.log(y / (1.0 - y)) + 2.0) / 4.0, 0.0, 1.0)
+
+
+@pytest.mark.parametrize("method", ["quantiles", "criterion"])
+class TestPFNRHfunc1:
+  """``hfunc1(u, v) = F_{V|U}(v|u)`` — conditions on the first arg.
+
+  Always available (V|U regressor is always fitted), pyvinecopulib
+  convention.
+  """
+
+  def test_shape(self, patch_uniform: None, method: str) -> None:
+    m = make_pfnr(method=method).fit(
+      np.linspace(0.1, 0.9, 30), np.linspace(0.1, 0.9, 30)
+    )
+    u = np.array([0.3, 0.5, 0.7])
+    v = np.array([0.4, 0.5, 0.6])
+    assert m.hfunc1(u, v).shape == (3,)
+
+  def test_matches_analytic_uniform(
+    self, patch_uniform: None, method: str
+  ) -> None:
+    """Under the fake, h₁(u, v) = F_Y(v) (constant in u)."""
+    m = make_pfnr(method=method).fit(
+      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+    )
+    u = np.array([0.3, 0.5, 0.7])
+    v = np.array([0.3, 0.5, 0.7])
+    actual = m.hfunc1(u, v)
+    expected = _analytic_F_y(v)
+    np.testing.assert_allclose(actual, expected, atol=1e-3)
+
+  def test_monotone_in_v(self, patch_uniform: None, method: str) -> None:
+    m = make_pfnr(method=method).fit(
+      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+    )
+    v_sorted = np.linspace(0.1, 0.9, 15)
+    u_const = np.full(len(v_sorted), 0.5)
+    h = m.hfunc1(u_const, v_sorted)
+    assert (np.diff(h) >= -1e-9).all()
+
+  def test_boundary_values(self, patch_uniform: None, method: str) -> None:
+    m = make_pfnr(method=method).fit(
+      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+    )
+    # logit(0.05) = -2.94 < -2 → F → 0; logit(0.95) = 2.94 > 2 → F → 1.
+    h_low = m.hfunc1(np.array([0.5]), np.array([0.05]))
+    h_high = m.hfunc1(np.array([0.5]), np.array([0.95]))
+    assert h_low[0] < 0.05
+    assert h_high[0] > 0.95
+
+
+@pytest.mark.parametrize("method", ["quantiles", "criterion"])
+class TestPFNRHfunc2:
+  """``hfunc2(u, v) = F_{U|V}(u|v)`` — conditions on the second arg.
+
+  Requires ``symmetric=True`` (U|V regressor must exist).
+  """
+
+  def test_symmetric_returns_F_U_given_V(
+    self, patch_uniform: None, method: str
+  ) -> None:
+    m = make_pfnr(symmetric=True, method=method).fit(
+      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+    )
+    u = np.array([0.3, 0.5, 0.7])
+    v = np.array([0.4, 0.5, 0.6])
+    assert m.u_given_vx_ is not None
+    expected = m.u_given_vx_.cdf(np.column_stack([v, np.ones(len(u))]), u)
+    np.testing.assert_allclose(m.hfunc2(u, v), expected, atol=1e-12)
+
+  def test_asymmetric_raises(self, patch_uniform: None, method: str) -> None:
+    m = make_pfnr(symmetric=False, method=method).fit(
+      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+    )
+    with pytest.raises(RuntimeError, match="symmetric"):
+      m.hfunc2(np.array([0.5]), np.array([0.5]))
+
+
+# ===========================================================================
+# Joint CDF
+# ===========================================================================
+
+
+@pytest.mark.parametrize("method", ["quantiles", "criterion"])
+class TestPFNRCdf:
+  def test_shape(self, patch_uniform: None, method: str) -> None:
+    m = make_pfnr(method=method).fit(
+      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+    )
+    u = np.array([0.3, 0.5, 0.7])
+    v = np.array([0.4, 0.5, 0.6])
+    assert m.cdf(u, v).shape == (3,)
+
+  def test_independent_factorisation(
+    self, patch_uniform: None, method: str
+  ) -> None:
+    """Under the fake (Z independent of W), C(u, v) ≈ F_Y(u) F_Y(v)."""
+    m = make_pfnr(method=method).fit(
+      np.linspace(0.1, 0.9, 30), np.linspace(0.1, 0.9, 30)
+    )
+    u = np.array([0.3, 0.5, 0.7])
+    v = np.array([0.6, 0.5, 0.4])
+    actual = m.cdf(u, v, n_int=128)
+    expected = _analytic_F_y(u) * _analytic_F_y(v)
+    np.testing.assert_allclose(actual, expected, atol=2e-2)
+
+  def test_rejects_uv_outside_unit(
+    self, patch_uniform: None, method: str
+  ) -> None:
+    m = make_pfnr(method=method).fit(
+      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+    )
+    with pytest.raises(ValueError, match="strictly inside"):
+      m.cdf(np.array([0.5, 0.0]), np.array([0.3, 0.4]))
+
+  def test_rejects_bad_n_int(self, patch_uniform: None, method: str) -> None:
+    m = make_pfnr(method=method).fit(
+      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+    )
+    with pytest.raises(ValueError, match="n_int"):
+      m.cdf(np.array([0.5]), np.array([0.5]), n_int=1)
+
+
+class TestPFNRCdfGrid:
+  def _fit(self) -> PFNRBicop:
+    return make_pfnr(method="criterion").fit(
+      np.linspace(0.1, 0.9, 30), np.linspace(0.1, 0.9, 30)
+    )
+
+  def test_shape(self, patch_uniform: None) -> None:
+    m = self._fit()
+    u_g = np.linspace(0.1, 0.9, 5)
+    v_g = np.linspace(0.1, 0.9, 7)
+    out = m.cdf_grid(u_g, v_g)
+    assert out.shape == (5, 7)
+
+  def test_matches_pointwise_cdf(self, patch_uniform: None) -> None:
+    m = self._fit()
+    u_g = np.linspace(0.2, 0.8, 4)
+    v_g = np.linspace(0.2, 0.8, 4)
+    grid = m.cdf_grid(u_g, v_g, n_int=128)
+
+    u_tile = np.repeat(u_g, len(v_g))
+    v_tile = np.tile(v_g, len(u_g))
+    expected = m.cdf(u_tile, v_tile, n_int=128).reshape(len(u_g), len(v_g))
+    np.testing.assert_allclose(grid, expected, atol=2e-2)
+
+  def test_rejects_quantiles_method(self, patch_uniform: None) -> None:
+    m = make_pfnr(method="quantiles").fit(
+      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+    )
+    with pytest.raises(RuntimeError, match="method='criterion'"):
+      m.cdf_grid(np.array([0.3, 0.5]), np.array([0.4, 0.6]))
+
+  def test_rejects_grid_outside_unit(self, patch_uniform: None) -> None:
+    m = self._fit()
+    with pytest.raises(ValueError, match="strictly inside"):
+      m.cdf_grid(np.array([0.0, 0.5]), np.array([0.3, 0.6]))
+
+
+# ===========================================================================
+# Kendall's tau
+# ===========================================================================
+
+
+@pytest.mark.parametrize("method", ["quantiles", "criterion"])
+class TestPFNRTau:
+  """Sample-based τ via ghalton + inverse-Rosenblatt + wdm.
+
+  Mirrors pyvinecopulib's ``KernelBicop::parameters_to_tau``.
+  """
+
+  def test_independent_components_tau_near_zero(
+    self, patch_uniform: None, method: str
+  ) -> None:
+    """Under the fake, Z components are independent → τ ≈ 0."""
+    m = make_pfnr(method=method).fit(
+      np.linspace(0.1, 0.9, 30), np.linspace(0.1, 0.9, 30)
+    )
+    tau = m.tau(n=1000)
+    # Quasi-random + wdm should give a small non-zero residual.
+    assert abs(tau) < 0.05
+
+  def test_returns_float_in_range(
+    self, patch_uniform: None, method: str
+  ) -> None:
+    m = make_pfnr(method=method).fit(
+      np.linspace(0.1, 0.9, 30), np.linspace(0.1, 0.9, 30)
+    )
+    tau = m.tau()
+    assert isinstance(tau, float)
+    assert -1.0 <= tau <= 1.0
+
+  def test_rejects_small_n(self, patch_uniform: None, method: str) -> None:
+    m = make_pfnr(method=method).fit(
+      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+    )
+    with pytest.raises(ValueError, match="n must be at least"):
+      m.tau(n=5)
+
+  def test_seeds_make_result_deterministic(
+    self, patch_uniform: None, method: str
+  ) -> None:
+    m = make_pfnr(method=method).fit(
+      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+    )
+    s = [1, 2, 3, 4, 5]
+    tau_a = m.tau(n=200, seeds=s)
+    tau_b = m.tau(n=200, seeds=s)
+    assert tau_a == tau_b
+
+
+# ===========================================================================
 # pyvinecopulib-compatible adapter (as_bicop) and plotting
 # ===========================================================================
 
@@ -402,9 +622,12 @@ def test_real_tabpfn_smoke() -> None:
   pv = pytest.importorskip("pyvinecopulib")
   from tabpfn.errors import TabPFNLicenseError
 
+  # Clayton(theta=3) — strong positive lower-tail dependence,
+  # analytic Kendall's tau = theta / (theta + 2) = 0.6.
+  theta = 3.0
   cop = pv.Bicop(
-    family=pv.BicopFamily.gaussian,
-    parameters=np.array([[0.6]], dtype=np.float64),
+    family=pv.BicopFamily.clayton,
+    parameters=np.array([[theta]], dtype=np.float64),
   )
   rng = np.random.default_rng(42)
   uv = cop.simulate(200, seeds=[int(rng.integers(1, 1_000_000))])
@@ -415,8 +638,29 @@ def test_real_tabpfn_smoke() -> None:
   except TabPFNLicenseError as exc:
     pytest.skip(f"TabPFN authentication unavailable: {exc}")
 
-  dens = m.density(np.array([0.3, 0.5, 0.7]), np.array([0.3, 0.5, 0.7]))
-
+  # Density: finite + positive on a few points.
+  query_u = np.array([0.3, 0.5, 0.7])
+  query_v = np.array([0.3, 0.5, 0.7])
+  dens = m.density(query_u, query_v)
   assert dens.shape == (3,)
   assert np.all(np.isfinite(dens))
   assert np.all(dens > 0)
+
+  # h-function: hfunc1(u, v) = F_{V|U,X}(v|u,x) ∈ [0, 1], monotone in v.
+  v_sorted = np.linspace(0.1, 0.9, 6)
+  u_const = np.full(len(v_sorted), 0.5)
+  h1 = m.hfunc1(u_const, v_sorted)
+  assert h1.shape == (6,)
+  assert (h1 >= 0).all() and (h1 <= 1).all()
+  assert (np.diff(h1) >= -1e-6).all()
+
+  # Joint CDF: in [0, 1] and roughly monotone.
+  big_c = m.cdf(query_u, query_v, n_int=32)
+  assert (big_c >= 0).all() and (big_c <= 1).all()
+
+  # Kendall's tau via ghalton + inverse-Rosenblatt + wdm.  Under
+  # Clayton(3), analytic τ = 0.6.  Quasi-random sampling on a
+  # 200-row fit gets quite close.
+  tau = m.tau(n=1000)
+  assert -1.0 <= tau <= 1.0
+  assert abs(tau - theta / (theta + 2.0)) < 0.1
