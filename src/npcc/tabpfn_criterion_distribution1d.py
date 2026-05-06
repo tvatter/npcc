@@ -1,6 +1,6 @@
 """
-tabpfn_density1d.py — univariate conditional density via TabPFN's
-native distribution head.
+tabpfn_criterion_distribution1d.py — univariate conditional predictive
+distribution via TabPFN's native distribution head.
 
 Approach
 --------
@@ -14,41 +14,40 @@ returns a dictionary with two pieces:
 - ``pred["logits"]``: tensor of shape ``(n_w, n_bins)`` whose rows are
   the unnormalised log-densities over the bins.
 - ``pred["criterion"]``: the ``BarDistribution``-like head used during
-  training; it carries the bin edges and exposes a ``pdf(logits, z)``
-  method that converts logits to per-bin probability mass and then
-  integrates against the bin shape to produce a density at arbitrary
-  evaluation points ``z``.
+  training; it carries the bin edges and exposes ``pdf`` / ``cdf`` /
+  ``icdf`` methods that turn logits into per-bin probability mass and
+  evaluate the corresponding piecewise-linear PDF / CDF / quantile
+  function at arbitrary points ``z``.
 
-The conditional density at ``y`` is therefore one direct call::
-
-    f(y | w) = criterion.pdf(logits(w), z = transform(y)).
-
-Compared to :class:`npcc.tabpfn_quantile_density1d.TabPFNQuantileDensity1D`
+Compared to
+:class:`npcc.tabpfn_quantile_distribution1d.TabPFNQuantileDistribution1D`
 this avoids querying a quantile grid and inverting a numerical
-derivative, so it is faster and typically more accurate, but it is
-specific to TabPFN's binned output.
+derivative for the PDF, so it is faster and typically more accurate,
+but it is specific to TabPFN's binned output.
 
 Logit support transform
 -----------------------
 ``U`` and ``V`` are copula scores in ``(0, 1)``.  When
-``transform="logit"`` we fit on ``Z = logit(Y)`` and convert back
-via the standard Jacobian::
+``transform="logit"`` we fit on ``Z = logit(Y)`` and convert back via
+the standard Jacobian for densities (CDFs and quantiles need no
+correction since monotone transforms preserve them):
 
     f_Y(y | w) = f_Z(logit(y) | w) / (y * (1 - y)).
 
-Cartesian-product evaluation (``density_grid``)
------------------------------------------------
-For diagnostics and grid-based copula plots one often needs the density
-on the full Cartesian product of conditioning rows ``W`` and evaluation
-points ``y_grid``.  ``density_grid`` exploits the fact that a single
-TabPFN forward pass per row of ``W`` is enough — the same logits are
-re-used across every ``y`` value — and is materially faster than
-calling :py:meth:`density` on the explicit tile.
+Cartesian-product evaluation (``pdf_grid`` / ``cdf_grid``)
+----------------------------------------------------------
+For diagnostics and grid-based copula plots one often needs the
+density (or CDF) on the full Cartesian product of conditioning rows
+``W`` and evaluation points ``y_grid``.  ``pdf_grid`` / ``cdf_grid``
+exploit the fact that a single TabPFN forward pass per row of ``W``
+is enough — the same logits are re-used across every ``y`` value —
+and are materially faster than calling :py:meth:`pdf` /
+:py:meth:`cdf` on the explicit tile.
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal, Protocol, Self
+from typing import Protocol, Self
 
 import numpy as np
 import torch
@@ -56,7 +55,8 @@ from numpy.typing import ArrayLike
 from tabpfn import TabPFNRegressor
 from tabpfn.constants import ModelVersion
 
-from npcc._common import _as_2d, _logit
+from npcc._common import _as_2d
+from npcc.tabpfn_distribution1d import TabPFNDistribution1D
 
 
 class _CriterionLike(Protocol):
@@ -89,69 +89,20 @@ def _coerce_logits_tensor(
   return torch.as_tensor(safe, dtype=torch.float32, device=device)
 
 
-class TabPFNDensity1D:
-  """Univariate conditional density ``f(Y | W=w)`` from TabPFN logits.
+class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
+  """Univariate conditional predictive distribution via TabPFN's binned head.
 
   See the module-level docstring for the algorithm.  The ``fit`` /
-  ``density`` API mirrors :class:`TabPFNQuantileDensity1D` so the two
-  classes are drop-in interchangeable inside :class:`PFNRBicop`.
-
-  Parameters
-  ----------
-  transform
-      ``"identity"`` fits TabPFN directly on ``Y``.  ``"logit"`` fits on
-      ``Z = logit(Y)`` and applies the inverse Jacobian on the way out;
-      this is the only sensible choice when ``Y`` is bounded in
-      ``(0, 1)``, which is always the case for copula scores.
-  eps
-      Clip distance from the boundary of ``(0, 1)`` used by the logit
-      transform.
-  model_kwargs
-      Forwarded to :py:meth:`TabPFNRegressor.create_default_for_version`.
+  ``pdf`` / ``cdf`` / ``icdf`` API mirrors
+  :class:`TabPFNQuantileDistribution1D` so the two classes are drop-in
+  interchangeable inside :class:`PFNRBicop`.
   """
-
-  def __init__(
-    self,
-    *,
-    transform: Literal["identity", "logit"] = "logit",
-    eps: float = 1e-6,
-    model_kwargs: dict[str, Any] | None = None,
-  ) -> None:
-    self.transform = transform
-    self.eps = eps
-    self.model_kwargs = model_kwargs or {}
-    self.model_: TabPFNRegressor | None = None
-
-  def _transform_y(self, y: np.ndarray) -> np.ndarray:
-    if self.transform == "identity":
-      return y
-    if self.transform == "logit":
-      y_clip = np.clip(y, self.eps, 1.0 - self.eps)
-      return _logit(y_clip)
-    raise ValueError(f"Unknown transform: {self.transform}")
-
-  def _jacobian_inverse(self, y: np.ndarray) -> np.ndarray:
-    if self.transform == "identity":
-      return np.ones_like(y)
-    if self.transform == "logit":
-      y_clip = np.clip(y, self.eps, 1.0 - self.eps)
-      return 1.0 / (y_clip * (1.0 - y_clip))
-    raise ValueError(f"Unknown transform: {self.transform}")
-
-  def _inverse_transform(self, z: np.ndarray) -> np.ndarray:
-    """Map z-space samples back to the y-scale (inverse of ``_transform_y``)."""
-    if self.transform == "identity":
-      return z
-    if self.transform == "logit":
-      return 1.0 / (1.0 + np.exp(-z))  # sigmoid
-    raise ValueError(f"Unknown transform: {self.transform}")
 
   def fit(self, w: ArrayLike, y: ArrayLike) -> Self:
     """Fit a TabPFN-v2.5 regressor on ``(w, transform(y))``.
 
-    The estimator is locked to TabPFN-v2.5 because v2.6 has reported
-    regressions on tabular regression tasks.  Override via
-    ``model_kwargs`` if needed.
+    Locked to TabPFN-v2.5 because v2.6 has reported regressions on
+    tabular regression tasks.  Override via ``model_kwargs`` if needed.
     """
     w_arr = _as_2d(w)
     y_arr = np.asarray(y, dtype=float).reshape(-1)
@@ -165,6 +116,10 @@ class TabPFNDensity1D:
     )
     self.model_.fit(w_arr, z)
     return self
+
+  # ------------------------------------------------------------------
+  # Internal helpers.
+  # ------------------------------------------------------------------
 
   def _predict_full(self, w: np.ndarray) -> tuple[torch.Tensor, _CriterionLike]:
     """Run a single ``output_type="full"`` forward pass."""
@@ -184,7 +139,6 @@ class TabPFNDensity1D:
     criterion: _CriterionLike,
     z: np.ndarray,
   ) -> np.ndarray:
-    """Evaluate ``criterion.pdf`` at the (already z-space) eval points."""
     z_eval = torch.as_tensor(
       z[:, None].astype(np.float32),
       dtype=torch.float32,
@@ -212,7 +166,11 @@ class TabPFNDensity1D:
     cdf = criterion.cdf(logits_t, z_eval)
     return cdf.reshape(-1).detach().cpu().numpy()
 
-  def density(
+  # ------------------------------------------------------------------
+  # Public API: pdf / cdf / icdf + the *_grid Cartesian fast paths.
+  # ------------------------------------------------------------------
+
+  def pdf(
     self, w: ArrayLike, y: ArrayLike, *, batch_size: int = 400
   ) -> np.ndarray:
     """Return ``f(y_i | w_i)`` for each row ``i``.
@@ -242,7 +200,7 @@ class TabPFNDensity1D:
 
     return out * self._jacobian_inverse(y_arr)
 
-  def density_grid(self, w: ArrayLike, y_grid: ArrayLike) -> np.ndarray:
+  def pdf_grid(self, w: ArrayLike, y_grid: ArrayLike) -> np.ndarray:
     """Density on the Cartesian product of ``w`` rows and ``y_grid``.
 
     Returns shape ``(n_w, n_y)`` with ``out[i, j] = f(y_grid[j] | w[i])``.
