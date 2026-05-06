@@ -62,11 +62,13 @@ from npcc._common import _as_2d, _logit
 class _CriterionLike(Protocol):
   """Duck-typed view of TabPFN's ``output_type="full"`` distribution head.
 
-  We only ever call ``pdf``; no need to depend on the concrete TabPFN
-  class, which has changed name across versions.
+  We call ``pdf``, ``cdf``, and ``icdf``; no need to depend on the
+  concrete TabPFN class, which has changed name across versions.
   """
 
   def pdf(self, logits: torch.Tensor, z: torch.Tensor) -> torch.Tensor: ...
+  def cdf(self, logits: torch.Tensor, z: torch.Tensor) -> torch.Tensor: ...
+  def icdf(self, logits: torch.Tensor, left_prob: float) -> torch.Tensor: ...
 
 
 def _coerce_logits_tensor(
@@ -136,6 +138,14 @@ class TabPFNDensity1D:
       return 1.0 / (y_clip * (1.0 - y_clip))
     raise ValueError(f"Unknown transform: {self.transform}")
 
+  def _inverse_transform(self, z: np.ndarray) -> np.ndarray:
+    """Map z-space samples back to the y-scale (inverse of ``_transform_y``)."""
+    if self.transform == "identity":
+      return z
+    if self.transform == "logit":
+      return 1.0 / (1.0 + np.exp(-z))  # sigmoid
+    raise ValueError(f"Unknown transform: {self.transform}")
+
   def fit(self, w: ArrayLike, y: ArrayLike) -> Self:
     """Fit a TabPFN-v2.5 regressor on ``(w, transform(y))``.
 
@@ -182,6 +192,25 @@ class TabPFNDensity1D:
     )
     dens = criterion.pdf(logits_t, z_eval)
     return dens.reshape(-1).detach().cpu().numpy()
+
+  def _criterion_cdf(
+    self,
+    logits_t: torch.Tensor,
+    criterion: _CriterionLike,
+    z: np.ndarray,
+  ) -> np.ndarray:
+    """Evaluate ``criterion.cdf`` at the (already z-space) eval points.
+
+    The CDF of ``Y`` equals the CDF of ``Z = transform(Y)`` evaluated at
+    ``transform(y)`` — no Jacobian for monotone transforms.
+    """
+    z_eval = torch.as_tensor(
+      z[:, None].astype(np.float32),
+      dtype=torch.float32,
+      device=logits_t.device,
+    )
+    cdf = criterion.cdf(logits_t, z_eval)
+    return cdf.reshape(-1).detach().cpu().numpy()
 
   def density(
     self, w: ArrayLike, y: ArrayLike, *, batch_size: int = 400
@@ -235,3 +264,85 @@ class TabPFNDensity1D:
     dens_z = self._criterion_pdf(logits_eval, criterion, z)
     dens_y = dens_z * self._jacobian_inverse(y_tiled)
     return dens_y.reshape(n_w, n_y)
+
+  def cdf(
+    self, w: ArrayLike, y: ArrayLike, *, batch_size: int = 400
+  ) -> np.ndarray:
+    """Return ``F(y_i | w_i) = P(Y <= y_i | W = w_i)`` per row.
+
+    Uses ``criterion.cdf`` directly on the binned distribution head.
+    No Jacobian correction is needed: monotone transforms preserve the
+    CDF, so ``F_Y(y | w) = F_Z(transform(y) | w)``.  Inference is
+    chunked into ``batch_size`` rows.
+    """
+    if self.model_ is None:
+      raise RuntimeError("The model is not fitted.")
+    if batch_size <= 0:
+      raise ValueError("batch_size must be positive.")
+
+    w_arr = _as_2d(w)
+    y_arr = np.asarray(y, dtype=float).reshape(-1)
+    if len(y_arr) != w_arr.shape[0]:
+      raise ValueError("w and y have incompatible lengths.")
+
+    z = self._transform_y(y_arr)
+    n = len(y_arr)
+    out = np.zeros(n, dtype=float)
+
+    for start in range(0, n, batch_size):
+      end = min(start + batch_size, n)
+      logits_t, criterion = self._predict_full(w_arr[start:end])
+      out[start:end] = self._criterion_cdf(logits_t, criterion, z[start:end])
+
+    return out
+
+  def icdf(self, w: ArrayLike, alphas: ArrayLike) -> np.ndarray:
+    """Per-row conditional quantile ``F^{-1}(alphas_i | w_i)`` on the y-scale.
+
+    For each row ``i``, returns ``y`` such that
+    ``F(y | w_i) = alphas_i``.  Used by the Rosenblatt simulation
+    recipe behind :py:meth:`PFNRBicop.tau`.
+
+    The criterion's ``icdf`` is scalar-α, so we loop over rows after a
+    single batched ``predict(output_type="full")`` forward pass — the
+    forward pass dominates the cost.
+    """
+    if self.model_ is None:
+      raise RuntimeError("The model is not fitted.")
+
+    w_arr = _as_2d(w)
+    alpha_arr = np.asarray(alphas, dtype=float).reshape(-1)
+    if len(alpha_arr) != w_arr.shape[0]:
+      raise ValueError("w and alphas have incompatible lengths.")
+    if np.any((alpha_arr <= 0.0) | (alpha_arr >= 1.0)):
+      raise ValueError("alphas must lie strictly inside (0, 1).")
+
+    logits_t, criterion = self._predict_full(w_arr)
+
+    z_out = np.empty(len(alpha_arr), dtype=float)
+    for i, a in enumerate(alpha_arr):
+      z_i = criterion.icdf(logits_t[i : i + 1], float(a))
+      z_out[i] = float(z_i.detach().cpu().reshape(-1)[0])
+
+    return self._inverse_transform(z_out)
+
+  def cdf_grid(self, w: ArrayLike, y_grid: ArrayLike) -> np.ndarray:
+    """CDF on the Cartesian product of ``w`` rows and ``y_grid`` values.
+
+    Returns shape ``(n_w, n_y)`` with ``out[i, j] = F(y_grid[j] | w[i])``.
+    One TabPFN forward pass per ``w`` row; the fast path for grid-based
+    integration of the joint copula CDF.
+    """
+    if self.model_ is None:
+      raise RuntimeError("The model is not fitted.")
+
+    w_arr = _as_2d(w)
+    y_arr = np.asarray(y_grid, dtype=float).reshape(-1)
+    n_w, n_y = w_arr.shape[0], len(y_arr)
+
+    logits_t, criterion = self._predict_full(w_arr)
+    logits_eval = logits_t.repeat_interleave(n_y, dim=0)
+    y_tiled = np.tile(y_arr, n_w)
+    z = self._transform_y(y_tiled)
+    cdf_z = self._criterion_cdf(logits_eval, criterion, z)
+    return cdf_z.reshape(n_w, n_y)
