@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+import torch
 
 from npcc.tabpfn_quantile_distribution1d import (
   QuantileGridConfig,
@@ -127,7 +128,7 @@ class TestQuantileDistribution1D:
     bad: Any = "exp"  # bypass Literal type for test
     qd = TabPFNQuantileDistribution1D(transform=bad)
     with pytest.raises(ValueError, match="Unknown transform"):
-      qd._transform_y(np.array([0.5]))
+      qd._transform_y(torch.tensor([0.5]))
 
   # CDF tests ---------------------------------------------------------
 

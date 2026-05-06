@@ -47,15 +47,17 @@ and are materially faster than calling :py:meth:`pdf` /
 
 from __future__ import annotations
 
-from typing import Protocol, Self
+from typing import Protocol
 
 import numpy as np
 import torch
-from numpy.typing import ArrayLike
-from tabpfn import TabPFNRegressor
-from tabpfn.constants import ModelVersion
 
-from npcc._common import _as_2d
+from npcc._common import (
+  TensorLike,
+  _as_2d,
+  _normalize_inputs,
+  _wrap_output,
+)
 from npcc.tabpfn_distribution1d import TabPFNDistribution1D
 
 
@@ -74,7 +76,7 @@ class _CriterionLike(Protocol):
 def _coerce_logits_tensor(
   logits: object, device: torch.device | str
 ) -> torch.Tensor:
-  """Convert TabPFN ``full`` logits to a float32 tensor.
+  """Convert TabPFN ``full`` logits to a float32 tensor on ``device``.
 
   TabPFN may return masked / invalid bins as ``None`` inside an object
   array; map those to ``-inf`` so a downstream softmax assigns them
@@ -98,81 +100,63 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
   interchangeable inside :class:`PFNRBicop`.
   """
 
-  def fit(self, w: ArrayLike, y: ArrayLike) -> Self:
-    """Fit a TabPFN-v2.5 regressor on ``(w, transform(y))``.
-
-    Locked to TabPFN-v2.5 because v2.6 has reported regressions on
-    tabular regression tasks.  Override via ``model_kwargs`` if needed.
-    """
-    w_arr = _as_2d(w)
-    y_arr = np.asarray(y, dtype=float).reshape(-1)
-    if len(y_arr) != w_arr.shape[0]:
-      raise ValueError("w and y have incompatible lengths.")
-
-    z = self._transform_y(y_arr)
-
-    self.model_ = TabPFNRegressor.create_default_for_version(
-      ModelVersion.V2_5, **self.model_kwargs
-    )
-    self.model_.fit(w_arr, z)
-    return self
-
   # ------------------------------------------------------------------
   # Internal helpers.
   # ------------------------------------------------------------------
 
-  def _predict_full(self, w: np.ndarray) -> tuple[torch.Tensor, _CriterionLike]:
-    """Run a single ``output_type="full"`` forward pass."""
+  def _predict_full(
+    self, w_t: torch.Tensor
+  ) -> tuple[torch.Tensor, _CriterionLike]:
+    """Run a single ``output_type="full"`` forward pass.
+
+    TabPFN's predict input must be on CPU; the returned logits land on
+    TabPFN's internal device, which we coerce onto ``self._device``.
+    """
     if self.model_ is None:
       raise RuntimeError("The model is not fitted.")
-    pred = self.model_.predict(w, output_type="full")
+    pred = self.model_.predict(w_t.detach().cpu(), output_type="full")
     logits = pred["logits"]
     criterion: _CriterionLike = pred["criterion"]
-    device = (
-      logits.device if isinstance(logits, torch.Tensor) else torch.device("cpu")
-    )
-    return _coerce_logits_tensor(logits, device=device), criterion
+    return _coerce_logits_tensor(logits, device=self._device), criterion
 
-  def _criterion_pdf(
+  def _criterion_pdf_z(
     self,
     logits_t: torch.Tensor,
     criterion: _CriterionLike,
-    z: np.ndarray,
-  ) -> np.ndarray:
-    z_eval = torch.as_tensor(
-      z[:, None].astype(np.float32),
-      dtype=torch.float32,
-      device=logits_t.device,
-    )
+    z: torch.Tensor,
+  ) -> torch.Tensor:
+    """Evaluate ``criterion.pdf`` at z-space points; returns shape ``(n,)``.
+
+    The criterion head consumes ``logits_t``'s dtype (typically
+    float32); we down-cast ``z`` for the call and bring the result
+    back to ``z``'s dtype (float64 by convention) for downstream use.
+    """
+    z_eval = z.to(dtype=logits_t.dtype, device=logits_t.device).reshape(-1, 1)
     dens = criterion.pdf(logits_t, z_eval)
-    return dens.reshape(-1).detach().cpu().numpy()
+    return dens.reshape(-1).to(dtype=z.dtype)
 
-  def _criterion_cdf(
+  def _criterion_cdf_z(
     self,
     logits_t: torch.Tensor,
     criterion: _CriterionLike,
-    z: np.ndarray,
-  ) -> np.ndarray:
+    z: torch.Tensor,
+  ) -> torch.Tensor:
     """Evaluate ``criterion.cdf`` at the (already z-space) eval points.
 
     The CDF of ``Y`` equals the CDF of ``Z = transform(Y)`` evaluated at
     ``transform(y)`` — no Jacobian for monotone transforms.
     """
-    z_eval = torch.as_tensor(
-      z[:, None].astype(np.float32),
-      dtype=torch.float32,
-      device=logits_t.device,
-    )
+    z_eval = z.to(dtype=logits_t.dtype, device=logits_t.device).reshape(-1, 1)
     cdf = criterion.cdf(logits_t, z_eval)
-    return cdf.reshape(-1).detach().cpu().numpy()
+    return cdf.reshape(-1).to(dtype=z.dtype)
 
   # ------------------------------------------------------------------
   # Public API: pdf / cdf / icdf + the *_grid Cartesian fast paths.
   # ------------------------------------------------------------------
 
   def pdf(
-    self, w: ArrayLike, y: ArrayLike, *, batch_size: int = 400
-  ) -> np.ndarray:
+    self, w: TensorLike, y: TensorLike, *, batch_size: int = 400
+  ) -> TensorLike:
     """Return ``f(y_i | w_i)`` for each row ``i``.
 
     Inference is chunked into pieces of ``batch_size`` rows to bound
@@ -184,23 +168,27 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     if batch_size <= 0:
       raise ValueError("batch_size must be positive.")
 
-    w_arr = _as_2d(w)
-    y_arr = np.asarray(y, dtype=float).reshape(-1)
-    if len(y_arr) != w_arr.shape[0]:
+    return_as_torch, (w_in, y_in) = _normalize_inputs(w, y, device=self._device)
+    assert w_in is not None and y_in is not None
+    w_t = _as_2d(w_in, device=self._device)
+    y_t = y_in.reshape(-1)
+    if y_t.shape[0] != w_t.shape[0]:
       raise ValueError("w and y have incompatible lengths.")
 
-    z = self._transform_y(y_arr)
-    n = len(y_arr)
-    out = np.zeros(n, dtype=float)
+    z = self._transform_y(y_t)
+    n = y_t.shape[0]
+    parts: list[torch.Tensor] = []
 
     for start in range(0, n, batch_size):
       end = min(start + batch_size, n)
-      logits_t, criterion = self._predict_full(w_arr[start:end])
-      out[start:end] = self._criterion_pdf(logits_t, criterion, z[start:end])
+      logits_t, criterion = self._predict_full(w_t[start:end])
+      parts.append(self._criterion_pdf_z(logits_t, criterion, z[start:end]))
 
-    return out * self._jacobian_inverse(y_arr)
+    dens_z = torch.cat(parts) if parts else torch.empty(0, device=self._device)
+    out = dens_z * self._jacobian_inverse(y_t)
+    return _wrap_output(out, return_as_torch=return_as_torch)
 
-  def pdf_grid(self, w: ArrayLike, y_grid: ArrayLike) -> np.ndarray:
+  def pdf_grid(self, w: TensorLike, y_grid: TensorLike) -> TensorLike:
     """Density on the Cartesian product of ``w`` rows and ``y_grid``.
 
     Returns shape ``(n_w, n_y)`` with ``out[i, j] = f(y_grid[j] | w[i])``.
@@ -211,21 +199,27 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     if self.model_ is None:
       raise RuntimeError("The model is not fitted.")
 
-    w_arr = _as_2d(w)
-    y_arr = np.asarray(y_grid, dtype=float).reshape(-1)
-    n_w, n_y = w_arr.shape[0], len(y_arr)
+    return_as_torch, (w_in, y_in) = _normalize_inputs(
+      w, y_grid, device=self._device
+    )
+    assert w_in is not None and y_in is not None
+    w_t = _as_2d(w_in, device=self._device)
+    y_t = y_in.reshape(-1)
+    n_w, n_y = w_t.shape[0], y_t.shape[0]
 
-    logits_t, criterion = self._predict_full(w_arr)
+    logits_t, criterion = self._predict_full(w_t)
     logits_eval = logits_t.repeat_interleave(n_y, dim=0)
-    y_tiled = np.tile(y_arr, n_w)
+    y_tiled = y_t.tile(n_w)
     z = self._transform_y(y_tiled)
-    dens_z = self._criterion_pdf(logits_eval, criterion, z)
+    dens_z = self._criterion_pdf_z(logits_eval, criterion, z)
     dens_y = dens_z * self._jacobian_inverse(y_tiled)
-    return dens_y.reshape(n_w, n_y)
+    return _wrap_output(
+      dens_y.reshape(n_w, n_y), return_as_torch=return_as_torch
+    )
 
   def cdf(
-    self, w: ArrayLike, y: ArrayLike, *, batch_size: int = 400
-  ) -> np.ndarray:
+    self, w: TensorLike, y: TensorLike, *, batch_size: int = 400
+  ) -> TensorLike:
     """Return ``F(y_i | w_i) = P(Y <= y_i | W = w_i)`` per row.
 
     Uses ``criterion.cdf`` directly on the binned distribution head.
@@ -238,23 +232,26 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     if batch_size <= 0:
       raise ValueError("batch_size must be positive.")
 
-    w_arr = _as_2d(w)
-    y_arr = np.asarray(y, dtype=float).reshape(-1)
-    if len(y_arr) != w_arr.shape[0]:
+    return_as_torch, (w_in, y_in) = _normalize_inputs(w, y, device=self._device)
+    assert w_in is not None and y_in is not None
+    w_t = _as_2d(w_in, device=self._device)
+    y_t = y_in.reshape(-1)
+    if y_t.shape[0] != w_t.shape[0]:
       raise ValueError("w and y have incompatible lengths.")
 
-    z = self._transform_y(y_arr)
-    n = len(y_arr)
-    out = np.zeros(n, dtype=float)
+    z = self._transform_y(y_t)
+    n = y_t.shape[0]
+    parts: list[torch.Tensor] = []
 
     for start in range(0, n, batch_size):
       end = min(start + batch_size, n)
-      logits_t, criterion = self._predict_full(w_arr[start:end])
-      out[start:end] = self._criterion_cdf(logits_t, criterion, z[start:end])
+      logits_t, criterion = self._predict_full(w_t[start:end])
+      parts.append(self._criterion_cdf_z(logits_t, criterion, z[start:end]))
 
-    return out
+    out = torch.cat(parts) if parts else torch.empty(0, device=self._device)
+    return _wrap_output(out, return_as_torch=return_as_torch)
 
-  def icdf(self, w: ArrayLike, alphas: ArrayLike) -> np.ndarray:
+  def icdf(self, w: TensorLike, alphas: TensorLike) -> TensorLike:
     """Per-row conditional quantile ``F^{-1}(alphas_i | w_i)`` on the y-scale.
 
     For each row ``i``, returns ``y`` such that
@@ -268,23 +265,31 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     if self.model_ is None:
       raise RuntimeError("The model is not fitted.")
 
-    w_arr = _as_2d(w)
-    alpha_arr = np.asarray(alphas, dtype=float).reshape(-1)
-    if len(alpha_arr) != w_arr.shape[0]:
+    return_as_torch, (w_in, a_in) = _normalize_inputs(
+      w, alphas, device=self._device
+    )
+    assert w_in is not None and a_in is not None
+    w_t = _as_2d(w_in, device=self._device)
+    alpha_t = a_in.reshape(-1)
+    if alpha_t.shape[0] != w_t.shape[0]:
       raise ValueError("w and alphas have incompatible lengths.")
-    if np.any((alpha_arr <= 0.0) | (alpha_arr >= 1.0)):
+    if torch.any((alpha_t <= 0.0) | (alpha_t >= 1.0)):
       raise ValueError("alphas must lie strictly inside (0, 1).")
 
-    logits_t, criterion = self._predict_full(w_arr)
+    logits_t, criterion = self._predict_full(w_t)
 
-    z_out = np.empty(len(alpha_arr), dtype=float)
-    for i, a in enumerate(alpha_arr):
-      z_i = criterion.icdf(logits_t[i : i + 1], float(a))
-      z_out[i] = float(z_i.detach().cpu().reshape(-1)[0])
+    z_out = torch.empty(
+      alpha_t.shape[0], dtype=alpha_t.dtype, device=self._device
+    )
+    for i in range(alpha_t.shape[0]):
+      z_i = criterion.icdf(logits_t[i : i + 1], float(alpha_t[i].item()))
+      z_out[i] = z_i.reshape(-1)[0].to(device=self._device, dtype=alpha_t.dtype)
 
-    return self._inverse_transform(z_out)
+    return _wrap_output(
+      self._inverse_transform(z_out), return_as_torch=return_as_torch
+    )
 
-  def cdf_grid(self, w: ArrayLike, y_grid: ArrayLike) -> np.ndarray:
+  def cdf_grid(self, w: TensorLike, y_grid: TensorLike) -> TensorLike:
     """CDF on the Cartesian product of ``w`` rows and ``y_grid`` values.
 
     Returns shape ``(n_w, n_y)`` with ``out[i, j] = F(y_grid[j] | w[i])``.
@@ -294,13 +299,19 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     if self.model_ is None:
       raise RuntimeError("The model is not fitted.")
 
-    w_arr = _as_2d(w)
-    y_arr = np.asarray(y_grid, dtype=float).reshape(-1)
-    n_w, n_y = w_arr.shape[0], len(y_arr)
+    return_as_torch, (w_in, y_in) = _normalize_inputs(
+      w, y_grid, device=self._device
+    )
+    assert w_in is not None and y_in is not None
+    w_t = _as_2d(w_in, device=self._device)
+    y_t = y_in.reshape(-1)
+    n_w, n_y = w_t.shape[0], y_t.shape[0]
 
-    logits_t, criterion = self._predict_full(w_arr)
+    logits_t, criterion = self._predict_full(w_t)
     logits_eval = logits_t.repeat_interleave(n_y, dim=0)
-    y_tiled = np.tile(y_arr, n_w)
+    y_tiled = y_t.tile(n_w)
     z = self._transform_y(y_tiled)
-    cdf_z = self._criterion_cdf(logits_eval, criterion, z)
-    return cdf_z.reshape(n_w, n_y)
+    cdf_z = self._criterion_cdf_z(logits_eval, criterion, z)
+    return _wrap_output(
+      cdf_z.reshape(n_w, n_y), return_as_torch=return_as_torch
+    )
