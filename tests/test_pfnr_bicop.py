@@ -7,6 +7,8 @@ import os
 import numpy as np
 import pytest
 
+import torch
+
 from npcc.pfnr_bicop import PFNRBicop
 from npcc.tabpfn_criterion_distribution1d import TabPFNCriterionDistribution1D
 from npcc.tabpfn_quantile_distribution1d import TabPFNQuantileDistribution1D
@@ -664,3 +666,73 @@ def test_real_tabpfn_smoke() -> None:
   tau = m.tau(n=1000)
   assert -1.0 <= tau <= 1.0
   assert abs(tau - theta / (theta + 2.0)) < 0.1
+
+
+# ===========================================================================
+# Torch / NumPy input handling and device routing
+# ===========================================================================
+
+
+@pytest.mark.parametrize("method", ["quantiles", "criterion"])
+class TestPFNRInputTypes:
+  def test_numpy_inputs_return_numpy(
+    self, patch_uniform: None, method: str
+  ) -> None:
+    rng = np.random.default_rng(0)
+    u = rng.uniform(0.2, 0.8, 8)
+    v = rng.uniform(0.2, 0.8, 8)
+    m = make_pfnr(method=method).fit(u, v)
+    out = m.pdf(u, v)
+    assert isinstance(out, np.ndarray)
+    assert out.shape == (8,)
+
+  def test_torch_inputs_return_torch(
+    self, patch_uniform: None, method: str
+  ) -> None:
+    rng = np.random.default_rng(0)
+    u = torch.as_tensor(rng.uniform(0.2, 0.8, 8))
+    v = torch.as_tensor(rng.uniform(0.2, 0.8, 8))
+    m = make_pfnr(method=method).fit(u, v)
+    out = m.pdf(u, v)
+    assert isinstance(out, torch.Tensor)
+    assert out.shape == (8,)
+
+  def test_mixed_inputs_promote_to_torch(
+    self, patch_uniform: None, method: str
+  ) -> None:
+    rng = np.random.default_rng(0)
+    u_np = rng.uniform(0.2, 0.8, 8)
+    v_t = torch.as_tensor(rng.uniform(0.2, 0.8, 8))
+    m = make_pfnr(method=method).fit(u_np, v_t)
+    out = m.pdf(u_np, v_t)
+    assert isinstance(out, torch.Tensor)
+
+  def test_torch_inputs_match_numpy_results(
+    self, patch_uniform: None, method: str
+  ) -> None:
+    rng = np.random.default_rng(7)
+    u_np = rng.uniform(0.2, 0.8, 12)
+    v_np = rng.uniform(0.2, 0.8, 12)
+    m = make_pfnr(method=method).fit(u_np, v_np)
+
+    np_out = m.pdf(u_np, v_np)
+    torch_out = m.pdf(torch.as_tensor(u_np), torch.as_tensor(v_np))
+    assert isinstance(np_out, np.ndarray)
+    assert isinstance(torch_out, torch.Tensor)
+    np.testing.assert_allclose(
+      np_out, torch_out.detach().cpu().numpy(), atol=1e-10
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+class TestPFNRCUDA:
+  def test_cuda_device_returns_cuda_tensors(self, patch_uniform: None) -> None:
+    rng = np.random.default_rng(0)
+    u = rng.uniform(0.2, 0.8, 8)
+    v = rng.uniform(0.2, 0.8, 8)
+    m = PFNRBicop(method="criterion", device="cuda").fit(u, v)
+    out = m.pdf(
+      torch.as_tensor(u, device="cuda"), torch.as_tensor(v, device="cuda")
+    )
+    assert isinstance(out, torch.Tensor)
+    assert out.device.type == "cuda"

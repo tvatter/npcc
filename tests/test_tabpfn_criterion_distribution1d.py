@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+import torch
 
 from npcc.tabpfn_criterion_distribution1d import TabPFNCriterionDistribution1D
 from tests.conftest import uniform_density_y
@@ -235,4 +236,4 @@ class TestTabPFNCriterionDistribution1D:
     bad: Any = "exp"
     d = TabPFNCriterionDistribution1D(transform=bad)
     with pytest.raises(ValueError, match="Unknown transform"):
-      d._transform_y(np.array([0.5]))
+      d._transform_y(torch.tensor([0.5]))

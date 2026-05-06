@@ -70,9 +70,18 @@ from __future__ import annotations
 from typing import Any, Literal, Self
 
 import numpy as np
-from numpy.typing import ArrayLike
+import torch
 
-from npcc._common import _as_2d, _check_uv
+from npcc._common import (
+  TensorLike,
+  _as_2d,
+  _check_uv,
+  _normalize_inputs,
+  _resolve_device,
+  _to_tensor,
+  _torch_interp,
+  _wrap_output,
+)
 from npcc.tabpfn_criterion_distribution1d import TabPFNCriterionDistribution1D
 from npcc.tabpfn_quantile_distribution1d import (
   QuantileGridConfig,
@@ -99,10 +108,15 @@ class PFNRBicop:
       :class:`QuantileGridConfig` instance.  Only its ``eps`` field is
       used by the criterion method (for clipping).  The quantile
       method additionally uses the alpha-grid fields.
+  device
+      Device for internal tensors and TabPFN inference.  ``None``
+      (default) auto-selects ``cuda`` if available, else ``cpu``.
+      Forwarded into the inner distributions and into TabPFN via
+      ``model_kwargs["device"]``.
   model_kwargs
       Forwarded into the inner ``TabPFNRegressor`` (via
       :py:meth:`TabPFNRegressor.create_default_for_version`).  Useful
-      for ``device=...``, ``n_estimators=...``, etc.
+      for ``n_estimators=...``, etc.
 
   Notes
   -----
@@ -111,6 +125,9 @@ class PFNRBicop:
     option (one direction fit, one direction at evaluation).
   - The symmetric estimator reduces the directional bias but doubles
     both fit and inference cost.
+  - Public methods accept either NumPy arrays or torch tensors.  When
+    any positional numeric input is a torch tensor, the return value
+    is a torch tensor on ``device``; otherwise it is a NumPy array.
   """
 
   def __init__(
@@ -119,12 +136,14 @@ class PFNRBicop:
     symmetric: bool = True,
     method: Literal["criterion", "quantiles"] = "criterion",
     quantile_config: QuantileGridConfig | None = None,
+    device: str | torch.device | None = None,
     model_kwargs: dict[str, Any] | None = None,
   ) -> None:
     self.symmetric = symmetric
     self.method = method
     self.quantile_config = quantile_config or QuantileGridConfig()
-    self.model_kwargs = model_kwargs or {}
+    self._device = _resolve_device(device)
+    self.model_kwargs = dict(model_kwargs or {})
 
     self.v_given_ux_: _Distribution1D = self._make_distribution()
     self.u_given_vx_: _Distribution1D | None = (
@@ -136,29 +155,31 @@ class PFNRBicop:
       return TabPFNQuantileDistribution1D(
         transform="logit",
         config=self.quantile_config,
+        device=self._device,
         model_kwargs=self.model_kwargs,
       )
     return TabPFNCriterionDistribution1D(
       transform="logit",
       eps=self.quantile_config.eps,
+      device=self._device,
       model_kwargs=self.model_kwargs,
     )
 
-  @staticmethod
-  def _features(first_coord: np.ndarray, x: np.ndarray) -> np.ndarray:
+  def _features(
+    self, first_coord: torch.Tensor, x: torch.Tensor
+  ) -> torch.Tensor:
     """Build the inner regressor's feature matrix ``[first_coord | x]``."""
-    return np.column_stack([first_coord, x])
+    return torch.column_stack([first_coord, x])
 
-  @staticmethod
-  def _default_x(n: int) -> np.ndarray:
+  def _default_x(self, n: int) -> torch.Tensor:
     """Constant covariate column of ones (used when ``x`` is omitted)."""
-    return np.ones((n, 1), dtype=float)
+    return torch.ones((n, 1), dtype=torch.float64, device=self._device)
 
   def fit(
     self,
-    u: ArrayLike,
-    v: ArrayLike,
-    x: ArrayLike | None = None,
+    u: TensorLike,
+    v: TensorLike,
+    x: TensorLike | None = None,
   ) -> Self:
     """Fit the inner conditional density estimator(s).
 
@@ -166,58 +187,80 @@ class PFNRBicop:
     ``f(U | V, X)``.  ``x=None`` is shorthand for the unconditional
     case (a constant covariate column).
     """
-    u_arr, v_arr = _check_uv(u, v, self.quantile_config.eps)
-    x_arr = self._default_x(len(u_arr)) if x is None else _as_2d(x)
+    u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
+    x_t = (
+      self._default_x(u_t.shape[0])
+      if x is None
+      else _as_2d(x, device=self._device)
+    )
 
-    if x_arr.shape[0] != len(u_arr):
+    if x_t.shape[0] != u_t.shape[0]:
       raise ValueError("x, u, and v must have the same number of observations.")
 
-    self.v_given_ux_.fit(self._features(u_arr, x_arr), v_arr)
+    self.v_given_ux_.fit(self._features(u_t, x_t), v_t)
 
     if self.symmetric:
       assert self.u_given_vx_ is not None
-      self.u_given_vx_.fit(self._features(v_arr, x_arr), u_arr)
+      self.u_given_vx_.fit(self._features(v_t, x_t), u_t)
 
     return self
 
   def pdf(
     self,
-    u: ArrayLike,
-    v: ArrayLike,
-    x: ArrayLike | None = None,
-  ) -> np.ndarray:
+    u: TensorLike,
+    v: TensorLike,
+    x: TensorLike | None = None,
+  ) -> TensorLike:
     """Return the conditional copula density ``c(u_i, v_i | x_i)``."""
-    u_arr, v_arr = _check_uv(u, v, self.quantile_config.eps)
-    x_arr = self._default_x(len(u_arr)) if x is None else _as_2d(x)
+    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
+    out = self._pdf_torch(u, v, x)
+    return _wrap_output(out, return_as_torch=return_as_torch)
 
-    if x_arr.shape[0] != len(u_arr):
+  def _pdf_torch(
+    self,
+    u: TensorLike,
+    v: TensorLike,
+    x: TensorLike | None,
+  ) -> torch.Tensor:
+    u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
+    x_t = (
+      self._default_x(u_t.shape[0])
+      if x is None
+      else _as_2d(x, device=self._device)
+    )
+
+    if x_t.shape[0] != u_t.shape[0]:
       raise ValueError("x, u, and v must have the same number of observations.")
 
-    c_v_given_u = self.v_given_ux_.pdf(self._features(u_arr, x_arr), v_arr)
+    c_v_given_u = self.v_given_ux_.pdf(self._features(u_t, x_t), v_t)
+    assert isinstance(c_v_given_u, torch.Tensor)
 
     if not self.symmetric:
       return c_v_given_u
 
     assert self.u_given_vx_ is not None
-    c_u_given_v = self.u_given_vx_.pdf(self._features(v_arr, x_arr), u_arr)
+    c_u_given_v = self.u_given_vx_.pdf(self._features(v_t, x_t), u_t)
+    assert isinstance(c_u_given_v, torch.Tensor)
     return 0.5 * (c_v_given_u + c_u_given_v)
 
   def log_pdf(
     self,
-    u: ArrayLike,
-    v: ArrayLike,
-    x: ArrayLike | None = None,
-  ) -> np.ndarray:
+    u: TensorLike,
+    v: TensorLike,
+    x: TensorLike | None = None,
+  ) -> TensorLike:
     """Log of :py:meth:`pdf`, floored at the smallest positive float."""
-    c = self.pdf(u, v, x)
-    return np.log(np.maximum(c, np.finfo(float).tiny))
+    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
+    c = self._pdf_torch(u, v, x)
+    out = torch.log(torch.clamp(c, min=torch.finfo(c.dtype).tiny))
+    return _wrap_output(out, return_as_torch=return_as_torch)
 
   def pdf_grid(
     self,
-    u_grid: ArrayLike,
-    v_grid: ArrayLike,
-    x_row: ArrayLike | None = None,
-  ) -> np.ndarray:
+    u_grid: TensorLike,
+    v_grid: TensorLike,
+    x_row: TensorLike | None = None,
+  ) -> TensorLike:
     """Density on the Cartesian product ``out[i, j] = c(u_grid[i], v_grid[j] | x)``.
 
     Requires ``method="criterion"`` because it relies on
@@ -233,40 +276,43 @@ class PFNRBicop:
     ):
       raise RuntimeError("pdf_grid is only available when method='criterion'.")
 
-    u_arr = np.asarray(u_grid, dtype=float).reshape(-1)
-    v_arr = np.asarray(v_grid, dtype=float).reshape(-1)
-    if np.any((u_arr <= 0.0) | (u_arr >= 1.0)) or np.any(
-      (v_arr <= 0.0) | (v_arr >= 1.0)
+    return_as_torch, (u_in, v_in, x_in) = _normalize_inputs(
+      u_grid, v_grid, x_row, device=self._device
+    )
+    assert u_in is not None and v_in is not None
+    u_t = u_in.reshape(-1)
+    v_t = v_in.reshape(-1)
+    if torch.any((u_t <= 0.0) | (u_t >= 1.0)) or torch.any(
+      (v_t <= 0.0) | (v_t >= 1.0)
     ):
       raise ValueError("u_grid and v_grid must lie strictly inside (0, 1).")
 
     eps = self.quantile_config.eps
-    u_arr = np.clip(u_arr, eps, 1.0 - eps)
-    v_arr = np.clip(v_arr, eps, 1.0 - eps)
+    u_t = torch.clamp(u_t, eps, 1.0 - eps)
+    v_t = torch.clamp(v_t, eps, 1.0 - eps)
 
-    if x_row is None:
-      x_row_arr = np.ones((1, 1), dtype=float)
+    if x_in is None:
+      x_row_t = torch.ones((1, 1), dtype=torch.float64, device=self._device)
     else:
-      x_row_arr = _as_2d(x_row)
-      if x_row_arr.shape[0] != 1:
+      x_row_t = _as_2d(x_in, device=self._device)
+      if x_row_t.shape[0] != 1:
         raise ValueError("x_row must contain exactly one row.")
 
-    x_for_u = np.repeat(x_row_arr, len(u_arr), axis=0)
-    c_v_given_u = self.v_given_ux_.pdf_grid(
-      self._features(u_arr, x_for_u), v_arr
-    )
+    x_for_u = x_row_t.repeat_interleave(u_t.shape[0], dim=0)
+    c_v_given_u = self.v_given_ux_.pdf_grid(self._features(u_t, x_for_u), v_t)
+    assert isinstance(c_v_given_u, torch.Tensor)
 
     if not self.symmetric:
-      return c_v_given_u
+      return _wrap_output(c_v_given_u, return_as_torch=return_as_torch)
 
     assert isinstance(self.u_given_vx_, TabPFNCriterionDistribution1D)
-    x_for_v = np.repeat(x_row_arr, len(v_arr), axis=0)
+    x_for_v = x_row_t.repeat_interleave(v_t.shape[0], dim=0)
     # pdf_grid returns (n_v, n_u); transpose to align with c_v_given_u.
-    c_u_given_v = self.u_given_vx_.pdf_grid(
-      self._features(v_arr, x_for_v), u_arr
-    ).T
+    c_u_given_v = self.u_given_vx_.pdf_grid(self._features(v_t, x_for_v), u_t)
+    assert isinstance(c_u_given_v, torch.Tensor)
 
-    return 0.5 * (c_v_given_u + c_u_given_v)
+    out = 0.5 * (c_v_given_u + c_u_given_v.T)
+    return _wrap_output(out, return_as_torch=return_as_torch)
 
   # -------------------------------------------------------------------
   # h-functions (conditional CDFs along one axis)
@@ -282,10 +328,10 @@ class PFNRBicop:
 
   def hfunc1(
     self,
-    u: ArrayLike,
-    v: ArrayLike,
-    x: ArrayLike | None = None,
-  ) -> np.ndarray:
+    u: TensorLike,
+    v: TensorLike,
+    x: TensorLike | None = None,
+  ) -> TensorLike:
     """``h_1(u, v | x) = P(V ≤ v | U = u, X = x) = F_{V | U, X}(v | u, x)``.
 
     Always available (the V|U regressor is always fitted).  This is a
@@ -296,20 +342,26 @@ class PFNRBicop:
     Convention matches :py:meth:`pyvinecopulib.Bicop.hfunc1`:
     ``hfunc1`` conditions on the first argument.
     """
-    u_arr, v_arr = _check_uv(u, v, self.quantile_config.eps)
-    x_arr = self._default_x(len(u_arr)) if x is None else _as_2d(x)
-
-    if x_arr.shape[0] != len(u_arr):
+    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
+    u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
+    x_t = (
+      self._default_x(u_t.shape[0])
+      if x is None
+      else _as_2d(x, device=self._device)
+    )
+    if x_t.shape[0] != u_t.shape[0]:
       raise ValueError("x, u, and v must have the same number of observations.")
 
-    return self.v_given_ux_.cdf(self._features(u_arr, x_arr), v_arr)
+    out = self.v_given_ux_.cdf(self._features(u_t, x_t), v_t)
+    assert isinstance(out, torch.Tensor)
+    return _wrap_output(out, return_as_torch=return_as_torch)
 
   def hfunc2(
     self,
-    u: ArrayLike,
-    v: ArrayLike,
-    x: ArrayLike | None = None,
-  ) -> np.ndarray:
+    u: TensorLike,
+    v: TensorLike,
+    x: TensorLike | None = None,
+  ) -> TensorLike:
     """``h_2(u, v | x) = P(U ≤ u | V = v, X = x) = F_{U | V, X}(u | v, x)``.
 
     Requires ``symmetric=True`` (the U|V regressor must have been
@@ -327,13 +379,19 @@ class PFNRBicop:
         "(u, v) arguments swapped."
       )
 
-    u_arr, v_arr = _check_uv(u, v, self.quantile_config.eps)
-    x_arr = self._default_x(len(u_arr)) if x is None else _as_2d(x)
-
-    if x_arr.shape[0] != len(u_arr):
+    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
+    u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
+    x_t = (
+      self._default_x(u_t.shape[0])
+      if x is None
+      else _as_2d(x, device=self._device)
+    )
+    if x_t.shape[0] != u_t.shape[0]:
       raise ValueError("x, u, and v must have the same number of observations.")
 
-    return self.u_given_vx_.cdf(self._features(v_arr, x_arr), u_arr)
+    out = self.u_given_vx_.cdf(self._features(v_t, x_t), u_t)
+    assert isinstance(out, torch.Tensor)
+    return _wrap_output(out, return_as_torch=return_as_torch)
 
   # -------------------------------------------------------------------
   # Joint CDF
@@ -341,12 +399,12 @@ class PFNRBicop:
 
   def cdf(
     self,
-    u: ArrayLike,
-    v: ArrayLike,
-    x: ArrayLike | None = None,
+    u: TensorLike,
+    v: TensorLike,
+    x: TensorLike | None = None,
     *,
     n_int: int = 64,
-  ) -> np.ndarray:
+  ) -> TensorLike:
     """Joint CDF ``C(u_i, v_i | x_i)`` evaluated row-by-row.
 
     Trapezoidal integration of the inner conditional CDF over the
@@ -362,83 +420,79 @@ class PFNRBicop:
     if n_int < 2:
       raise ValueError("n_int must be at least 2.")
 
-    u_arr, v_arr = _check_uv(u, v, self.quantile_config.eps)
-    x_arr = self._default_x(len(u_arr)) if x is None else _as_2d(x)
-
-    if x_arr.shape[0] != len(u_arr):
+    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
+    u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
+    x_t = (
+      self._default_x(u_t.shape[0])
+      if x is None
+      else _as_2d(x, device=self._device)
+    )
+    if x_t.shape[0] != u_t.shape[0]:
       raise ValueError("x, u, and v must have the same number of observations.")
 
     cdf_v_dir = self._integrate_one_direction(
-      upper=u_arr,
-      conditioned=v_arr,
-      x=x_arr,
+      upper=u_t,
+      conditioned=v_t,
+      x=x_t,
       module=self.v_given_ux_,
-      first_arg_is_integration_var=True,
       n_int=n_int,
     )
 
     if not self.symmetric:
-      return cdf_v_dir
+      return _wrap_output(cdf_v_dir, return_as_torch=return_as_torch)
 
     assert self.u_given_vx_ is not None
     cdf_u_dir = self._integrate_one_direction(
-      upper=v_arr,
-      conditioned=u_arr,
-      x=x_arr,
+      upper=v_t,
+      conditioned=u_t,
+      x=x_t,
       module=self.u_given_vx_,
-      first_arg_is_integration_var=True,
       n_int=n_int,
     )
-    return 0.5 * (cdf_v_dir + cdf_u_dir)
+    return _wrap_output(
+      0.5 * (cdf_v_dir + cdf_u_dir), return_as_torch=return_as_torch
+    )
 
   def _integrate_one_direction(
     self,
     *,
-    upper: np.ndarray,
-    conditioned: np.ndarray,
-    x: np.ndarray,
+    upper: torch.Tensor,
+    conditioned: torch.Tensor,
+    x: torch.Tensor,
     module: _Distribution1D,
-    first_arg_is_integration_var: bool,
     n_int: int,
-  ) -> np.ndarray:
-    """Compute ∫_eps^{upper_i} F(conditioned_i | s, x_i) ds for each row.
-
-    ``first_arg_is_integration_var=True`` builds features as
-    ``[s | x_i]``, matching the inner regressor's expectation that the
-    first feature column is the conditioning copula coordinate.
-    """
+  ) -> torch.Tensor:
+    """Compute ∫_eps^{upper_i} F(conditioned_i | s, x_i) ds for each row."""
     eps = self.quantile_config.eps
-    n = len(upper)
-    upper_safe = np.maximum(upper, eps + 1e-12)
+    n = upper.shape[0]
+    upper_safe = torch.clamp(upper, min=eps + 1e-12)
 
     # s_grids[i, k] = linspace(eps, upper_safe[i], n_int+1)[k]
-    s_grids = np.linspace(eps, upper_safe, n_int + 1).T  # (n, n_int+1)
+    t = torch.linspace(0.0, 1.0, n_int + 1, device=self._device)
+    s_grids = eps + (upper_safe.unsqueeze(1) - eps) * t.unsqueeze(0)
 
-    s_flat = s_grids.flatten()
-    cond_flat = np.repeat(conditioned, n_int + 1)
-    x_flat = np.repeat(x, n_int + 1, axis=0)
+    s_flat = s_grids.reshape(-1)
+    cond_flat = conditioned.repeat_interleave(n_int + 1)
+    x_flat = x.repeat_interleave(n_int + 1, dim=0)
 
-    if first_arg_is_integration_var:
-      feats = self._features(s_flat, x_flat)
-    else:  # pragma: no cover - kept for future asymmetric h₁ extension
-      feats = self._features(cond_flat, x_flat)
-
+    feats = self._features(s_flat, x_flat)
     F_flat = module.cdf(feats, cond_flat)
+    assert isinstance(F_flat, torch.Tensor)
     F_grid = F_flat.reshape(n, n_int + 1)
 
     # Per-row trapezoidal integral over the s axis.
-    ds = np.diff(s_grids, axis=1)  # (n, n_int)
-    avgs = 0.5 * (F_grid[:, :-1] + F_grid[:, 1:])  # (n, n_int)
-    return np.sum(avgs * ds, axis=1)
+    ds = torch.diff(s_grids, dim=1)
+    avgs = 0.5 * (F_grid[:, :-1] + F_grid[:, 1:])
+    return torch.sum(avgs * ds, dim=1)
 
   def cdf_grid(
     self,
-    u_grid: ArrayLike,
-    v_grid: ArrayLike,
-    x_row: ArrayLike | None = None,
+    u_grid: TensorLike,
+    v_grid: TensorLike,
+    x_row: TensorLike | None = None,
     *,
     n_int: int = 64,
-  ) -> np.ndarray:
+  ) -> TensorLike:
     """Cartesian-grid joint CDF ``out[i, j] = C(u_grid[i], v_grid[j] | x_row)``.
 
     Requires ``method="criterion"`` (uses the inner ``cdf_grid`` fast
@@ -457,81 +511,88 @@ class PFNRBicop:
     if n_int < 2:
       raise ValueError("n_int must be at least 2.")
 
-    u_arr = np.asarray(u_grid, dtype=float).reshape(-1)
-    v_arr = np.asarray(v_grid, dtype=float).reshape(-1)
-    if np.any((u_arr <= 0.0) | (u_arr >= 1.0)) or np.any(
-      (v_arr <= 0.0) | (v_arr >= 1.0)
+    return_as_torch, (u_in, v_in, x_in) = _normalize_inputs(
+      u_grid, v_grid, x_row, device=self._device
+    )
+    assert u_in is not None and v_in is not None
+    u_t = u_in.reshape(-1)
+    v_t = v_in.reshape(-1)
+    if torch.any((u_t <= 0.0) | (u_t >= 1.0)) or torch.any(
+      (v_t <= 0.0) | (v_t >= 1.0)
     ):
       raise ValueError("u_grid and v_grid must lie strictly inside (0, 1).")
 
     eps = self.quantile_config.eps
-    u_arr = np.clip(u_arr, eps, 1.0 - eps)
-    v_arr = np.clip(v_arr, eps, 1.0 - eps)
+    u_t = torch.clamp(u_t, eps, 1.0 - eps)
+    v_t = torch.clamp(v_t, eps, 1.0 - eps)
 
-    if x_row is None:
-      x_row_arr = np.ones((1, 1), dtype=float)
+    if x_in is None:
+      x_row_t = torch.ones((1, 1), dtype=torch.float64, device=self._device)
     else:
-      x_row_arr = _as_2d(x_row)
-      if x_row_arr.shape[0] != 1:
+      x_row_t = _as_2d(x_in, device=self._device)
+      if x_row_t.shape[0] != 1:
         raise ValueError("x_row must contain exactly one row.")
 
     cdf_v_dir = self._integrate_grid_one_direction(
-      upper_grid=u_arr,
-      conditioned_grid=v_arr,
-      x_row=x_row_arr,
+      upper_grid=u_t,
+      conditioned_grid=v_t,
+      x_row=x_row_t,
       module=self.v_given_ux_,
       n_int=n_int,
     )
 
     if not self.symmetric:
-      return cdf_v_dir
+      return _wrap_output(cdf_v_dir, return_as_torch=return_as_torch)
 
     assert isinstance(self.u_given_vx_, TabPFNCriterionDistribution1D)
-    # Returns (n_v, n_u); transpose to align with cdf_v_dir.
     cdf_u_dir = self._integrate_grid_one_direction(
-      upper_grid=v_arr,
-      conditioned_grid=u_arr,
-      x_row=x_row_arr,
+      upper_grid=v_t,
+      conditioned_grid=u_t,
+      x_row=x_row_t,
       module=self.u_given_vx_,
       n_int=n_int,
-    ).T
-
-    return 0.5 * (cdf_v_dir + cdf_u_dir)
+    )
+    return _wrap_output(
+      0.5 * (cdf_v_dir + cdf_u_dir.T), return_as_torch=return_as_torch
+    )
 
   def _integrate_grid_one_direction(
     self,
     *,
-    upper_grid: np.ndarray,
-    conditioned_grid: np.ndarray,
-    x_row: np.ndarray,
+    upper_grid: torch.Tensor,
+    conditioned_grid: torch.Tensor,
+    x_row: torch.Tensor,
     module: TabPFNCriterionDistribution1D,
     n_int: int,
-  ) -> np.ndarray:
+  ) -> torch.Tensor:
     """Compute ∫_0^{upper_grid[i]} F(conditioned_grid[j] | s, x_row) ds.
 
     Returns shape ``(len(upper_grid), len(conditioned_grid))``.
     """
     eps = self.quantile_config.eps
-    n_u, n_v = len(upper_grid), len(conditioned_grid)
+    n_u, n_v = upper_grid.shape[0], conditioned_grid.shape[0]
 
     # Shared fine s-grid covering [eps, max(upper_grid)].
-    s_fine = np.linspace(eps, max(upper_grid.max(), eps + 1e-12), n_int + 1)
+    s_max = torch.clamp(upper_grid.max(), min=eps + 1e-12)
+    s_fine = torch.linspace(
+      eps, float(s_max.item()), n_int + 1, device=self._device
+    )
 
-    x_for_s = np.repeat(x_row, len(s_fine), axis=0)
+    x_for_s = x_row.repeat_interleave(s_fine.shape[0], dim=0)
     feats = self._features(s_fine, x_for_s)
-    # F_table[j, k] = F(conditioned_grid[k] | s_fine[j], x_row)
-    F_table = module.cdf_grid(feats, conditioned_grid)  # (n_int+1, n_v)
+    F_table = module.cdf_grid(feats, conditioned_grid)
+    assert isinstance(F_table, torch.Tensor)
 
     # Cumulative trapezoid along axis=0.
-    ds = np.diff(s_fine)  # (n_int,)
-    avgs = 0.5 * (F_table[:-1] + F_table[1:])  # (n_int, n_v)
-    cum = np.zeros((len(s_fine), n_v))
-    cum[1:] = np.cumsum(avgs * ds[:, None], axis=0)
+    ds = torch.diff(s_fine)
+    avgs = 0.5 * (F_table[:-1] + F_table[1:])
+    cum = torch.zeros((s_fine.shape[0], n_v), device=self._device)
+    cum[1:] = torch.cumsum(avgs * ds.unsqueeze(1), dim=0)
 
     # For each upper_grid[i], interpolate cum at s = upper_grid[i].
-    out = np.empty((n_u, n_v), dtype=float)
+    out = torch.empty((n_u, n_v), dtype=torch.float64, device=self._device)
     for j in range(n_v):
-      out[:, j] = np.interp(upper_grid, s_fine, cum[:, j])
+      out[:, j] = _torch_interp(upper_grid, s_fine, cum[:, j])
     return out
 
   # -------------------------------------------------------------------
@@ -551,7 +612,7 @@ class PFNRBicop:
 
   def tau(
     self,
-    x_row: ArrayLike | None = None,
+    x_row: TensorLike | None = None,
     *,
     n: int = 1000,
     seeds: list[int] | None = None,
@@ -584,25 +645,27 @@ class PFNRBicop:
     from pyvinecopulib import ghalton, wdm
 
     quasi = np.asarray(ghalton(n, 2, seeds_list), dtype=float)
-    u = np.clip(
-      quasi[:, 0], self.quantile_config.eps, 1.0 - self.quantile_config.eps
-    )
-    alpha = np.clip(
-      quasi[:, 1], self.quantile_config.eps, 1.0 - self.quantile_config.eps
+    eps = self.quantile_config.eps
+    u_np = np.clip(quasi[:, 0], eps, 1.0 - eps)
+    alpha_np = np.clip(quasi[:, 1], eps, 1.0 - eps)
+    u_t = torch.as_tensor(u_np, dtype=torch.float64, device=self._device)
+    alpha_t = torch.as_tensor(
+      alpha_np, dtype=torch.float64, device=self._device
     )
 
     if x_row is None:
-      x_arr = self._default_x(n)
+      x_t = self._default_x(n)
     else:
-      x_row_arr = _as_2d(x_row)
-      if x_row_arr.shape[0] != 1:
+      x_row_t = _as_2d(x_row, device=self._device)
+      if x_row_t.shape[0] != 1:
         raise ValueError("x_row must contain exactly one row.")
-      x_arr = np.repeat(x_row_arr, n, axis=0)
+      x_t = x_row_t.repeat_interleave(n, dim=0)
 
     # Inverse Rosenblatt: v = F_{V | U, X}^{-1}(alpha | u, x).
-    v = self.v_given_ux_.icdf(self._features(u, x_arr), alpha)
+    v_t = self.v_given_ux_.icdf(self._features(u_t, x_t), alpha_t)
+    assert isinstance(v_t, torch.Tensor)
 
-    return float(wdm(u, v, "tau"))
+    return float(wdm(u_np, v_t.detach().cpu().numpy(), "tau"))
 
   # -------------------------------------------------------------------
   # Diagnostic CDF (kept for backward compatibility)
@@ -610,10 +673,10 @@ class PFNRBicop:
 
   def conditional_cdf_v_given_u(
     self,
-    u: ArrayLike,
-    v_grid: ArrayLike,
-    x: ArrayLike | None = None,
-  ) -> np.ndarray:
+    u: TensorLike,
+    v_grid: TensorLike,
+    x: TensorLike | None = None,
+  ) -> TensorLike:
     """``C_{V | U, X}(v_grid[j] | u_i, x_i)`` on a grid of ``v`` values.
 
     Thin wrapper over :py:meth:`hfunc1` (which conditions on ``u`` per
@@ -621,28 +684,38 @@ class PFNRBicop:
     ``v_grid``.  Inputs are validated to lie strictly inside
     ``(0, 1)`` and ``v_grid`` must be strictly increasing.
     """
-    u_arr = np.asarray(u, dtype=float).reshape(-1)
-    x_arr = self._default_x(len(u_arr)) if x is None else _as_2d(x)
-    v_arr = np.asarray(v_grid, dtype=float).reshape(-1)
+    return_as_torch, (u_in, v_in, x_in) = _normalize_inputs(
+      u, v_grid, x, device=self._device
+    )
+    assert u_in is not None and v_in is not None
+    u_t = u_in.reshape(-1)
+    v_t = v_in.reshape(-1)
+    x_t = (
+      self._default_x(u_t.shape[0])
+      if x_in is None
+      else _as_2d(x_in, device=self._device)
+    )
 
-    if len(u_arr) != x_arr.shape[0]:
+    if u_t.shape[0] != x_t.shape[0]:
       raise ValueError("u and x must have the same number of observations.")
-    if np.any(np.diff(v_arr) <= 0):
+    if torch.any(torch.diff(v_t) <= 0):
       raise ValueError("v_grid must be strictly increasing.")
-    if v_arr[0] <= 0.0 or v_arr[-1] >= 1.0:
+    if v_t[0] <= 0.0 or v_t[-1] >= 1.0:
       raise ValueError("v_grid must lie strictly inside (0, 1).")
 
-    n_u, n_v = len(u_arr), len(v_arr)
-    u_flat = np.repeat(u_arr, n_v)
-    v_flat = np.tile(v_arr, n_u)
-    x_flat = np.repeat(x_arr, n_v, axis=0)
-    return self.hfunc1(u_flat, v_flat, x_flat).reshape(n_u, n_v)
+    n_u, n_v = u_t.shape[0], v_t.shape[0]
+    u_flat = u_t.repeat_interleave(n_v)
+    v_flat = v_t.tile(n_u)
+    x_flat = x_t.repeat_interleave(n_v, dim=0)
+    out = self.hfunc1(u_flat, v_flat, x_flat)
+    assert isinstance(out, torch.Tensor)
+    return _wrap_output(out.reshape(n_u, n_v), return_as_torch=return_as_torch)
 
   # -------------------------------------------------------------------
   # pyvinecopulib-compatible plotting interface.
   # -------------------------------------------------------------------
 
-  def as_bicop(self, x_row: ArrayLike | None = None) -> _BicopAdapter:
+  def as_bicop(self, x_row: TensorLike | None = None) -> _BicopAdapter:
     """Return a duck-typed bivariate-copula adapter bound to ``x_row``.
 
     The returned object exposes ``var_types = ["c", "c"]`` and a
@@ -662,7 +735,7 @@ class PFNRBicop:
   def plot(
     self,
     *,
-    x_row: ArrayLike | None = None,
+    x_row: TensorLike | None = None,
     plot_type: Literal["contour", "surface"] = "contour",
     margin_type: Literal["unif", "norm", "exp"] = "norm",
     grid_size: int | None = None,
@@ -715,21 +788,24 @@ class _BicopAdapter:
   :py:meth:`PFNRBicop.pdf_grid` path under the hood.  This is
   always the case for the regular grids built by pyvinecopulib's
   plotter.
+
+  The adapter is the pyvinecopulib boundary, so its ``pdf`` always
+  returns a NumPy array regardless of input type.
   """
 
   var_types: list[str] = ["c", "c"]
 
-  def __init__(self, model: PFNRBicop, x_row: ArrayLike | None = None) -> None:
+  def __init__(self, model: PFNRBicop, x_row: TensorLike | None = None) -> None:
     self._model = model
     if x_row is None:
-      self._x_row: np.ndarray | None = None
+      self._x_row: torch.Tensor | None = None
     else:
-      x_row_arr = _as_2d(x_row)
-      if x_row_arr.shape[0] != 1:
+      x_row_t = _as_2d(x_row, device=model._device)
+      if x_row_t.shape[0] != 1:
         raise ValueError("x_row must contain exactly one row.")
-      self._x_row = x_row_arr
+      self._x_row = x_row_t
 
-  def pdf(self, uv: ArrayLike) -> np.ndarray:
+  def pdf(self, uv: TensorLike) -> np.ndarray:
     """Evaluate ``c(u_i, v_i | x_row)`` for each row of ``uv``.
 
     ``uv`` must have shape ``(n, 2)``.  When the underlying model uses
@@ -737,17 +813,20 @@ class _BicopAdapter:
     product (the typical plotting case), the call is rerouted through
     :py:meth:`PFNRBicop.pdf_grid` for speed.
     """
-    uv_arr = np.asarray(uv, dtype=float)
-    if uv_arr.ndim != 2 or uv_arr.shape[1] != 2:
+    uv_t = _to_tensor(uv, device=self._model._device)
+    if uv_t.ndim != 2 or uv_t.shape[1] != 2:
       raise ValueError("uv must have shape (n, 2).")
-    n = uv_arr.shape[0]
+    n = uv_t.shape[0]
 
     if self._model.method == "criterion":
-      unique_u, inv_u = np.unique(uv_arr[:, 0], return_inverse=True)
-      unique_v, inv_v = np.unique(uv_arr[:, 1], return_inverse=True)
-      if len(unique_u) * len(unique_v) == n:
+      unique_u, inv_u = torch.unique(uv_t[:, 0], return_inverse=True)
+      unique_v, inv_v = torch.unique(uv_t[:, 1], return_inverse=True)
+      if unique_u.shape[0] * unique_v.shape[0] == n:
         grid = self._model.pdf_grid(unique_u, unique_v, x_row=self._x_row)
-        return grid[inv_u, inv_v]
+        assert isinstance(grid, torch.Tensor)
+        return grid[inv_u, inv_v].detach().cpu().numpy()
 
-    x = None if self._x_row is None else np.repeat(self._x_row, n, axis=0)
-    return self._model.pdf(uv_arr[:, 0], uv_arr[:, 1], x)
+    x = None if self._x_row is None else self._x_row.repeat_interleave(n, dim=0)
+    out = self._model.pdf(uv_t[:, 0], uv_t[:, 1], x)
+    assert isinstance(out, torch.Tensor)
+    return out.detach().cpu().numpy()

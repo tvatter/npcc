@@ -19,9 +19,9 @@ table:
   1. Sort the predicted quantiles per observation (monotone
      rearrangement; TabPFN's quantile output is not guaranteed monotone
      for tightly spaced ``alpha``).
-  2. Compute ``dQ/dalpha`` with :func:`numpy.gradient`, clipped to
-     ``min_qprime`` to avoid the singular ``1 / 0`` at constant
-     plateaus.
+  2. Compute ``dQ/dalpha`` with a torch port of :func:`numpy.gradient`,
+     clipped to ``min_qprime`` to avoid the singular ``1 / 0`` at
+     constant plateaus.
   3. Locate ``alpha(y) = F(y | w)`` by interpolating ``y`` in the
      ``(Q, alpha)`` table.
   4. Read off ``f_at_q = 1 / Q'`` at ``alpha(y)``.
@@ -57,14 +57,20 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Literal, Self
+from typing import Any, Literal
 
 import numpy as np
-from numpy.typing import ArrayLike
-from tabpfn import TabPFNRegressor
-from tabpfn.constants import ModelVersion
+import torch
 
-from npcc._common import _as_2d
+from npcc._common import (
+  TensorLike,
+  _as_2d,
+  _normalize_inputs,
+  _torch_gradient_1d,
+  _torch_interp_batched_fp,
+  _torch_interp_batched_xp,
+  _wrap_output,
+)
 from npcc.tabpfn_distribution1d import TabPFNDistribution1D
 
 logger = logging.getLogger(__name__)
@@ -99,7 +105,11 @@ class QuantileGridConfig:
   eps: float = 1e-6
 
   def alphas(self) -> np.ndarray:
-    """Return the validated ``alpha`` grid."""
+    """Return the validated ``alpha`` grid as a NumPy array.
+
+    NumPy here is convenient for forwarding to TabPFN's
+    ``predict(quantiles=...)`` API, which expects a Python list.
+    """
     if not (0.0 < self.alpha_min < self.alpha_max < 1.0):
       raise ValueError("Require 0 < alpha_min < alpha_max < 1.")
     if self.n_quantiles < 5:
@@ -123,6 +133,8 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
       Quantile-grid configuration.  Defaults to
       :class:`QuantileGridConfig`.  Its ``eps`` controls the boundary
       clipping used by the logit transform.
+  device
+      Forwarded to the base class.
   model_kwargs
       Forwarded to
       :py:meth:`TabPFNRegressor.create_default_for_version`.
@@ -135,41 +147,25 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
     *,
     transform: Literal["identity", "logit"] = "logit",
     config: QuantileGridConfig | None = None,
+    device: str | torch.device | None = None,
     model_kwargs: dict[str, Any] | None = None,
   ) -> None:
     cfg = config or QuantileGridConfig()
     super().__init__(
-      transform=transform, eps=cfg.eps, model_kwargs=model_kwargs
+      transform=transform,
+      eps=cfg.eps,
+      device=device,
+      model_kwargs=model_kwargs,
     )
     self.config = cfg
-
-  def fit(self, w: ArrayLike, y: ArrayLike) -> Self:
-    """Fit a TabPFN-v2.5 regressor on ``(w, transform(y))``.
-
-    The estimator is locked to TabPFN-v2.5 because v2.6 has reported
-    regressions on tabular regression tasks.  Override via
-    ``model_kwargs`` if needed.
-    """
-    w_arr = _as_2d(w)
-    y_arr = np.asarray(y, dtype=float).reshape(-1)
-    if len(y_arr) != w_arr.shape[0]:
-      raise ValueError("w and y have incompatible lengths.")
-
-    z = self._transform_y(y_arr)
-
-    self.model_ = TabPFNRegressor.create_default_for_version(
-      ModelVersion.V2_5, **self.model_kwargs
-    )
-    self.model_.fit(w_arr, z)
-    return self
 
   # ------------------------------------------------------------------
   # Internal: shared quantile-table prediction.
   # ------------------------------------------------------------------
 
   def _predict_quantile_table(
-    self, w_arr: np.ndarray
-  ) -> tuple[np.ndarray, np.ndarray]:
+    self, w_t: torch.Tensor
+  ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return ``(q_sorted [n_obs, n_alphas], alphas [n_alphas])``.
 
     Single TabPFN forward pass; rows of ``q_sorted`` are sorted to
@@ -179,96 +175,98 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
     if self.model_ is None:
       raise RuntimeError("The model is not fitted.")
 
-    alphas = self.config.alphas()
+    alphas_np = self.config.alphas()
     q_pred = self.model_.predict(
-      w_arr,
+      w_t.detach().cpu(),
       output_type="quantiles",
-      quantiles=alphas.tolist(),
+      quantiles=alphas_np.tolist(),
     )
 
     q = np.asarray(q_pred, dtype=float)
-    n_obs = w_arr.shape[0]
+    n_obs = w_t.shape[0]
 
     # TabPFN's quantile output may be (n_obs, n_quantiles) or its
     # transpose, depending on the version. Normalise here.
-    if q.shape == (len(alphas), n_obs):
+    if q.shape == (len(alphas_np), n_obs):
       logger.debug(
         "Reshaping TabPFN quantile output from (n_q, n_obs) to (n_obs, n_q)."
       )
       q = q.T
-    elif q.shape != (n_obs, len(alphas)):
+    elif q.shape != (n_obs, len(alphas_np)):
       raise RuntimeError(
         "Unexpected quantile output shape. "
-        f"Got {q.shape}, expected {(len(alphas), n_obs)} "
-        f"or {(n_obs, len(alphas))}."
+        f"Got {q.shape}, expected {(len(alphas_np), n_obs)} "
+        f"or {(n_obs, len(alphas_np))}."
       )
 
-    return np.sort(q, axis=1), alphas
+    q_t = torch.as_tensor(q, dtype=torch.float64, device=self._device)
+    alphas_t = torch.as_tensor(
+      alphas_np, dtype=torch.float64, device=self._device
+    )
+    q_sorted, _ = torch.sort(q_t, dim=1)
+    return q_sorted, alphas_t
 
   # ------------------------------------------------------------------
   # Public API: pdf / cdf / icdf.
   # ------------------------------------------------------------------
 
-  def pdf(self, w: ArrayLike, y: ArrayLike) -> np.ndarray:
+  def pdf(self, w: TensorLike, y: TensorLike) -> TensorLike:
     """Return ``f(y_i | w_i)`` for each row ``i``.
 
     ``w`` and ``y`` must have the same number of rows.  Out-of-support
     queries (``z`` outside the predicted quantile range) return ``0``.
     """
-    w_arr = _as_2d(w)
-    y_arr = np.asarray(y, dtype=float).reshape(-1)
-    if len(y_arr) != w_arr.shape[0]:
+    return_as_torch, (w_in, y_in) = _normalize_inputs(w, y, device=self._device)
+    assert w_in is not None and y_in is not None
+    w_t = _as_2d(w_in, device=self._device)
+    y_t = y_in.reshape(-1)
+    if y_t.shape[0] != w_t.shape[0]:
       raise ValueError("w and y have incompatible lengths.")
 
-    z = self._transform_y(y_arr)
-    q_sorted, alphas = self._predict_quantile_table(w_arr)
-    n_obs = w_arr.shape[0]
+    z = self._transform_y(y_t)
+    q_sorted, alphas = self._predict_quantile_table(w_t)
 
-    dens_z = np.empty(n_obs, dtype=float)
+    dq_da = _torch_gradient_1d(q_sorted, alphas)
+    dq_da = torch.clamp(dq_da, min=self.config.min_qprime)
+    f_at_q = 1.0 / dq_da
 
-    for i in range(n_obs):
-      qi = q_sorted[i]
-      dq_da = np.gradient(qi, alphas)
-      dq_da = np.maximum(dq_da, self.config.min_qprime)
-      f_at_q = 1.0 / dq_da
+    alpha_at_z = _torch_interp_batched_xp(
+      z, q_sorted, alphas.expand_as(q_sorted)
+    )
+    dens_z = _torch_interp_batched_fp(alpha_at_z, alphas, f_at_q)
 
-      z_i = z[i]
-      if z_i <= qi[0] or z_i >= qi[-1]:
-        dens_z[i] = 0.0
-      else:
-        alpha_i = np.interp(z_i, qi, alphas)
-        dens_z[i] = np.interp(alpha_i, alphas, f_at_q)
+    out_of_support = (z <= q_sorted[:, 0]) | (z >= q_sorted[:, -1])
+    dens_z = torch.where(out_of_support, torch.zeros_like(dens_z), dens_z)
 
-    return dens_z * self._jacobian_inverse(y_arr)
+    out = dens_z * self._jacobian_inverse(y_t)
+    return _wrap_output(out, return_as_torch=return_as_torch)
 
-  def cdf(self, w: ArrayLike, y: ArrayLike) -> np.ndarray:
+  def cdf(self, w: TensorLike, y: TensorLike) -> TensorLike:
     """Return ``F(y_i | w_i) = P(Y <= y_i | W = w_i)`` per row.
 
     Computed by inverting the quantile table: ``F(y | w) = α`` such
     that ``Q(α | w) = transform(y)``.  Linear interpolation between
-    grid alphas; ``np.interp``'s flat extrapolation outside the
-    empirical quantile range yields ``alpha_min`` / ``alpha_max``,
-    matching the support of the alpha grid.
+    grid alphas; flat extrapolation outside the empirical quantile
+    range yields ``alpha_min`` / ``alpha_max``, matching the support
+    of the alpha grid.
 
     No Jacobian correction: monotone transforms preserve the CDF, so
     ``F_Y(y | w) = F_Z(transform(y) | w)``.
     """
-    w_arr = _as_2d(w)
-    y_arr = np.asarray(y, dtype=float).reshape(-1)
-    if len(y_arr) != w_arr.shape[0]:
+    return_as_torch, (w_in, y_in) = _normalize_inputs(w, y, device=self._device)
+    assert w_in is not None and y_in is not None
+    w_t = _as_2d(w_in, device=self._device)
+    y_t = y_in.reshape(-1)
+    if y_t.shape[0] != w_t.shape[0]:
       raise ValueError("w and y have incompatible lengths.")
 
-    z = self._transform_y(y_arr)
-    q_sorted, alphas = self._predict_quantile_table(w_arr)
-    n_obs = w_arr.shape[0]
+    z = self._transform_y(y_t)
+    q_sorted, alphas = self._predict_quantile_table(w_t)
 
-    cdf_z = np.empty(n_obs, dtype=float)
-    for i in range(n_obs):
-      cdf_z[i] = np.interp(z[i], q_sorted[i], alphas)
+    out = _torch_interp_batched_xp(z, q_sorted, alphas.expand_as(q_sorted))
+    return _wrap_output(out, return_as_torch=return_as_torch)
 
-    return cdf_z
-
-  def icdf(self, w: ArrayLike, alphas: ArrayLike) -> np.ndarray:
+  def icdf(self, w: TensorLike, alphas: TensorLike) -> TensorLike:
     """Per-row conditional quantile ``F^{-1}(alphas_i | w_i)`` on the y-scale.
 
     For each row ``i``, returns ``y`` such that
@@ -276,18 +274,19 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
     the predicted quantile table: ``Q(alphas_i | w_i)``.  Used by the
     Rosenblatt simulation recipe behind :py:meth:`PFNRBicop.tau`.
     """
-    w_arr = _as_2d(w)
-    alpha_arr = np.asarray(alphas, dtype=float).reshape(-1)
-    if len(alpha_arr) != w_arr.shape[0]:
+    return_as_torch, (w_in, a_in) = _normalize_inputs(
+      w, alphas, device=self._device
+    )
+    assert w_in is not None and a_in is not None
+    w_t = _as_2d(w_in, device=self._device)
+    alpha_t = a_in.reshape(-1)
+    if alpha_t.shape[0] != w_t.shape[0]:
       raise ValueError("w and alphas have incompatible lengths.")
-    if np.any((alpha_arr <= 0.0) | (alpha_arr >= 1.0)):
+    if torch.any((alpha_t <= 0.0) | (alpha_t >= 1.0)):
       raise ValueError("alphas must lie strictly inside (0, 1).")
 
-    q_sorted, table_alphas = self._predict_quantile_table(w_arr)
-    n_obs = w_arr.shape[0]
-
-    z_out = np.empty(n_obs, dtype=float)
-    for i in range(n_obs):
-      z_out[i] = np.interp(alpha_arr[i], table_alphas, q_sorted[i])
-
-    return self._inverse_transform(z_out)
+    q_sorted, table_alphas = self._predict_quantile_table(w_t)
+    z_out = _torch_interp_batched_fp(alpha_t, table_alphas, q_sorted)
+    return _wrap_output(
+      self._inverse_transform(z_out), return_as_torch=return_as_torch
+    )

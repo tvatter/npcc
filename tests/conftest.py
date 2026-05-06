@@ -27,12 +27,10 @@ import torch
 
 pytest.importorskip("tabpfn")
 
-# Modules whose ``TabPFNRegressor`` symbol we patch in the fixtures.
-# Both density classes import ``TabPFNRegressor`` directly, so each
-# module attribute needs its own monkeypatch.
+# The shared ``fit`` lives on the base class, so we only need to patch
+# the ``TabPFNRegressor`` symbol there.
 _TABPFN_REGRESSOR_TARGETS = (
-  "npcc.tabpfn_criterion_distribution1d.TabPFNRegressor",
-  "npcc.tabpfn_quantile_distribution1d.TabPFNRegressor",
+  "npcc.tabpfn_distribution1d.TabPFNRegressor",
 )
 
 
