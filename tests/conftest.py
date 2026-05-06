@@ -31,8 +31,8 @@ pytest.importorskip("tabpfn")
 # Both density classes import ``TabPFNRegressor`` directly, so each
 # module attribute needs its own monkeypatch.
 _TABPFN_REGRESSOR_TARGETS = (
-  "npcc.tabpfn_density1d.TabPFNRegressor",
-  "npcc.tabpfn_quantile_density1d.TabPFNRegressor",
+  "npcc.tabpfn_criterion_distribution1d.TabPFNRegressor",
+  "npcc.tabpfn_quantile_distribution1d.TabPFNRegressor",
 )
 
 

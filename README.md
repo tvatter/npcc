@@ -3,8 +3,11 @@
 A Python library for **conditional bivariate copula density estimation**
 backed by [TabPFN](https://github.com/PriorLabs/TabPFN).  The package
 exposes one outer estimator — `PFNRBicop` — and two interchangeable
-inner univariate-conditional-density estimators that read the density
-out of a fitted TabPFN regressor in two complementary ways.
+inner univariate-conditional-predictive-distribution wrappers
+(`TabPFNCriterionDistribution1D`, `TabPFNQuantileDistribution1D`,
+both subclassing the abstract `TabPFNDistribution1D`).  They read the
+predictive distribution (`pdf`, `cdf`, `icdf`) off a fitted TabPFN
+regressor in two complementary ways.
 
 ---
 
@@ -56,35 +59,38 @@ on a bounded interval.
 
 ---
 
-## Two density-recovery methods
+## Two predictive-distribution recovery methods
 
-Both classes expose the same `fit(w, y)` / `density(w, y)` API and are
+Both subclasses share the abstract `TabPFNDistribution1D` interface
+(`fit(w, y)`, `pdf(w, y)`, `cdf(w, y)`, `icdf(w, alphas)`) and are
 drop-in interchangeable inside `PFNRBicop` via the `method=` argument.
 
-### `TabPFNDensity1D` — TabPFN's native distribution head (default)
+### `TabPFNCriterionDistribution1D` — TabPFN's native distribution head (default)
 
 TabPFN's regressor is internally a classifier over a binned
 distribution.  Calling `predict(W, output_type="full")` returns logits
-over the bins plus a `criterion` object whose `pdf(logits, z)` method
-evaluates the density at arbitrary points,
+over the bins plus a `criterion` object exposing `pdf` / `cdf` /
+`icdf` directly:
 
 $$f(y \mid w) = \mathrm{criterion.pdf}\bigl( \mathrm{logits}(w), \, z = T(y) \bigr).$$
 
 A single forward pass is needed per row of $W$.  The
-`density_grid(w, y_grid)` method exploits this — one forward pass per
-$w$ row, then evaluate at every $y$ value — to produce the full
-Cartesian-product density matrix in a single shot.
+`pdf_grid(w, y_grid)` and `cdf_grid(w, y_grid)` methods exploit this
+— one forward pass per $w$ row, then evaluate at every $y$ value — to
+produce the full Cartesian-product matrix in a single shot.
 
-### `TabPFNQuantileDensity1D` — numerical slope inversion
+### `TabPFNQuantileDistribution1D` — numerical inversion of the quantile table
 
 Asks TabPFN for the conditional quantile function $Q(\alpha \mid w)$
-on a grid of $\alpha$ values, then recovers
+on a grid of $\alpha$ values, then derives each primitive:
 
-$$f(y \mid w) = 1 / Q'(\alpha) \quad \text{at} \quad \alpha = F(y \mid w).$$
+- pdf via $f(y \mid w) = 1 / Q'(\alpha)$ at $\alpha = F(y \mid w)$;
+- cdf and icdf via linear interpolation in the predicted quantile
+  table.
 
-The class enforces monotonicity by sorting (rearrangement), clips the
-slope to a positive floor to avoid singularities at quantile plateaus,
-and uses linear interpolation in both lookup steps.  Slower and less
+The class enforces monotonicity by sorting (rearrangement), clips
+$Q'$ to a positive floor to avoid singularities at quantile plateaus,
+and uses linear interpolation in all lookup steps.  Slower and less
 direct than the criterion approach, but model-agnostic.
 
 ---
@@ -95,10 +101,10 @@ direct than the criterion approach, but model-agnostic.
 
 | Method                              | What it returns                                                                  |
 | ----------------------------------- | -------------------------------------------------------------------------------- |
-| `fit(u, v, x=None)`                 | Fits the inner density estimator(s).  `x=None` → unconditional fit.              |
-| `density(u, v, x=None)`             | Pointwise $\hat c(u_i, v_i \mid x_i)$ (vectorised over rows).                    |
-| `log_density(u, v, x=None)`         | $\log$ of `density`, floored at the smallest positive float.                     |
-| `density_grid(u_grid, v_grid, x_row=None)` | Cartesian-grid density `out[i, j] = c(u_grid[i], v_grid[j] | x_row)`.  Requires `method="criterion"`. |
+| `fit(u, v, x=None)`                 | Fits the inner predictive-distribution estimator(s).  `x=None` → unconditional fit. |
+| `pdf(u, v, x=None)`                 | Pointwise $\hat c(u_i, v_i \mid x_i)$ (vectorised over rows).                    |
+| `log_pdf(u, v, x=None)`             | $\log$ of `pdf`, floored at the smallest positive float.                         |
+| `pdf_grid(u_grid, v_grid, x_row=None)` | Cartesian-grid density `out[i, j] = c(u_grid[i], v_grid[j] | x_row)`.  Requires `method="criterion"`. |
 | `cdf(u, v, x=None, *, n_int=64)`    | Pointwise joint CDF $\hat C(u_i, v_i \mid x_i)$, trapezoidal in $s$ (and $t$ for symmetric). |
 | `cdf_grid(u_grid, v_grid, x_row=None, *, n_int=64)` | Cartesian-grid joint CDF.  Requires `method="criterion"`.            |
 | `hfunc1(u, v, x=None)`              | $h_1(u, v \mid x) = \partial C / \partial u = F_{V \mid U, X}(v \mid u, x)$.  Always available.  Conditions on the first argument (matches `pyvinecopulib`). |
@@ -108,9 +114,11 @@ direct than the criterion approach, but model-agnostic.
 | `as_bicop(x_row=None)`              | Returns a [`pyvinecopulib`](https://github.com/vinecopulib/pyvinecopulib)-compatible adapter (exposes `var_types = ["c", "c"]` and `pdf(uv)`). |
 | `plot(*, x_row=None, plot_type="contour", margin_type="norm", ...)` | Renders a contour or surface plot via `pyvinecopulib`'s plotter (lazy-imports `matplotlib`). |
 
-The two inner classes (`TabPFNDensity1D`, `TabPFNQuantileDensity1D`) are
-also exported and can be used directly for univariate conditional
-density estimation outside the copula context.
+The two concrete subclasses
+(`TabPFNCriterionDistribution1D`, `TabPFNQuantileDistribution1D`) and
+their abstract base (`TabPFNDistribution1D`) are also exported and
+can be used directly for univariate conditional predictive
+distributions outside the copula context.
 
 ### Quick start
 
@@ -135,12 +143,12 @@ model = PFNRBicop()
 model.fit(u[:, 0], u[:, 1])
 
 # Pointwise density
-print(model.density(np.array([0.3, 0.5]), np.array([0.4, 0.6])))
+print(model.pdf(np.array([0.3, 0.5]), np.array([0.4, 0.6])))
 
 # Cartesian-grid density (fast path, criterion method only)
 u_grid = np.linspace(0.05, 0.95, 30)
 v_grid = np.linspace(0.05, 0.95, 30)
-grid = model.density_grid(u_grid, v_grid)   # shape (30, 30)
+grid = model.pdf_grid(u_grid, v_grid)   # shape (30, 30)
 
 # Joint CDF and h-functions (pyvinecopulib convention: h_i conditions on i-th arg)
 C = model.cdf_grid(u_grid, v_grid)            # shape (30, 30)
@@ -165,7 +173,7 @@ To pass a covariate matrix:
 
 ```python
 model.fit(u, v, x=X_train)               # X_train shape (n, p)
-model.density(u_query, v_query, x_query) # x_query shape (n_query, p)
+model.pdf(u_query, v_query, x_query)     # x_query shape (n_query, p)
 ```
 
 To plot at a specific covariate row:

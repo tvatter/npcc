@@ -11,7 +11,7 @@ uniform-margin property of the copula scale ``U``::
 
 So estimating a *conditional bivariate copula density* reduces to
 estimating a *univariate conditional density*, which is exactly what
-:class:`TabPFNDensity1D` and :class:`TabPFNQuantileDensity1D` provide.
+:class:`TabPFNCriterionDistribution1D` and :class:`TabPFNQuantileDistribution1D` provide.
 The features fed to the inner regressor are::
 
     W = [u, x]    (when predicting V | U, X)
@@ -37,13 +37,13 @@ and apply an iterative-proportional-fitting / Sinkhorn projection.
 
 Density-recovery method
 -----------------------
-``method="criterion"`` (default) uses :class:`TabPFNDensity1D`, which
+``method="criterion"`` (default) uses :class:`TabPFNCriterionDistribution1D`, which
 evaluates the conditional density directly via TabPFN's binned
 distribution head.  ``method="quantiles"`` uses
-:class:`TabPFNQuantileDensity1D`, which queries a conditional quantile
+:class:`TabPFNQuantileDistribution1D`, which queries a conditional quantile
 grid and inverts the slope.  The two methods are interchangeable and
 share the same outer ``fit`` / ``density`` API, but only the criterion
-method exposes the ``density_grid`` Cartesian-product fast path.
+method exposes the ``pdf_grid`` Cartesian-product fast path.
 
 Plotting
 --------
@@ -55,7 +55,7 @@ Plotting
 ``pyvinecopulib._python_helpers.bicop.bicop_plot`` to render contour or
 surface plots in the same style used elsewhere in the copula
 ecosystem.  Cartesian-grid queries (which is what plotting always
-produces) automatically take the fast :py:meth:`density_grid` path.
+produces) automatically take the fast :py:meth:`pdf_grid` path.
 
 Authentication
 --------------
@@ -73,13 +73,13 @@ import numpy as np
 from numpy.typing import ArrayLike
 
 from npcc._common import _as_2d, _check_uv
-from npcc.tabpfn_density1d import TabPFNDensity1D
-from npcc.tabpfn_quantile_density1d import (
-  QuantileDensityConfig,
-  TabPFNQuantileDensity1D,
+from npcc.tabpfn_criterion_distribution1d import TabPFNCriterionDistribution1D
+from npcc.tabpfn_quantile_distribution1d import (
+  QuantileGridConfig,
+  TabPFNQuantileDistribution1D,
 )
 
-_DensityModule = TabPFNQuantileDensity1D | TabPFNDensity1D
+_Distribution1D = TabPFNQuantileDistribution1D | TabPFNCriterionDistribution1D
 
 
 class PFNRBicop:
@@ -91,13 +91,13 @@ class PFNRBicop:
       If ``True`` (default), also fit the reverse Rosenblatt direction
       and return the average of the two density estimates.
   method
-      ``"criterion"`` (default) → :class:`TabPFNDensity1D` (direct PDF
-      via TabPFN's binned head).  ``"quantiles"`` →
-      :class:`TabPFNQuantileDensity1D` (numerical inversion of the
-      conditional quantile slope).
-  density_config
-      :class:`QuantileDensityConfig` instance.  Only its ``eps`` field
-      is used by the criterion method (for clipping).  The quantile
+      ``"criterion"`` (default) → :class:`TabPFNCriterionDistribution1D`
+      (direct PDF via TabPFN's binned head).  ``"quantiles"`` →
+      :class:`TabPFNQuantileDistribution1D` (numerical inversion of
+      the conditional quantile slope).
+  quantile_config
+      :class:`QuantileGridConfig` instance.  Only its ``eps`` field is
+      used by the criterion method (for clipping).  The quantile
       method additionally uses the alpha-grid fields.
   model_kwargs
       Forwarded into the inner ``TabPFNRegressor`` (via
@@ -118,29 +118,29 @@ class PFNRBicop:
     *,
     symmetric: bool = True,
     method: Literal["criterion", "quantiles"] = "criterion",
-    density_config: QuantileDensityConfig | None = None,
+    quantile_config: QuantileGridConfig | None = None,
     model_kwargs: dict[str, Any] | None = None,
   ) -> None:
     self.symmetric = symmetric
     self.method = method
-    self.density_config = density_config or QuantileDensityConfig()
+    self.quantile_config = quantile_config or QuantileGridConfig()
     self.model_kwargs = model_kwargs or {}
 
-    self.v_given_ux_: _DensityModule = self._make_density_module()
-    self.u_given_vx_: _DensityModule | None = (
-      self._make_density_module() if symmetric else None
+    self.v_given_ux_: _Distribution1D = self._make_distribution()
+    self.u_given_vx_: _Distribution1D | None = (
+      self._make_distribution() if symmetric else None
     )
 
-  def _make_density_module(self) -> _DensityModule:
+  def _make_distribution(self) -> _Distribution1D:
     if self.method == "quantiles":
-      return TabPFNQuantileDensity1D(
+      return TabPFNQuantileDistribution1D(
         transform="logit",
-        config=self.density_config,
+        config=self.quantile_config,
         model_kwargs=self.model_kwargs,
       )
-    return TabPFNDensity1D(
+    return TabPFNCriterionDistribution1D(
       transform="logit",
-      eps=self.density_config.eps,
+      eps=self.quantile_config.eps,
       model_kwargs=self.model_kwargs,
     )
 
@@ -166,7 +166,7 @@ class PFNRBicop:
     ``f(U | V, X)``.  ``x=None`` is shorthand for the unconditional
     case (a constant covariate column).
     """
-    u_arr, v_arr = _check_uv(u, v, self.density_config.eps)
+    u_arr, v_arr = _check_uv(u, v, self.quantile_config.eps)
     x_arr = self._default_x(len(u_arr)) if x is None else _as_2d(x)
 
     if x_arr.shape[0] != len(u_arr):
@@ -180,39 +180,39 @@ class PFNRBicop:
 
     return self
 
-  def density(
+  def pdf(
     self,
     u: ArrayLike,
     v: ArrayLike,
     x: ArrayLike | None = None,
   ) -> np.ndarray:
     """Return the conditional copula density ``c(u_i, v_i | x_i)``."""
-    u_arr, v_arr = _check_uv(u, v, self.density_config.eps)
+    u_arr, v_arr = _check_uv(u, v, self.quantile_config.eps)
     x_arr = self._default_x(len(u_arr)) if x is None else _as_2d(x)
 
     if x_arr.shape[0] != len(u_arr):
       raise ValueError("x, u, and v must have the same number of observations.")
 
-    c_v_given_u = self.v_given_ux_.density(self._features(u_arr, x_arr), v_arr)
+    c_v_given_u = self.v_given_ux_.pdf(self._features(u_arr, x_arr), v_arr)
 
     if not self.symmetric:
       return c_v_given_u
 
     assert self.u_given_vx_ is not None
-    c_u_given_v = self.u_given_vx_.density(self._features(v_arr, x_arr), u_arr)
+    c_u_given_v = self.u_given_vx_.pdf(self._features(v_arr, x_arr), u_arr)
     return 0.5 * (c_v_given_u + c_u_given_v)
 
-  def log_density(
+  def log_pdf(
     self,
     u: ArrayLike,
     v: ArrayLike,
     x: ArrayLike | None = None,
   ) -> np.ndarray:
-    """Log of :py:meth:`density`, floored at the smallest positive float."""
-    c = self.density(u, v, x)
+    """Log of :py:meth:`pdf`, floored at the smallest positive float."""
+    c = self.pdf(u, v, x)
     return np.log(np.maximum(c, np.finfo(float).tiny))
 
-  def density_grid(
+  def pdf_grid(
     self,
     u_grid: ArrayLike,
     v_grid: ArrayLike,
@@ -221,7 +221,7 @@ class PFNRBicop:
     """Density on the Cartesian product ``out[i, j] = c(u_grid[i], v_grid[j] | x)``.
 
     Requires ``method="criterion"`` because it relies on
-    :py:meth:`TabPFNDensity1D.density_grid`.  ``x_row`` is a single
+    :py:meth:`TabPFNCriterionDistribution1D.pdf_grid`.  ``x_row`` is a single
     covariate row reused on both axes; when ``None`` a constant
     one-column row is used.
 
@@ -229,11 +229,9 @@ class PFNRBicop:
     same Cartesian product (transposing the reverse one) and averaged.
     """
     if self.method != "criterion" or not isinstance(
-      self.v_given_ux_, TabPFNDensity1D
+      self.v_given_ux_, TabPFNCriterionDistribution1D
     ):
-      raise RuntimeError(
-        "density_grid is only available when method='criterion'."
-      )
+      raise RuntimeError("pdf_grid is only available when method='criterion'.")
 
     u_arr = np.asarray(u_grid, dtype=float).reshape(-1)
     v_arr = np.asarray(v_grid, dtype=float).reshape(-1)
@@ -242,7 +240,7 @@ class PFNRBicop:
     ):
       raise ValueError("u_grid and v_grid must lie strictly inside (0, 1).")
 
-    eps = self.density_config.eps
+    eps = self.quantile_config.eps
     u_arr = np.clip(u_arr, eps, 1.0 - eps)
     v_arr = np.clip(v_arr, eps, 1.0 - eps)
 
@@ -254,17 +252,17 @@ class PFNRBicop:
         raise ValueError("x_row must contain exactly one row.")
 
     x_for_u = np.repeat(x_row_arr, len(u_arr), axis=0)
-    c_v_given_u = self.v_given_ux_.density_grid(
+    c_v_given_u = self.v_given_ux_.pdf_grid(
       self._features(u_arr, x_for_u), v_arr
     )
 
     if not self.symmetric:
       return c_v_given_u
 
-    assert isinstance(self.u_given_vx_, TabPFNDensity1D)
+    assert isinstance(self.u_given_vx_, TabPFNCriterionDistribution1D)
     x_for_v = np.repeat(x_row_arr, len(v_arr), axis=0)
-    # density_grid returns (n_v, n_u); transpose to align with c_v_given_u.
-    c_u_given_v = self.u_given_vx_.density_grid(
+    # pdf_grid returns (n_v, n_u); transpose to align with c_v_given_u.
+    c_u_given_v = self.u_given_vx_.pdf_grid(
       self._features(v_arr, x_for_v), u_arr
     ).T
 
@@ -298,7 +296,7 @@ class PFNRBicop:
     Convention matches :py:meth:`pyvinecopulib.Bicop.hfunc1`:
     ``hfunc1`` conditions on the first argument.
     """
-    u_arr, v_arr = _check_uv(u, v, self.density_config.eps)
+    u_arr, v_arr = _check_uv(u, v, self.quantile_config.eps)
     x_arr = self._default_x(len(u_arr)) if x is None else _as_2d(x)
 
     if x_arr.shape[0] != len(u_arr):
@@ -329,7 +327,7 @@ class PFNRBicop:
         "(u, v) arguments swapped."
       )
 
-    u_arr, v_arr = _check_uv(u, v, self.density_config.eps)
+    u_arr, v_arr = _check_uv(u, v, self.quantile_config.eps)
     x_arr = self._default_x(len(u_arr)) if x is None else _as_2d(x)
 
     if x_arr.shape[0] != len(u_arr):
@@ -364,7 +362,7 @@ class PFNRBicop:
     if n_int < 2:
       raise ValueError("n_int must be at least 2.")
 
-    u_arr, v_arr = _check_uv(u, v, self.density_config.eps)
+    u_arr, v_arr = _check_uv(u, v, self.quantile_config.eps)
     x_arr = self._default_x(len(u_arr)) if x is None else _as_2d(x)
 
     if x_arr.shape[0] != len(u_arr):
@@ -399,7 +397,7 @@ class PFNRBicop:
     upper: np.ndarray,
     conditioned: np.ndarray,
     x: np.ndarray,
-    module: _DensityModule,
+    module: _Distribution1D,
     first_arg_is_integration_var: bool,
     n_int: int,
   ) -> np.ndarray:
@@ -409,7 +407,7 @@ class PFNRBicop:
     ``[s | x_i]``, matching the inner regressor's expectation that the
     first feature column is the conditioning copula coordinate.
     """
-    eps = self.density_config.eps
+    eps = self.quantile_config.eps
     n = len(upper)
     upper_safe = np.maximum(upper, eps + 1e-12)
 
@@ -453,7 +451,7 @@ class PFNRBicop:
     integral.
     """
     if self.method != "criterion" or not isinstance(
-      self.v_given_ux_, TabPFNDensity1D
+      self.v_given_ux_, TabPFNCriterionDistribution1D
     ):
       raise RuntimeError("cdf_grid is only available when method='criterion'.")
     if n_int < 2:
@@ -466,7 +464,7 @@ class PFNRBicop:
     ):
       raise ValueError("u_grid and v_grid must lie strictly inside (0, 1).")
 
-    eps = self.density_config.eps
+    eps = self.quantile_config.eps
     u_arr = np.clip(u_arr, eps, 1.0 - eps)
     v_arr = np.clip(v_arr, eps, 1.0 - eps)
 
@@ -488,7 +486,7 @@ class PFNRBicop:
     if not self.symmetric:
       return cdf_v_dir
 
-    assert isinstance(self.u_given_vx_, TabPFNDensity1D)
+    assert isinstance(self.u_given_vx_, TabPFNCriterionDistribution1D)
     # Returns (n_v, n_u); transpose to align with cdf_v_dir.
     cdf_u_dir = self._integrate_grid_one_direction(
       upper_grid=v_arr,
@@ -506,14 +504,14 @@ class PFNRBicop:
     upper_grid: np.ndarray,
     conditioned_grid: np.ndarray,
     x_row: np.ndarray,
-    module: TabPFNDensity1D,
+    module: TabPFNCriterionDistribution1D,
     n_int: int,
   ) -> np.ndarray:
     """Compute ∫_0^{upper_grid[i]} F(conditioned_grid[j] | s, x_row) ds.
 
     Returns shape ``(len(upper_grid), len(conditioned_grid))``.
     """
-    eps = self.density_config.eps
+    eps = self.quantile_config.eps
     n_u, n_v = len(upper_grid), len(conditioned_grid)
 
     # Shared fine s-grid covering [eps, max(upper_grid)].
@@ -587,10 +585,10 @@ class PFNRBicop:
 
     quasi = np.asarray(ghalton(n, 2, seeds_list), dtype=float)
     u = np.clip(
-      quasi[:, 0], self.density_config.eps, 1.0 - self.density_config.eps
+      quasi[:, 0], self.quantile_config.eps, 1.0 - self.quantile_config.eps
     )
     alpha = np.clip(
-      quasi[:, 1], self.density_config.eps, 1.0 - self.density_config.eps
+      quasi[:, 1], self.quantile_config.eps, 1.0 - self.quantile_config.eps
     )
 
     if x_row is None:
@@ -714,7 +712,7 @@ class _BicopAdapter:
   When the underlying model uses ``method="criterion"`` and the
   queried ``(u, v)`` pairs span a Cartesian product (``len(unique_u) *
   len(unique_v) == len(uv)``), :py:meth:`pdf` takes the much faster
-  :py:meth:`PFNRBicop.density_grid` path under the hood.  This is
+  :py:meth:`PFNRBicop.pdf_grid` path under the hood.  This is
   always the case for the regular grids built by pyvinecopulib's
   plotter.
   """
@@ -737,7 +735,7 @@ class _BicopAdapter:
     ``uv`` must have shape ``(n, 2)``.  When the underlying model uses
     the ``criterion`` method and ``uv`` happens to span a Cartesian
     product (the typical plotting case), the call is rerouted through
-    :py:meth:`PFNRBicop.density_grid` for speed.
+    :py:meth:`PFNRBicop.pdf_grid` for speed.
     """
     uv_arr = np.asarray(uv, dtype=float)
     if uv_arr.ndim != 2 or uv_arr.shape[1] != 2:
@@ -748,8 +746,8 @@ class _BicopAdapter:
       unique_u, inv_u = np.unique(uv_arr[:, 0], return_inverse=True)
       unique_v, inv_v = np.unique(uv_arr[:, 1], return_inverse=True)
       if len(unique_u) * len(unique_v) == n:
-        grid = self._model.density_grid(unique_u, unique_v, x_row=self._x_row)
+        grid = self._model.pdf_grid(unique_u, unique_v, x_row=self._x_row)
         return grid[inv_u, inv_v]
 
     x = None if self._x_row is None else np.repeat(self._x_row, n, axis=0)
-    return self._model.density(uv_arr[:, 0], uv_arr[:, 1], x)
+    return self._model.pdf(uv_arr[:, 0], uv_arr[:, 1], x)

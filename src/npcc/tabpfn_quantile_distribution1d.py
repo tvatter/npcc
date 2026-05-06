@@ -1,49 +1,56 @@
 """
-tabpfn_quantile_density1d.py — univariate conditional density via TabPFN
-conditional quantiles.
+tabpfn_quantile_distribution1d.py — univariate conditional predictive
+distribution via numerical inversion of TabPFN conditional quantiles.
 
 Approach
 --------
 Given a TabPFN regressor trained to predict ``Y`` given features ``W``,
-we ask the regressor for the conditional quantile function on a fine
-grid of cumulative probabilities
+ask the regressor for the conditional quantile function on a fine grid
+of cumulative probabilities
 
     Q(alpha | w),    alpha in {alpha_1, ..., alpha_K},
 
-then recover the conditional density by inverting the slope of ``Q``::
+then derive each primitive of the predictive distribution from this
+table:
 
-    f(y | w) = 1 / Q'(alpha)    evaluated at    alpha = F(y | w),
+- **PDF.**  Use the change-of-variables formula
+  ``f(y | w) = 1 / Q'(alpha)`` at ``alpha = F(y | w)``.  Numerically:
 
-where ``F`` is the conditional CDF.  Numerically:
+  1. Sort the predicted quantiles per observation (monotone
+     rearrangement; TabPFN's quantile output is not guaranteed monotone
+     for tightly spaced ``alpha``).
+  2. Compute ``dQ/dalpha`` with :func:`numpy.gradient`, clipped to
+     ``min_qprime`` to avoid the singular ``1 / 0`` at constant
+     plateaus.
+  3. Locate ``alpha(y) = F(y | w)`` by interpolating ``y`` in the
+     ``(Q, alpha)`` table.
+  4. Read off ``f_at_q = 1 / Q'`` at ``alpha(y)``.
 
-  1. **Monotone rearrangement.**  Sort the predicted quantiles per
-     observation so they are non-decreasing.  TabPFN's quantile output
-     is not guaranteed to be monotone for tightly spaced ``alpha``.
-  2. **Numerical derivative.**  Compute ``dQ/dalpha`` with
-     :func:`numpy.gradient`, clipped to ``min_qprime`` to avoid the
-     singular ``1 / 0`` that would otherwise appear at constant
-     plateaus of the quantile curve.
-  3. **Locate alpha.**  For a query point ``y``, interpolate
-     ``alpha(y) = F(y | w)`` from the (Q, alpha) table.
-  4. **Read off the density.**  Interpolate ``f_at_q = 1 / Q'`` at
-     ``alpha(y)``.
+- **CDF.**  Linear interpolation in the ``(Q_sorted, alphas)`` table at
+  ``transform(y)``; flat extrapolation outside the empirical range
+  yields ``alpha_min`` / ``alpha_max``, matching the support of the
+  alpha grid.
+
+- **iCDF.**  Linear interpolation in the ``(alphas, Q_sorted)`` table
+  at the requested ``alpha``.  Then map back to the y-scale via the
+  inverse support transform.
+
+This recovery is purely numerical and works with any quantile
+regressor; it does not require access to TabPFN's internal distribution
+head.  The counterpart in
+:mod:`npcc.tabpfn_criterion_distribution1d` calls TabPFN's native
+``criterion.{pdf,cdf,icdf}`` directly, which is faster and avoids the
+slope inversion, but is specific to TabPFN's "full" output.
 
 Logit support transform
 -----------------------
 ``U`` and ``V`` are copula scores in ``(0, 1)`` and quantile estimation
-on a bounded interval is awkward.  When ``transform="logit"`` we instead
-fit the regressor on ``Z = logit(Y)`` (the unbounded image) and convert
-back to the ``Y`` scale via the standard Jacobian::
+on a bounded interval is awkward.  When ``transform="logit"`` we fit
+the regressor on ``Z = logit(Y)`` (the unbounded image) and convert
+back via the standard Jacobian for densities (CDFs and quantiles need
+no correction):
 
     f_Y(y | w) = f_Z(logit(y) | w) / (y * (1 - y)).
-
-Trade-offs
-----------
-This recovery is purely numerical and works with any quantile regressor;
-it does not require access to TabPFN's internal distribution head.  The
-counterpart in :mod:`npcc.tabpfn_density1d` calls TabPFN's native
-``criterion.pdf`` directly, which is faster and avoids the slope
-inversion, but is specific to TabPFN's "full" output.
 """
 
 from __future__ import annotations
@@ -57,13 +64,14 @@ from numpy.typing import ArrayLike
 from tabpfn import TabPFNRegressor
 from tabpfn.constants import ModelVersion
 
-from npcc._common import _as_2d, _logit
+from npcc._common import _as_2d
+from npcc.tabpfn_distribution1d import TabPFNDistribution1D
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class QuantileDensityConfig:
+class QuantileGridConfig:
   """Grid configuration for quantile-based conditional density.
 
   Attributes
@@ -99,62 +107,41 @@ class QuantileDensityConfig:
     return np.linspace(self.alpha_min, self.alpha_max, self.n_quantiles)
 
 
-class TabPFNQuantileDensity1D:
-  """Univariate conditional density ``f(Y | W=w)`` from TabPFN quantiles.
+class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
+  """Univariate conditional predictive distribution via TabPFN quantiles.
 
-  See the module-level docstring for the full algorithm.  The ``fit`` /
-  ``density`` API mirrors :class:`TabPFNDensity1D` so the two classes are
-  drop-in interchangeable inside :class:`PFNRBicop`.
+  See the module-level docstring for the algorithm.  The ``fit`` /
+  ``pdf`` / ``cdf`` / ``icdf`` API mirrors
+  :class:`TabPFNCriterionDistribution1D` so the two classes are drop-in
+  interchangeable inside :class:`PFNRBicop`.
 
   Parameters
   ----------
   transform
-      ``"identity"`` fits TabPFN directly on ``Y``.  ``"logit"`` fits on
-      ``Z = logit(Y)`` and applies the inverse Jacobian on the way out;
-      this is the only sensible choice when ``Y`` is bounded in
-      ``(0, 1)``, which is always the case for copula scores.
+      Forwarded to the base class.
   config
-      Quantile-grid configuration.  Defaults to :class:`QuantileDensityConfig`.
+      Quantile-grid configuration.  Defaults to
+      :class:`QuantileGridConfig`.  Its ``eps`` controls the boundary
+      clipping used by the logit transform.
   model_kwargs
-      Forwarded to :py:meth:`TabPFNRegressor.create_default_for_version`.
-      Useful for ``device=...``, ``n_estimators=...``, etc.
+      Forwarded to
+      :py:meth:`TabPFNRegressor.create_default_for_version`.
   """
+
+  config: QuantileGridConfig
 
   def __init__(
     self,
     *,
     transform: Literal["identity", "logit"] = "logit",
-    config: QuantileDensityConfig | None = None,
+    config: QuantileGridConfig | None = None,
     model_kwargs: dict[str, Any] | None = None,
   ) -> None:
-    self.transform = transform
-    self.config = config or QuantileDensityConfig()
-    self.model_kwargs = model_kwargs or {}
-    self.model_: TabPFNRegressor | None = None
-
-  def _transform_y(self, y: np.ndarray) -> np.ndarray:
-    if self.transform == "identity":
-      return y
-    if self.transform == "logit":
-      y_clip = np.clip(y, self.config.eps, 1.0 - self.config.eps)
-      return _logit(y_clip)
-    raise ValueError(f"Unknown transform: {self.transform}")
-
-  def _jacobian_inverse(self, y: np.ndarray) -> np.ndarray:
-    if self.transform == "identity":
-      return np.ones_like(y)
-    if self.transform == "logit":
-      y_clip = np.clip(y, self.config.eps, 1.0 - self.config.eps)
-      return 1.0 / (y_clip * (1.0 - y_clip))
-    raise ValueError(f"Unknown transform: {self.transform}")
-
-  def _inverse_transform(self, z: np.ndarray) -> np.ndarray:
-    """Map z-space samples back to the y-scale (inverse of ``_transform_y``)."""
-    if self.transform == "identity":
-      return z
-    if self.transform == "logit":
-      return 1.0 / (1.0 + np.exp(-z))  # sigmoid
-    raise ValueError(f"Unknown transform: {self.transform}")
+    cfg = config or QuantileGridConfig()
+    super().__init__(
+      transform=transform, eps=cfg.eps, model_kwargs=model_kwargs
+    )
+    self.config = cfg
 
   def fit(self, w: ArrayLike, y: ArrayLike) -> Self:
     """Fit a TabPFN-v2.5 regressor on ``(w, transform(y))``.
@@ -175,6 +162,10 @@ class TabPFNQuantileDensity1D:
     )
     self.model_.fit(w_arr, z)
     return self
+
+  # ------------------------------------------------------------------
+  # Internal: shared quantile-table prediction.
+  # ------------------------------------------------------------------
 
   def _predict_quantile_table(
     self, w_arr: np.ndarray
@@ -214,7 +205,11 @@ class TabPFNQuantileDensity1D:
 
     return np.sort(q, axis=1), alphas
 
-  def density(self, w: ArrayLike, y: ArrayLike) -> np.ndarray:
+  # ------------------------------------------------------------------
+  # Public API: pdf / cdf / icdf.
+  # ------------------------------------------------------------------
+
+  def pdf(self, w: ArrayLike, y: ArrayLike) -> np.ndarray:
     """Return ``f(y_i | w_i)`` for each row ``i``.
 
     ``w`` and ``y`` must have the same number of rows.  Out-of-support
