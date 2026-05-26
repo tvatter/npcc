@@ -98,7 +98,7 @@ def _sinkhorn_project(
   wv: torch.Tensor,
   n_iters: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-  """Compute Sinkhorn row and column scaling factors.
+  """Compute Sinkhorn row and column scaling factors in log domain.
 
   Performs iterative proportional fitting (IPF) to project the density
   matrix onto the space of densities with marginal constraints
@@ -131,17 +131,33 @@ def _sinkhorn_project(
     raise ValueError("n_iters must be positive.")
 
   m, n = density.shape
-  r = torch.ones(m, dtype=density.dtype, device=density.device)
-  s = torch.ones(n, dtype=density.dtype, device=density.device)
+  tiny = torch.finfo(density.dtype).tiny
+
+  # Work in log space to avoid underflow/overflow in repeated updates.
+  log_density = torch.clamp(density, min=tiny).log()
+  log_wu = torch.clamp(wu, min=tiny).log()
+  log_wv = torch.clamp(wv, min=tiny).log()
+
+  log_r = torch.zeros(m, dtype=density.dtype, device=density.device)
+  log_s = torch.zeros(n, dtype=density.dtype, device=density.device)
 
   for _ in range(n_iters):
-    # Row normalization: scale rows so row integrals = 1
-    row_sums = (density * s[None, :] * wv[None, :]).sum(dim=1)
-    r = 1.0 / torch.clamp(row_sums, min=torch.finfo(density.dtype).tiny)
+    # Row normalization: enforce sum_j density_ij * s_j * wv_j = 1.
+    log_row_sums = torch.logsumexp(
+      log_density + log_s[None, :] + log_wv[None, :],
+      dim=1,
+    )
+    log_r = -log_row_sums
 
-    # Column normalization: scale columns so column integrals = 1
-    col_sums = (density * r[:, None] * wu[:, None]).sum(dim=0)
-    s = 1.0 / torch.clamp(col_sums, min=torch.finfo(density.dtype).tiny)
+    # Column normalization: enforce sum_i density_ij * r_i * wu_i = 1.
+    log_col_sums = torch.logsumexp(
+      log_density + log_r[:, None] + log_wu[:, None],
+      dim=0,
+    )
+    log_s = -log_col_sums
+
+  r = torch.exp(log_r)
+  s = torch.exp(log_s)
 
   return r, s
 
