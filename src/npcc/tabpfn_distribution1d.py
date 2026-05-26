@@ -118,14 +118,12 @@ class TabPFNDistribution1D(ABC):
     raise ValueError(f"Unknown transform: {self.transform}")
 
   # ------------------------------------------------------------------
-  # Shared fit (TabPFN-v2.5 regressor on (w, transform(y))).
+  # Shared fit (TabPFN-v3 regressor on (w, transform(y))).
   # ------------------------------------------------------------------
 
   def fit(self, w: TensorLike, y: TensorLike) -> Self:
-    """Fit a TabPFN-v2.5 regressor on ``(w, transform(y))``.
-
-    Locked to TabPFN-v2.5 because v2.6 has reported regressions on
-    tabular regression tasks.  Override via ``model_kwargs`` if needed.
+    """Fit a TabPFN-v3 regressor on ``(w, transform(y))``. Override via 
+    ``model_kwargs`` if needed.
 
     The fit-time tensors live on CPU: TabPFN does its own GPU
     placement internally and would reject CUDA tensors at the input
@@ -140,7 +138,7 @@ class TabPFNDistribution1D(ABC):
     z = self._transform_y(y_t)
 
     self.model_ = TabPFNRegressor.create_default_for_version(
-      ModelVersion.V2_5, **self.model_kwargs
+      ModelVersion.V3, **self.model_kwargs
     )
     self.model_.fit(w_t, z)
     return self

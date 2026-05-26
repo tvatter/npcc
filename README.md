@@ -230,14 +230,13 @@ PriorLabs portal.
    `PFNRBicop`.  Alternatively, just `export TABPFN_TOKEN=...` in your
    shell.
 
-The first call to `model.fit(...)` downloads the TabPFN-v2.5 regressor
+The first call to `model.fit(...)` downloads the TabPFN-v3 regressor
 checkpoint from HuggingFace into the platform cache directory (Linux
 default: `~/.cache/tabpfn/`; override with `TABPFN_MODEL_CACHE_DIR`).
 Subsequent runs are fully offline.
 
-> **Why v2.5?**  `PFNRBicop` is locked to TabPFN-v2.5 because v2.6 has
-> reported regressions on tabular regression tasks.  Override via
-> `model_kwargs={...}` if needed.
+> **Model version:** `PFNRBicop` currently uses TabPFN-v3. Override via 
+`model_kwargs={...}` if needed.
 
 ### CPU sample-size cap
 
@@ -268,6 +267,6 @@ uv run jupyter nbconvert --to notebook --execute --inplace notebooks/pfnr_bicop_
 
 The test suite contains an integration test
 (`tests/test_pfnr_bicop.py::test_real_tabpfn_smoke`) that hits the real
-TabPFN-v2.5 model.  It is skipped automatically when `TABPFN_TOKEN` is
+TabPFN-v3 model.  It is skipped automatically when `TABPFN_TOKEN` is
 unset or when the PriorLabs license endpoint is unreachable, so the
 default unit-test surface stays hermetic.

@@ -61,7 +61,7 @@ Authentication
 --------------
 The local ``tabpfn`` package authenticates once via the
 ``TABPFN_TOKEN`` environment variable and then runs locally.  Set the
-token before calling :py:meth:`fit`.  Model weights for TabPFN-v2.5 are
+token before calling :py:meth:`fit`.  Model weights for TabPFN-v3 are
 pulled from HuggingFace on first use into the platform cache directory.
 """
 
