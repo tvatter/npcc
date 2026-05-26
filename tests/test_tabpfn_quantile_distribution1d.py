@@ -15,6 +15,18 @@ from npcc.tabpfn_quantile_distribution1d import (
 from tests.conftest import uniform_density_y
 
 
+def _stdnorm_cdf(z: np.ndarray) -> np.ndarray:
+  z_t = torch.as_tensor(z, dtype=torch.float64)
+  out = 0.5 * (1.0 + torch.erf(z_t / np.sqrt(2.0)))
+  return out.detach().cpu().numpy()
+
+
+def _stdnorm_ppf(p: np.ndarray) -> np.ndarray:
+  p_t = torch.as_tensor(p, dtype=torch.float64)
+  out = np.sqrt(2.0) * torch.erfinv(2.0 * p_t - 1.0)
+  return out.detach().cpu().numpy()
+
+
 class TestQuantileGridConfig:
   def test_default_alphas_shape(self) -> None:
     cfg = QuantileGridConfig()
@@ -123,6 +135,31 @@ class TestQuantileDistribution1D:
     w = np.zeros((len(z), 1))
     actual = qd.pdf(w, z)
     np.testing.assert_allclose(actual, np.full(3, 0.25), atol=1e-8)
+
+  def test_probit_transform_pdf_cdf_icdf_match_analytic(
+    self, patch_uniform: None
+  ) -> None:
+    qd = TabPFNQuantileDistribution1D(transform="probit")
+    qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
+
+    y = np.array([0.2, 0.5, 0.8])
+    w = np.zeros((len(y), 1))
+    z = _stdnorm_ppf(y)
+    phi_z = np.exp(-0.5 * z * z) / np.sqrt(2.0 * np.pi)
+
+    pdf_actual = qd.pdf(w, y)
+    pdf_expected = 0.25 / phi_z
+    np.testing.assert_allclose(pdf_actual, pdf_expected, atol=1e-6)
+
+    cdf_actual = qd.cdf(w, y)
+    cdf_expected = np.clip((z + 2.0) / 4.0, 0.0, 1.0)
+    np.testing.assert_allclose(cdf_actual, cdf_expected, atol=1e-3)
+
+    alphas = np.array([0.1, 0.3, 0.5, 0.7, 0.9])
+    w_alpha = np.zeros((len(alphas), 1))
+    icdf_actual = qd.icdf(w_alpha, alphas)
+    icdf_expected = _stdnorm_cdf(-2.0 + 4.0 * alphas)
+    np.testing.assert_allclose(icdf_actual, icdf_expected, atol=1e-3)
 
   def test_unknown_transform_raises(self) -> None:
     bad: Any = "exp"  # bypass Literal type for test

@@ -37,6 +37,7 @@ class TestPFNRInit:
     m = PFNRBicop()
     assert m.symmetric is True
     assert m.method == "criterion"
+    assert m.transform == "logit"
     assert isinstance(m.v_given_ux_, TabPFNCriterionDistribution1D)
     assert m.u_given_vx_ is not None
 
@@ -48,6 +49,20 @@ class TestPFNRInit:
   def test_method_quantiles_uses_quantile_module(self) -> None:
     m = PFNRBicop(method="quantiles")
     assert isinstance(m.v_given_ux_, TabPFNQuantileDistribution1D)
+
+  @pytest.mark.parametrize("method", ["criterion", "quantiles"])
+  @pytest.mark.parametrize("transform", ["identity", "probit"])
+  def test_transform_is_propagated_to_inner_distributions(
+    self, method: str, transform: str
+  ) -> None:
+    m = PFNRBicop(
+      method=method,  # ty: ignore[invalid-argument-type]
+      transform=transform,  # ty: ignore[invalid-argument-type]
+    )
+    assert m.transform == transform
+    assert m.v_given_ux_.transform == transform
+    if m.u_given_vx_ is not None:
+      assert m.u_given_vx_.transform == transform
 
 
 # ===========================================================================

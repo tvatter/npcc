@@ -108,6 +108,11 @@ class PFNRBicop:
       :class:`QuantileGridConfig` instance.  Only its ``eps`` field is
       used by the criterion method (for clipping).  The quantile
       method additionally uses the alpha-grid fields.
+  transform
+      Support transform used by the inner TabPFN distribution models.
+      ``"logit"`` (default) maps copula values in ``(0, 1)`` to
+      ``R`` before fitting; ``"probit"`` applies ``Phi^{-1}``; and
+      ``"identity"`` keeps the original scale.
   device
       Device for internal tensors and TabPFN inference.  ``None``
       (default) auto-selects ``cuda`` if available, else ``cpu``.
@@ -136,12 +141,14 @@ class PFNRBicop:
     symmetric: bool = True,
     method: Literal["criterion", "quantiles"] = "criterion",
     quantile_config: QuantileGridConfig | None = None,
+    transform: Literal["identity", "logit", "probit"] = "logit",
     device: str | torch.device | None = None,
     model_kwargs: dict[str, Any] | None = None,
   ) -> None:
     self.symmetric = symmetric
     self.method = method
     self.quantile_config = quantile_config or QuantileGridConfig()
+    self.transform = transform
     self._device = _resolve_device(device)
     self.model_kwargs = dict(model_kwargs or {})
 
@@ -153,13 +160,13 @@ class PFNRBicop:
   def _make_distribution(self) -> _Distribution1D:
     if self.method == "quantiles":
       return TabPFNQuantileDistribution1D(
-        transform="logit",
+        transform=self.transform,
         config=self.quantile_config,
         device=self._device,
         model_kwargs=self.model_kwargs,
       )
     return TabPFNCriterionDistribution1D(
-      transform="logit",
+      transform=self.transform,
       eps=self.quantile_config.eps,
       device=self._device,
       model_kwargs=self.model_kwargs,
