@@ -51,17 +51,18 @@ class TestPFNRInit:
     assert isinstance(m.v_given_ux_, TabPFNQuantileDistribution1D)
 
   @pytest.mark.parametrize("method", ["criterion", "quantiles"])
+  @pytest.mark.parametrize("transform", ["identity", "probit"])
   def test_transform_is_propagated_to_inner_distributions(
-    self, method: str
+    self, method: str, transform: str
   ) -> None:
     m = PFNRBicop(
       method=method,  # ty: ignore[invalid-argument-type]
-      transform="identity",
+      transform=transform,  # ty: ignore[invalid-argument-type]
     )
-    assert m.transform == "identity"
-    assert m.v_given_ux_.transform == "identity"
+    assert m.transform == transform
+    assert m.v_given_ux_.transform == transform
     if m.u_given_vx_ is not None:
-      assert m.u_given_vx_.transform == "identity"
+      assert m.u_given_vx_.transform == transform
 
 
 # ===========================================================================
