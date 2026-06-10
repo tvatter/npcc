@@ -25,14 +25,23 @@ this avoids querying a quantile grid and inverting a numerical
 derivative for the PDF, so it is faster and typically more accurate,
 but it is specific to TabPFN's binned output.
 
-Logit support transform
------------------------
+Support transforms
+------------------
 ``U`` and ``V`` are copula scores in ``(0, 1)``.  When
-``transform="logit"`` we fit on ``Z = logit(Y)`` and convert back via
-the standard Jacobian for densities (CDFs and quantiles need no
+``transform="logit"`` we fit on ``Z = logit(Y)``; with
+``transform="probit"`` we use ``Z = Phi^{-1}(Y)``. Convert back via
+the corresponding Jacobian for densities (CDFs and quantiles need no
 correction since monotone transforms preserve them):
 
-    f_Y(y | w) = f_Z(logit(y) | w) / (y * (1 - y)).
+  f_Y(y | w) = f_Z(T(y) | w) * |dT(y)/dy|.
+
+For example, ``T(y) = logit(y)`` gives
+
+  f_Y(y | w) = f_Z(logit(y) | w) / (y * (1 - y)),
+
+while ``T(y) = Phi^{-1}(y)`` gives
+
+  f_Y(y | w) = f_Z(Phi^{-1}(y) | w) / phi(Phi^{-1}(y)).
 
 Cartesian-product evaluation (``pdf_grid`` / ``cdf_grid``)
 ----------------------------------------------------------

@@ -46,16 +46,33 @@ which reduces directional bias.  It still does not impose exact uniform
 copula margins; if you need that, evaluate the density on a grid and
 apply iterative-proportional-fitting / Sinkhorn projection.
 
-### Logit transform
+### Support transforms
 
-Both copula scores live in $(0, 1)$.  By default the inner density
-estimator fits TabPFN on $Z = \mathrm{logit}(Y)$ — the unbounded image —
-and converts back via the standard Jacobian,
+Both copula scores live in $(0, 1)$.  The inner estimator can fit
+TabPFN on a transformed target
 
-$$f_Y(y \mid w) = f_Z(\mathrm{logit}(y) \mid w) \, \tfrac{1}{y(1-y)}.$$
+$$Z = T(Y),$$
 
-This is generally numerically better behaved than estimating a density
-on a bounded interval.
+and convert the density back via the change-of-variables formula
+
+$$f_Y(y \mid w) = f_Z(T(y) \mid w) \left|\tfrac{dT(y)}{dy}\right|.$$
+
+Currently supported transforms are:
+
+- `transform="logit"` (default):
+
+   $$f_Y(y \mid w) = f_Z(\mathrm{logit}(y) \mid w) \, \tfrac{1}{y(1-y)}.$$
+
+- `transform="probit"`:
+
+   $$f_Y(y \mid w) = f_Z(\Phi^{-1}(y) \mid w) \, \tfrac{1}{\phi(\Phi^{-1}(y))}.$$
+
+- `transform="identity"`:
+
+   $$f_Y(y \mid w) = f_Z(y \mid w).$$
+
+The default transform is usually numerically better behaved than
+estimating a density directly on a bounded interval.
 
 ---
 
