@@ -189,6 +189,10 @@ class PFNRBicop:
       (default) auto-selects ``cuda`` if available, else ``cpu``.
       Forwarded into the inner distributions and into TabPFN via
       ``model_kwargs["device"]``.
+    batch_size
+      Default chunk size used by criterion-based inner ``pdf`` / ``cdf``
+      calls.  If ``None`` (default), uses 400 on CPU and 2000 on CUDA.
+      A positive value overrides this device-based default.
   model_kwargs
       Forwarded into the inner ``TabPFNRegressor`` (via
       :py:meth:`TabPFNRegressor.create_default_for_version`).  Useful
@@ -223,6 +227,7 @@ class PFNRBicop:
     quantile_config: QuantileGridConfig | None = None,
     transform: Literal["identity", "logit", "probit"] = "logit",
     device: str | torch.device | None = None,
+    batch_size: int | None = None,
     model_kwargs: dict[str, Any] | None = None,
     sinkhorn_iters: int | None = None,
   ) -> None:
@@ -234,6 +239,12 @@ class PFNRBicop:
     self.quantile_config = quantile_config or QuantileGridConfig()
     self.transform = transform
     self._device = _resolve_device(device)
+    if batch_size is None:
+      self.batch_size = 2000 if self._device.type == "cuda" else 400
+    else:
+      if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+      self.batch_size = batch_size
     self.model_kwargs = dict(model_kwargs or {})
     self.sinkhorn_iters = sinkhorn_iters
 
@@ -258,6 +269,7 @@ class PFNRBicop:
       transform=self.transform,
       eps=self.quantile_config.eps,
       device=self._device,
+      batch_size=self.batch_size,
       model_kwargs=self.model_kwargs,
     )
 
@@ -343,6 +355,12 @@ class PFNRBicop:
       "Could not extract criterion borders from TabPFN output_type='full' head."
     )
 
+  def _resolve_batch_size(self, batch_size: int | None) -> int:
+    effective_batch_size = self.batch_size if batch_size is None else batch_size
+    if effective_batch_size <= 0:
+      raise ValueError("batch_size must be positive.")
+    return effective_batch_size
+
   def _features(
     self, first_coord: torch.Tensor, x: torch.Tensor
   ) -> torch.Tensor:
@@ -415,10 +433,21 @@ class PFNRBicop:
     u: TensorLike,
     v: TensorLike,
     x: TensorLike | None = None,
+    *,
+    batch_size: int | None = None,
   ) -> TensorLike:
-    """Return the conditional copula density ``c(u_i, v_i | x_i)``."""
+    """Return the conditional copula density ``c(u_i, v_i | x_i)``.
+
+    ``batch_size`` overrides the model-level default chunk size for
+    this call when using ``method="criterion"``.
+    """
     return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
-    out = self._pdf_torch(u, v, x)
+    out = self._pdf_torch(
+      u,
+      v,
+      x,
+      batch_size=self._resolve_batch_size(batch_size),
+    )
     return _wrap_output(out, return_as_torch=return_as_torch)
 
   def _pdf_torch(
@@ -426,6 +455,8 @@ class PFNRBicop:
     u: TensorLike,
     v: TensorLike,
     x: TensorLike | None,
+    *,
+    batch_size: int,
   ) -> torch.Tensor:
     u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
     x_t = (
@@ -437,14 +468,24 @@ class PFNRBicop:
     if x_t.shape[0] != u_t.shape[0]:
       raise ValueError("x, u, and v must have the same number of observations.")
 
-    c_v_given_u = self.v_given_ux_.pdf(self._features(u_t, x_t), v_t)
+    if isinstance(self.v_given_ux_, TabPFNCriterionDistribution1D):
+      c_v_given_u = self.v_given_ux_.pdf(
+        self._features(u_t, x_t), v_t, batch_size=batch_size
+      )
+    else:
+      c_v_given_u = self.v_given_ux_.pdf(self._features(u_t, x_t), v_t)
     assert isinstance(c_v_given_u, torch.Tensor)
 
     if not self.symmetric:
       c_raw = c_v_given_u
     else:
       assert self.u_given_vx_ is not None
-      c_u_given_v = self.u_given_vx_.pdf(self._features(v_t, x_t), u_t)
+      if isinstance(self.u_given_vx_, TabPFNCriterionDistribution1D):
+        c_u_given_v = self.u_given_vx_.pdf(
+          self._features(v_t, x_t), u_t, batch_size=batch_size
+        )
+      else:
+        c_u_given_v = self.u_given_vx_.pdf(self._features(v_t, x_t), u_t)
       assert isinstance(c_u_given_v, torch.Tensor)
       c_raw = 0.5 * (c_v_given_u + c_u_given_v)
 
@@ -543,10 +584,21 @@ class PFNRBicop:
     u: TensorLike,
     v: TensorLike,
     x: TensorLike | None = None,
+    *,
+    batch_size: int | None = None,
   ) -> TensorLike:
-    """Log of :py:meth:`pdf`, floored at the smallest positive float."""
+    """Log of :py:meth:`pdf`, floored at the smallest positive float.
+
+    ``batch_size`` matches :py:meth:`pdf` and is forwarded to the same
+    underlying criterion calls when ``method="criterion"``.
+    """
     return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
-    c = self._pdf_torch(u, v, x)
+    c = self._pdf_torch(
+      u,
+      v,
+      x,
+      batch_size=self._resolve_batch_size(batch_size),
+    )
     out = torch.log(torch.clamp(c, min=torch.finfo(c.dtype).tiny))
     return _wrap_output(out, return_as_torch=return_as_torch)
 
@@ -708,7 +760,8 @@ class PFNRBicop:
     v: TensorLike,
     x: TensorLike | None = None,
     *,
-    n_int: int = 64,
+    n_int: int = 12,
+    batch_size: int | None = None,
   ) -> TensorLike:
     """Joint CDF ``C(u_i, v_i | x_i)`` evaluated row-by-row.
 
@@ -720,10 +773,13 @@ class PFNRBicop:
                                + ∫_0^v F_{U|V,X}(u|t,x) dt) (symmetric)
 
     ``n_int`` is the number of trapezoid steps along the integration
-    axis; 64 is plenty for the typical bivariate copula.
+    axis; 64 is plenty for the typical bivariate copula.  ``batch_size``
+    overrides the model-level default chunk size for the inner
+    criterion CDF calls used during integration.
     """
     if n_int < 2:
       raise ValueError("n_int must be at least 2.")
+    effective_batch_size = self._resolve_batch_size(batch_size)
 
     return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
     u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
@@ -741,6 +797,7 @@ class PFNRBicop:
       x=x_t,
       module=self.v_given_ux_,
       n_int=n_int,
+      batch_size=effective_batch_size,
     )
 
     if not self.symmetric:
@@ -753,6 +810,7 @@ class PFNRBicop:
       x=x_t,
       module=self.u_given_vx_,
       n_int=n_int,
+      batch_size=effective_batch_size,
     )
     return _wrap_output(
       0.5 * (cdf_v_dir + cdf_u_dir), return_as_torch=return_as_torch
@@ -766,6 +824,7 @@ class PFNRBicop:
     x: torch.Tensor,
     module: _Distribution1D,
     n_int: int,
+    batch_size: int,
   ) -> torch.Tensor:
     """Compute ∫_eps^{upper_i} F(conditioned_i | s, x_i) ds for each row."""
     eps = self.quantile_config.eps
@@ -781,7 +840,10 @@ class PFNRBicop:
     x_flat = x.repeat_interleave(n_int + 1, dim=0)
 
     feats = self._features(s_flat, x_flat)
-    F_flat = module.cdf(feats, cond_flat)
+    if isinstance(module, TabPFNCriterionDistribution1D):
+      F_flat = module.cdf(feats, cond_flat, batch_size=batch_size)
+    else:
+      F_flat = module.cdf(feats, cond_flat)
     assert isinstance(F_flat, torch.Tensor)
     F_grid = F_flat.reshape(n, n_int + 1)
 

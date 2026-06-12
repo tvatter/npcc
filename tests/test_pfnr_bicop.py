@@ -64,6 +64,28 @@ class TestPFNRInit:
     if m.u_given_vx_ is not None:
       assert m.u_given_vx_.transform == transform
 
+  def test_default_batch_size_on_cpu_is_400(self) -> None:
+    m = PFNRBicop(device="cpu")
+    assert m.batch_size == 400
+    assert isinstance(m.v_given_ux_, TabPFNCriterionDistribution1D)
+    assert m.v_given_ux_.batch_size == 400
+
+  def test_default_batch_size_on_cuda_is_2000(self) -> None:
+    m = PFNRBicop(device="cuda")
+    assert m.batch_size == 2000
+    assert isinstance(m.v_given_ux_, TabPFNCriterionDistribution1D)
+    assert m.v_given_ux_.batch_size == 2000
+
+  def test_custom_batch_size_overrides_device_default(self) -> None:
+    m = PFNRBicop(device="cpu", batch_size=123)
+    assert m.batch_size == 123
+    assert isinstance(m.v_given_ux_, TabPFNCriterionDistribution1D)
+    assert m.v_given_ux_.batch_size == 123
+
+  def test_nonpositive_batch_size_rejected(self) -> None:
+    with pytest.raises(ValueError, match="batch_size"):
+      PFNRBicop(batch_size=0)
+
 
 # ===========================================================================
 # Input validation
@@ -185,6 +207,99 @@ class TestPFNRDensity:
     m = make_pfnr(method=method).fit(u, v)
     expected = np.log(np.maximum(m.pdf(u, v), np.finfo(float).tiny))
     np.testing.assert_allclose(m.log_pdf(u, v), expected)
+
+  def test_pdf_forwards_per_call_batch_size(
+    self,
+    patch_uniform: None,
+    method: str,
+    monkeypatch: pytest.MonkeyPatch,
+  ) -> None:
+    _ = method
+    rng = np.random.default_rng(16)
+    u = rng.uniform(0.15, 0.85, 18)
+    v = rng.uniform(0.15, 0.85, 18)
+    m = PFNRBicop(symmetric=False, method="criterion", batch_size=31).fit(u, v)
+
+    captured: list[int | None] = []
+    original_pdf = TabPFNCriterionDistribution1D.pdf
+
+    def _spy_pdf(
+      self: TabPFNCriterionDistribution1D,
+      w: np.ndarray | torch.Tensor,
+      y: np.ndarray | torch.Tensor,
+      *,
+      batch_size: int | None = None,
+    ) -> np.ndarray | torch.Tensor:
+      captured.append(batch_size)
+      return original_pdf(self, w, y, batch_size=batch_size)
+
+    monkeypatch.setattr(TabPFNCriterionDistribution1D, "pdf", _spy_pdf)
+
+    m.pdf(u, v, batch_size=17)
+    assert captured
+    assert all(size == 17 for size in captured)
+
+  def test_pdf_uses_model_batch_size_when_not_overridden(
+    self,
+    patch_uniform: None,
+    method: str,
+    monkeypatch: pytest.MonkeyPatch,
+  ) -> None:
+    _ = method
+    rng = np.random.default_rng(17)
+    u = rng.uniform(0.15, 0.85, 18)
+    v = rng.uniform(0.15, 0.85, 18)
+    m = PFNRBicop(symmetric=False, method="criterion", batch_size=29).fit(u, v)
+
+    captured: list[int | None] = []
+    original_pdf = TabPFNCriterionDistribution1D.pdf
+
+    def _spy_pdf(
+      self: TabPFNCriterionDistribution1D,
+      w: np.ndarray | torch.Tensor,
+      y: np.ndarray | torch.Tensor,
+      *,
+      batch_size: int | None = None,
+    ) -> np.ndarray | torch.Tensor:
+      captured.append(batch_size)
+      return original_pdf(self, w, y, batch_size=batch_size)
+
+    monkeypatch.setattr(TabPFNCriterionDistribution1D, "pdf", _spy_pdf)
+
+    m.pdf(u, v)
+    assert captured
+    assert all(size == 29 for size in captured)
+
+  def test_cdf_forwards_per_call_batch_size(
+    self,
+    patch_uniform: None,
+    method: str,
+    monkeypatch: pytest.MonkeyPatch,
+  ) -> None:
+    _ = method
+    rng = np.random.default_rng(18)
+    u = rng.uniform(0.15, 0.85, 18)
+    v = rng.uniform(0.15, 0.85, 18)
+    m = PFNRBicop(symmetric=False, method="criterion", batch_size=31).fit(u, v)
+
+    captured: list[int | None] = []
+    original_cdf = TabPFNCriterionDistribution1D.cdf
+
+    def _spy_cdf(
+      self: TabPFNCriterionDistribution1D,
+      w: np.ndarray | torch.Tensor,
+      y: np.ndarray | torch.Tensor,
+      *,
+      batch_size: int | None = None,
+    ) -> np.ndarray | torch.Tensor:
+      captured.append(batch_size)
+      return original_cdf(self, w, y, batch_size=batch_size)
+
+    monkeypatch.setattr(TabPFNCriterionDistribution1D, "cdf", _spy_cdf)
+
+    m.cdf(u, v, n_int=8, batch_size=19)
+    assert captured
+    assert all(size == 19 for size in captured)
 
 
 # ===========================================================================
