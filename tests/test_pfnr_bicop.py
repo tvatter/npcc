@@ -93,7 +93,9 @@ class TestPFNRInit:
 
   def test_resolve_sinkhorn_iters_rejects_nonpositive(self) -> None:
     m = PFNRBicop()
-    with pytest.raises(ValueError, match="sinkhorn_iters must be None or a positive integer"):
+    with pytest.raises(
+      ValueError, match="sinkhorn_iters must be None or a positive integer"
+    ):
       m._resolve_sinkhorn_iters(0)
 
 
@@ -131,17 +133,20 @@ class TestPFNRValidation:
     v = np.array([0.3, 0.4])
     with pytest.raises(ValueError, match="strictly inside"):
       make_pfnr(method=method).fit(u, v)
-  
+
+
 def test_sinkhorn_project_rejects_nonpositive_iters() -> None:
   density = torch.ones((3, 3), dtype=torch.float64)
   w = torch.ones(3, dtype=torch.float64)
   with pytest.raises(ValueError, match="n_iters must be positive"):
     _sinkhorn_project(density, w, w, 0)
 
+
 def test_trapezoidal_weights_singleton_grid() -> None:
   grid = torch.tensor([0.25], dtype=torch.float64)
   w = PFNRBicop._trapezoidal_weights(grid)
   assert torch.allclose(w, torch.tensor([1.0], dtype=torch.float64))
+
 
 def test_extract_criterion_borders_accepts_tensor() -> None:
   m = PFNRBicop()
@@ -149,8 +154,11 @@ def test_extract_criterion_borders_accepts_tensor() -> None:
   logits = torch.zeros((1, 2), dtype=torch.float32)
 
   out = m._extract_criterion_borders(crit, logits)
-  expected = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64, device=m._device)
+  expected = torch.tensor(
+    [0.0, 0.5, 1.0], dtype=torch.float64, device=m._device
+  )
   assert torch.allclose(out, expected)
+
 
 def test_extract_criterion_borders_accepts_array_like() -> None:
   m = PFNRBicop()
@@ -158,8 +166,11 @@ def test_extract_criterion_borders_accepts_array_like() -> None:
   logits = torch.zeros((1, 2), dtype=torch.float32)
 
   out = m._extract_criterion_borders(crit, logits)
-  expected = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64, device=m._device)
+  expected = torch.tensor(
+    [0.0, 0.5, 1.0], dtype=torch.float64, device=m._device
+  )
   assert torch.allclose(out, expected)
+
 
 def test_extract_criterion_borders_raises_when_missing() -> None:
   m = PFNRBicop()
@@ -427,7 +438,7 @@ class TestPFNRDensityGrid:
         np.array([0.4, 0.6]),
         x_row=np.array([[1.0], [2.0]]),
       )
-  
+
   def test_raw_pdf_grid_torch_asymmetric_returns_forward_grid_only(
     self, patch_uniform: None
   ) -> None:
@@ -1154,11 +1165,13 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = PFNRBicop(method="criterion", symmetric=False, sinkhorn_iters=2).fit(u, v)
+    m = PFNRBicop(method="criterion", symmetric=False, sinkhorn_iters=2).fit(
+      u, v
+    )
 
     assert m._v_grid_borders_ is not None
     assert m._u_grid_borders_ is m._v_grid_borders_
-  
+
   def test_pdf_projection_lazily_initializes_grid_borders(
     self, patch_uniform: None
   ) -> None:
@@ -1174,4 +1187,3 @@ class TestSinkhornProjection:
 
     assert m._u_grid_borders_ is not None
     assert m._v_grid_borders_ is not None
-

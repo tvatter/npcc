@@ -32,8 +32,15 @@ fits the reverse direction as well and averages::
       + 0.5 * f_{U | V, X}(u | v, x).
 
 This reduces the asymmetry but does not impose exact uniform copula
-margins.  If exact margins are required, evaluate ``c_sym`` on a grid
-and apply an iterative-proportional-fitting / Sinkhorn projection.
+margins. If exact margins are required, enable the optional Sinkhorn
+projection via ``sinkhorn_iters``. For ``method="criterion"``, the
+projection grid is derived from the fitted TabPFN bar-distribution
+borders; for ``method="quantiles"``, it is given by the predefined
+quantile grid. For :py:meth:`pdf_grid`, the projection is applied
+directly on the evaluated grid; for pointwise :py:meth:`pdf`, the
+correction is computed on the internal projection grid and interpolated
+back to the queried points.
+
 
 Density-recovery method
 -----------------------
@@ -189,7 +196,7 @@ class PFNRBicop:
       (default) auto-selects ``cuda`` if available, else ``cpu``.
       Forwarded into the inner distributions and into TabPFN via
       ``model_kwargs["device"]``.
-    batch_size
+  batch_size
       Default chunk size used by criterion-based inner ``pdf`` / ``cdf``
       calls.  If ``None`` (default), uses 400 on CPU and 2000 on CUDA.
       A positive value overrides this device-based default.
@@ -198,12 +205,21 @@ class PFNRBicop:
       :py:meth:`TabPFNRegressor.create_default_for_version`).  Useful
       for ``n_estimators=...``, etc.
   sinkhorn_iters
-      Number of iterative proportional fitting (Sinkhorn) iterations to
-      apply for projecting the density onto the space of bivariate
-      copula densities with uniform margins.  ``None`` (default) disables
-      projection.  When set to a positive integer (e.g. 5), each unique
-      covariate value is projected separately using the grid borders
-      extracted from the fitted models as anchor points.
+      Default number of Sinkhorn / iterative-proportional-fitting
+      iterations used to project the estimated density onto the space of
+      bivariate copula densities with approximately uniform margins.
+      ``None`` (default) disables projection. A positive integer enables
+      projection by default for :py:meth:`pdf`, :py:meth:`log_pdf`, and
+      :py:meth:`pdf_grid`, unless overridden per call.
+
+      The projection is carried out on a 2-D grid derived from the fitted
+      inner univariate conditional density models. For
+      ``method="criterion"``, the grid borders are taken from TabPFN's
+      native bar-distribution borders (after applying the inverse support
+      transform). In the symmetric case, separate borders may be used for
+      the ``u`` and ``v`` axes from the two fitted directions. For
+      ``method="quantiles"``, the projection grid is given by the
+      predefined quantile alpha grid.
 
   Notes
   -----
@@ -212,8 +228,6 @@ class PFNRBicop:
     option (one direction fit, one direction at evaluation).
   - The symmetric estimator reduces the directional bias but doubles
     both fit and inference cost.
-  - When ``sinkhorn_iters`` is not ``None``, marginal constraints are
-    approximated via Sinkhorn projection on the pre-computed grid.
   - Public methods accept either NumPy arrays or torch tensors.  When
     any positional numeric input is a torch tensor, the return value
     is a torch tensor on ``device``; otherwise it is a NumPy array.
@@ -458,6 +472,14 @@ class PFNRBicop:
     Fits ``f(V | U, X)``.  When ``symmetric=True`` also fits
     ``f(U | V, X)``.  ``x=None`` is shorthand for the unconditional
     case (a constant covariate column).
+
+    Notes
+    -----
+    When ``self.sinkhorn_iters`` is not ``None``, the 1-D border grids used
+    for the optional Sinkhorn projection are initialized and cached during
+    fit. For ``method="criterion"``, these borders are extracted from the
+    fitted TabPFN Riemann distribution head(s); for ``method="quantiles"``,
+    they are taken from the configured quantile alpha grid.
     """
     u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
     x_t = (
@@ -494,8 +516,14 @@ class PFNRBicop:
 
     ``batch_size`` overrides the model-level default chunk size for
     this call when using ``method="criterion"``.
-    ``sinkhorn_iters`` overrides the model level default number of
-    Sinkhorn iterations.
+    sinkhorn_iters
+        Overrides the model-level default Sinkhorn / iterative-proportional-
+        fitting iteration count for this call. ``None`` means “use
+        ``self.sinkhorn_iters``”. If the effective value is ``None``, no
+        projection is applied. If it is a positive integer, the estimated
+        density is projected toward the space of bivariate copula densities
+        with approximately uniform margins using a grid-based Sinkhorn
+        correction.
     """
     return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
     with torch.inference_mode():
@@ -688,10 +716,18 @@ class PFNRBicop:
     batch_size: int | None = None,
     sinkhorn_iters: int | None = None,
   ) -> TensorLike:
-    """Log of :py:meth:`pdf`, floored at the smallest positive float.
+    """Log of the optionally projected :py:meth:`pdf`, floored at the smallest positive float.
 
     ``batch_size`` matches :py:meth:`pdf` and is forwarded to the same
     underlying criterion calls when ``method="criterion"``.
+    sinkhorn_iters
+        Overrides the model-level default Sinkhorn / iterative-proportional-
+        fitting iteration count for this call. ``None`` means “use
+        ``self.sinkhorn_iters``”. If the effective value is ``None``, no
+        projection is applied. If it is a positive integer, the estimated
+        density is projected toward the space of bivariate copula densities
+        with approximately uniform margins using a grid-based Sinkhorn
+        correction.
     """
     return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
     with torch.inference_mode():
@@ -724,8 +760,18 @@ class PFNRBicop:
     For the symmetric estimator both directions are evaluated on the
     same Cartesian product (transposing the reverse one) and averaged.
 
-    When ``sinkhorn_iters`` is set, the output grid is projected onto
-    the space of copula densities using IPF on the input grids.
+    batch_size
+        Overrides the model-level batch size used by the inner criterion
+        ``pdf_grid`` calls for this Cartesian-grid evaluation.
+
+    sinkhorn_iters
+        Overrides the model-level default Sinkhorn / iterative-proportional-
+        fitting iteration count for this call. ``None`` means “use
+        ``self.sinkhorn_iters``”. If the effective value is ``None``, no
+        projection is applied. If it is a positive integer, the estimated
+        density is projected toward the space of bivariate copula densities
+        with approximately uniform margins using a grid-based Sinkhorn
+        correction.
     """
     if self.method != "criterion" or not isinstance(
       self.v_given_ux_, TabPFNCriterionDistribution1D
