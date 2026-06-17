@@ -356,10 +356,18 @@ class PFNRBicop:
     )
 
   def _resolve_batch_size(self, batch_size: int | None) -> int:
-    effective_batch_size = self.batch_size if batch_size is None else batch_size
-    if effective_batch_size <= 0:
+    effective = self.batch_size if batch_size is None else batch_size
+    if effective <= 0:
       raise ValueError("batch_size must be positive.")
-    return effective_batch_size
+    return effective
+
+  def _resolve_sinkhorn_iters(self, sinkhorn_iters: int | None) -> int | None:
+    effective = (
+      self.sinkhorn_iters if sinkhorn_iters is None else sinkhorn_iters
+    )
+    if effective is not None and effective <= 0:
+      raise ValueError("sinkhorn_iters must be None or a positive integer.")
+    return effective
 
   def _features(
     self, first_coord: torch.Tensor, x: torch.Tensor
@@ -370,6 +378,51 @@ class PFNRBicop:
   def _default_x(self, n: int) -> torch.Tensor:
     """Constant covariate column of ones (used when ``x`` is omitted)."""
     return torch.ones((n, 1), dtype=torch.float64, device=self._device)
+
+  def _prepare_joint_inputs(
+    self, u: TensorLike, v: TensorLike, x: TensorLike | None
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
+    x_t = (
+      self._default_x(u_t.shape[0])
+      if x is None
+      else _as_2d(x, device=self._device)
+    )
+
+    if x_t.shape[0] != u_t.shape[0]:
+      raise ValueError("x, u, and v must have the same number of observations.")
+
+    return u_t, v_t, x_t
+
+  def _prepare_grid_inputs(
+    self, u_grid: TensorLike, v_grid: TensorLike, x_row: TensorLike | None
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    _, (u_in, v_in, x_in) = _normalize_inputs(
+      u_grid, v_grid, x_row, device=self._device
+    )
+
+    assert u_in is not None and v_in is not None
+
+    u_t = u_in.reshape(-1)
+    v_t = v_in.reshape(-1)
+
+    if torch.any((u_t <= 0.0) | (u_t >= 1.0)) or torch.any(
+      (v_t <= 0.0) | (v_t >= 1.0)
+    ):
+      raise ValueError("u_grid and v_grid must lie strictly inside (0, 1).")
+
+    eps = self.quantile_config.eps
+    u_t = torch.clamp(u_t, eps, 1.0 - eps)
+    v_t = torch.clamp(v_t, eps, 1.0 - eps)
+
+    if x_in is None:
+      x_row_t = torch.ones((1, 1), dtype=torch.float64, device=self._device)
+    else:
+      x_row_t = _as_2d(x_in, device=self._device)
+      if x_row_t.shape[0] != 1:
+        raise ValueError("x_row must contain exactly one row.")
+
+    return u_t, v_t, x_row_t
 
   @staticmethod
   def _trapezoidal_weights(grid: torch.Tensor) -> torch.Tensor:
@@ -435,19 +488,24 @@ class PFNRBicop:
     x: TensorLike | None = None,
     *,
     batch_size: int | None = None,
+    sinkhorn_iters: int | None = None,
   ) -> TensorLike:
     """Return the conditional copula density ``c(u_i, v_i | x_i)``.
 
     ``batch_size`` overrides the model-level default chunk size for
     this call when using ``method="criterion"``.
+    ``sinkhorn_iters`` overrides the model level default number of
+    Sinkhorn iterations.
     """
     return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
-    out = self._pdf_torch(
-      u,
-      v,
-      x,
-      batch_size=self._resolve_batch_size(batch_size),
-    )
+    with torch.inference_mode():
+      out = self._pdf_torch(
+        u,
+        v,
+        x,
+        batch_size=self._resolve_batch_size(batch_size),
+        sinkhorn_iters=self._resolve_sinkhorn_iters(sinkhorn_iters),
+      )
     return _wrap_output(out, return_as_torch=return_as_torch)
 
   def _pdf_torch(
@@ -457,127 +515,169 @@ class PFNRBicop:
     x: TensorLike | None,
     *,
     batch_size: int,
+    sinkhorn_iters: int | None,
   ) -> torch.Tensor:
-    u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
-    x_t = (
-      self._default_x(u_t.shape[0])
-      if x is None
-      else _as_2d(x, device=self._device)
+    u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
+    c_raw = self._raw_pdf_torch(u_t, v_t, x_t, batch_size=batch_size)
+
+    if sinkhorn_iters is None:
+      return c_raw
+
+    # Apply Sinkhorn projection if enabled
+    return self._project_points_by_x(
+      c_raw,
+      u_t,
+      v_t,
+      x_t,
+      batch_size=batch_size,
+      sinkhorn_iters=sinkhorn_iters,
     )
 
-    if x_t.shape[0] != u_t.shape[0]:
-      raise ValueError("x, u, and v must have the same number of observations.")
+  def _project_points_by_x(
+    self,
+    c_raw: torch.Tensor,
+    u: torch.Tensor,
+    v: torch.Tensor,
+    x: torch.Tensor,
+    *,
+    batch_size: int,
+    sinkhorn_iters: int,
+  ) -> torch.Tensor:
+    if self._u_grid_borders_ is None or self._v_grid_borders_ is None:
+      self._get_grid_borders()
 
-    if isinstance(self.v_given_ux_, TabPFNCriterionDistribution1D):
-      c_v_given_u = self.v_given_ux_.pdf(
-        self._features(u_t, x_t), v_t, batch_size=batch_size
+    assert self._u_grid_borders_ is not None
+    assert self._v_grid_borders_ is not None
+
+    u_grid = self._u_grid_borders_
+    v_grid = self._v_grid_borders_
+
+    wu = self._trapezoidal_weights(u_grid)
+    wv = self._trapezoidal_weights(v_grid)
+
+    x_unique, x_inverse = torch.unique(x, dim=0, return_inverse=True)
+    out = torch.empty_like(c_raw)
+
+    for x_idx in range(x_unique.shape[0]):
+      mask = x_inverse == x_idx
+      if not torch.any(mask):
+        continue
+
+      x_row = x_unique[x_idx : x_idx + 1]
+
+      density_grid = self._raw_pdf_grid_torch(
+        u_grid,
+        v_grid,
+        x_row,
+        batch_size=batch_size,
       )
-    else:
-      c_v_given_u = self.v_given_ux_.pdf(self._features(u_t, x_t), v_t)
+
+      r, s = _sinkhorn_project(density_grid, wu, wv, sinkhorn_iters)
+
+      r_interp = _torch_interp(u[mask], u_grid, r)
+      s_interp = _torch_interp(v[mask], v_grid, s)
+
+      out[mask] = c_raw[mask] * r_interp * s_interp
+
+    return out
+
+  def _project_grid(
+    self,
+    c_grid_raw: torch.Tensor,
+    u_grid: torch.Tensor,
+    v_grid: torch.Tensor,
+    *,
+    sinkhorn_iters: int,
+  ) -> torch.Tensor:
+    wu = self._trapezoidal_weights(u_grid)
+    wv = self._trapezoidal_weights(v_grid)
+    r, s = _sinkhorn_project(c_grid_raw, wu, wv, sinkhorn_iters)
+    return r[:, None] * c_grid_raw * s[None, :]
+
+  def _raw_pdf_torch(
+    self,
+    u: torch.Tensor,
+    v: torch.Tensor,
+    x: torch.Tensor,
+    *,
+    batch_size: int,
+  ) -> torch.Tensor:
+
+    c_v_given_u = self.v_given_ux_.pdf(
+      self._features(u, x), v, batch_size=batch_size
+    )
     assert isinstance(c_v_given_u, torch.Tensor)
 
     if not self.symmetric:
       c_raw = c_v_given_u
     else:
       assert self.u_given_vx_ is not None
-      if isinstance(self.u_given_vx_, TabPFNCriterionDistribution1D):
-        c_u_given_v = self.u_given_vx_.pdf(
-          self._features(v_t, x_t), u_t, batch_size=batch_size
-        )
-      else:
-        c_u_given_v = self.u_given_vx_.pdf(self._features(v_t, x_t), u_t)
+      c_u_given_v = self.u_given_vx_.pdf(
+        self._features(v, x), u, batch_size=batch_size
+      )
       assert isinstance(c_u_given_v, torch.Tensor)
       c_raw = 0.5 * (c_v_given_u + c_u_given_v)
 
-    # Apply Sinkhorn projection if enabled
-    if self.sinkhorn_iters is None:
-      return c_raw
+    return c_raw
 
-    assert self._u_grid_borders_ is not None
-    assert self._v_grid_borders_ is not None
+  def _raw_pdf_grid_torch(
+    self,
+    u_grid: torch.Tensor,
+    v_grid: torch.Tensor,
+    x_row: torch.Tensor,
+    *,
+    batch_size: int,
+  ) -> torch.Tensor:
+    x_for_u = x_row.repeat(u_grid.shape[0], 1)
 
-    # Group by unique x values
-    x_unique, x_inverse = torch.unique(x_t, dim=0, return_inverse=True)
+    if self.method == "criterion":
+      assert isinstance(self.v_given_ux_, TabPFNCriterionDistribution1D)
+      density_grid = self.v_given_ux_.pdf_grid(
+        self._features(u_grid, x_for_u),
+        v_grid,
+        batch_size=batch_size,
+      )
+    else:
+      u_tiled = u_grid.repeat_interleave(v_grid.shape[0])
+      v_tiled = v_grid.tile(u_grid.shape[0])
+      x_tiled = x_row.repeat(u_grid.shape[0] * v_grid.shape[0], 1)
 
-    result = torch.zeros_like(c_raw)
+      density_flat = self.v_given_ux_.pdf(
+        self._features(u_tiled, x_tiled),
+        v_tiled,
+        batch_size=batch_size,
+      )
+      density_grid = density_flat.reshape(u_grid.shape[0], v_grid.shape[0])
 
-    for x_idx in range(x_unique.shape[0]):
-      mask = x_inverse == x_idx
-      if not mask.any():
-        continue
+    assert isinstance(density_grid, torch.Tensor)
 
-      x_row = x_unique[x_idx : x_idx + 1]
+    if not self.symmetric:
+      return density_grid
 
-      # Evaluate raw density on the grid
-      u_grid = self._u_grid_borders_
-      v_grid = self._v_grid_borders_
+    assert self.u_given_vx_ is not None
+    x_for_v = x_row.repeat(v_grid.shape[0], 1)
 
-      # Build feature matrix for u_grid: repeat x_row to match u_grid size
-      x_expanded = x_row.repeat(u_grid.shape[0], 1)
-      features_u = self._features(u_grid, x_expanded)
+    if self.method == "criterion":
+      assert isinstance(self.u_given_vx_, TabPFNCriterionDistribution1D)
+      density_grid_u = self.u_given_vx_.pdf_grid(
+        self._features(v_grid, x_for_v),
+        u_grid,
+        batch_size=batch_size,
+      )
+    else:
+      u_tiled = u_grid.repeat_interleave(v_grid.shape[0])
+      v_tiled = v_grid.tile(u_grid.shape[0])
+      x_tiled = x_row.repeat(u_grid.shape[0] * v_grid.shape[0], 1)
 
-      # Use the appropriate method to evaluate on the Cartesian product
-      if self.method == "criterion":
-        assert isinstance(self.v_given_ux_, TabPFNCriterionDistribution1D)
-        density_grid = self.v_given_ux_.pdf_grid(
-          features_u,
-          v_grid,
-        )
-      else:
-        # quantile method: fall back to tiled point evaluation
-        u_tiled = u_grid.repeat_interleave(v_grid.shape[0])
-        v_tiled = v_grid.tile(u_grid.shape[0])
-        x_tiled = x_row.repeat(u_grid.shape[0] * v_grid.shape[0], 1)
-        features_tiled = self._features(u_tiled, x_tiled)
-        density_flat = self.v_given_ux_.pdf(features_tiled, v_tiled)
-        assert isinstance(density_flat, torch.Tensor)
-        density_grid = density_flat.reshape(u_grid.shape[0], v_grid.shape[0])
+      density_flat_u = self.u_given_vx_.pdf(
+        self._features(v_tiled, x_tiled),
+        u_tiled,
+        batch_size=batch_size,
+      )
+      density_grid_u = density_flat_u.reshape(v_grid.shape[0], u_grid.shape[0])
 
-      # For symmetric case, average the two directions
-      if self.symmetric:
-        assert self.u_given_vx_ is not None
-        x_expanded_v = x_row.repeat(v_grid.shape[0], 1)
-        features_v = self._features(v_grid, x_expanded_v)
-        if self.method == "criterion":
-          assert isinstance(self.u_given_vx_, TabPFNCriterionDistribution1D)
-          density_grid_u = self.u_given_vx_.pdf_grid(
-            features_v,
-            u_grid,
-          )
-          density_grid = 0.5 * (density_grid + density_grid_u.T)
-        else:
-          u_tiled = u_grid.repeat_interleave(v_grid.shape[0])
-          v_tiled = v_grid.tile(u_grid.shape[0])
-          x_tiled = x_row.repeat(u_grid.shape[0] * v_grid.shape[0], 1)
-          features_tiled = self._features(v_tiled, x_tiled)
-          density_flat_u = self.u_given_vx_.pdf(features_tiled, u_tiled)
-          assert isinstance(density_flat_u, torch.Tensor)
-          density_grid_u = density_flat_u.reshape(
-            v_grid.shape[0], u_grid.shape[0]
-          )
-          density_grid = 0.5 * (density_grid + density_grid_u.T)
-
-      # Compute trapezoidal weights
-      wu = self._trapezoidal_weights(u_grid)
-      wv = self._trapezoidal_weights(v_grid)
-
-      # Ensure density_grid is a Tensor for Sinkhorn projection
-      assert isinstance(density_grid, torch.Tensor)
-
-      # Sinkhorn projection
-      r, s = _sinkhorn_project(density_grid, wu, wv, self.sinkhorn_iters)
-
-      # Interpolate scalings at the query points in this group
-      u_group = u_t[mask]
-      v_group = v_t[mask]
-
-      r_interp = _torch_interp(u_group, u_grid, r)
-      s_interp = _torch_interp(v_group, v_grid, s)
-
-      # Apply scalings
-      result[mask] = c_raw[mask] * r_interp * s_interp
-
-    return result
+    assert isinstance(density_grid_u, torch.Tensor)
+    return 0.5 * (density_grid + density_grid_u.T)
 
   def log_pdf(
     self,
@@ -586,6 +686,7 @@ class PFNRBicop:
     x: TensorLike | None = None,
     *,
     batch_size: int | None = None,
+    sinkhorn_iters: int | None = None,
   ) -> TensorLike:
     """Log of :py:meth:`pdf`, floored at the smallest positive float.
 
@@ -593,12 +694,14 @@ class PFNRBicop:
     underlying criterion calls when ``method="criterion"``.
     """
     return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
-    c = self._pdf_torch(
-      u,
-      v,
-      x,
-      batch_size=self._resolve_batch_size(batch_size),
-    )
+    with torch.inference_mode():
+      c = self._pdf_torch(
+        u,
+        v,
+        x,
+        batch_size=self._resolve_batch_size(batch_size),
+        sinkhorn_iters=self._resolve_sinkhorn_iters(sinkhorn_iters),
+      )
     out = torch.log(torch.clamp(c, min=torch.finfo(c.dtype).tiny))
     return _wrap_output(out, return_as_torch=return_as_torch)
 
@@ -607,6 +710,9 @@ class PFNRBicop:
     u_grid: TensorLike,
     v_grid: TensorLike,
     x_row: TensorLike | None = None,
+    *,
+    batch_size: int | None = None,
+    sinkhorn_iters: int | None = None,
   ) -> TensorLike:
     """Density on the Cartesian product ``out[i, j] = c(u_grid[i], v_grid[j] | x)``.
 
@@ -626,50 +732,46 @@ class PFNRBicop:
     ):
       raise RuntimeError("pdf_grid is only available when method='criterion'.")
 
-    return_as_torch, (u_in, v_in, x_in) = _normalize_inputs(
+    return_as_torch, _ = _normalize_inputs(
       u_grid, v_grid, x_row, device=self._device
     )
-    assert u_in is not None and v_in is not None
-    u_t = u_in.reshape(-1)
-    v_t = v_in.reshape(-1)
-    if torch.any((u_t <= 0.0) | (u_t >= 1.0)) or torch.any(
-      (v_t <= 0.0) | (v_t >= 1.0)
-    ):
-      raise ValueError("u_grid and v_grid must lie strictly inside (0, 1).")
-
-    eps = self.quantile_config.eps
-    u_t = torch.clamp(u_t, eps, 1.0 - eps)
-    v_t = torch.clamp(v_t, eps, 1.0 - eps)
-
-    if x_in is None:
-      x_row_t = torch.ones((1, 1), dtype=torch.float64, device=self._device)
-    else:
-      x_row_t = _as_2d(x_in, device=self._device)
-      if x_row_t.shape[0] != 1:
-        raise ValueError("x_row must contain exactly one row.")
-
-    x_for_u = x_row_t.repeat_interleave(u_t.shape[0], dim=0)
-    c_v_given_u = self.v_given_ux_.pdf_grid(self._features(u_t, x_for_u), v_t)
-    assert isinstance(c_v_given_u, torch.Tensor)
-
-    if not self.symmetric:
-      out = c_v_given_u
-    else:
-      assert isinstance(self.u_given_vx_, TabPFNCriterionDistribution1D)
-      x_for_v = x_row_t.repeat_interleave(v_t.shape[0], dim=0)
-      # pdf_grid returns (n_v, n_u); transpose to align with c_v_given_u.
-      c_u_given_v = self.u_given_vx_.pdf_grid(self._features(v_t, x_for_v), u_t)
-      assert isinstance(c_u_given_v, torch.Tensor)
-      out = 0.5 * (c_v_given_u + c_u_given_v.T)
-
-    # Apply Sinkhorn projection if enabled
-    if self.sinkhorn_iters is not None:
-      wu = self._trapezoidal_weights(u_t)
-      wv = self._trapezoidal_weights(v_t)
-      r, s = _sinkhorn_project(out, wu, wv, self.sinkhorn_iters)
-      out = r[:, None] * out * s[None, :]
-
+    with torch.inference_mode():
+      out = self._pdf_grid_torch(
+        u_grid,
+        v_grid,
+        x_row,
+        batch_size=self._resolve_batch_size(batch_size),
+        sinkhorn_iters=self._resolve_sinkhorn_iters(sinkhorn_iters),
+      )
     return _wrap_output(out, return_as_torch=return_as_torch)
+
+  def _pdf_grid_torch(
+    self,
+    u_grid: TensorLike,
+    v_grid: TensorLike,
+    x_row: TensorLike | None,
+    *,
+    batch_size: int,
+    sinkhorn_iters: int | None,
+  ) -> torch.Tensor:
+    u_t, v_t, x_row_t = self._prepare_grid_inputs(u_grid, v_grid, x_row)
+
+    c_raw = self._raw_pdf_grid_torch(
+      u_t,
+      v_t,
+      x_row_t,
+      batch_size=batch_size,
+    )
+
+    if sinkhorn_iters is None:
+      return c_raw
+
+    return self._project_grid(
+      c_raw,
+      u_t,
+      v_t,
+      sinkhorn_iters=sinkhorn_iters,
+    )
 
   # -------------------------------------------------------------------
   # h-functions (conditional CDFs along one axis)
