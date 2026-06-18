@@ -56,6 +56,7 @@ and are materially faster than calling :py:meth:`pdf` /
 
 from __future__ import annotations
 
+import os
 from typing import Any, Literal, Protocol
 
 import numpy as np
@@ -120,12 +121,14 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     eps: float = 1e-6,
     device: str | torch.device | None = None,
     batch_size: int | None = None,
+    finetuned_path: str | os.PathLike[str] | None = None,
     model_kwargs: dict[str, Any] | None = None,
   ) -> None:
     super().__init__(
       transform=transform,
       eps=eps,
       device=device,
+      finetuned_path=finetuned_path,
       model_kwargs=model_kwargs,
     )
     if batch_size is None:

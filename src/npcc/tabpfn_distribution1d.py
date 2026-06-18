@@ -23,7 +23,9 @@ at instantiation time; the per-class fast paths (``pdf_grid`` /
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import logging
 import math
+import os
 from typing import Any, Literal, Self
 
 import torch
@@ -37,6 +39,8 @@ from npcc._common import (
   _resolve_device,
   _to_tensor,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class TabPFNDistribution1D(ABC):
@@ -82,6 +86,7 @@ class TabPFNDistribution1D(ABC):
     transform: Literal["identity", "logit", "probit"] = "logit",
     eps: float = 1e-6,
     device: str | torch.device | None = None,
+    finetuned_path: str | os.PathLike[str] | None = None,
     model_kwargs: dict[str, Any] | None = None,
   ) -> None:
     self.transform = transform
@@ -89,6 +94,8 @@ class TabPFNDistribution1D(ABC):
     self._device = _resolve_device(device)
     self.model_kwargs = dict(model_kwargs or {})
     self.model_kwargs.setdefault("device", str(self._device))
+    if finetuned_path is not None:
+      self.model_kwargs.setdefault("model_path", str(finetuned_path))
     self.model_ = None
 
   # ------------------------------------------------------------------
@@ -150,6 +157,17 @@ class TabPFNDistribution1D(ABC):
       raise ValueError("w and y have incompatible lengths.")
 
     z = self._transform_y(y_t)
+
+    model_path = self.model_kwargs.get("model_path")
+    if model_path is not None and "v2.5" not in os.path.basename(
+      str(model_path)
+    ):
+      logger.warning(
+        "model_path %r does not contain 'v2.5'; TabPFN resolves the "
+        "architecture from the filename and will load it as V2, breaking the "
+        "v2.5 lock. Name fine-tuned checkpoints '*v2.5*.pth'.",
+        str(model_path),
+      )
 
     self.model_ = TabPFNRegressor.create_default_for_version(
       ModelVersion.V2_5, **self.model_kwargs

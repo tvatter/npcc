@@ -10,7 +10,8 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "numpy>=2.0",
-  "pyvinecopulib>=0.7.5",
+  "pyvinecopulib",  # pinned to the dev branch via [tool.uv.sources]
+  "scikit-learn>=1.3",
   "tabpfn>=2.0",
   "torch>=2.11",
 ]
@@ -64,6 +65,8 @@ conflicts = [
 ]
 
 [tool.uv.sources]
+# Track the pyvinecopulib dev branch (major cleanup + improved type stubs).
+pyvinecopulib = { git = "https://github.com/vinecopulib/pyvinecopulib", branch = "dev" }
 torch = [
   { index = "pytorch-cpu", extra = "cpu" },
   { index = "pytorch-cu126", extra = "cu126" },
@@ -112,7 +115,8 @@ extend-select = ["ANN"]
 [tool.ruff.lint.per-file-ignores]
 # Marimo cell functions have a reactive-graph signature style that makes
 # ANN annotations on cell arguments extremely verbose and unidiomatic.
-"notebooks/**" = ["ANN"]
+# E402: notebook cells legitimately run setup/markdown before imports.
+"notebooks/**" = ["ANN", "E402"]
 
 # Type checking with ty
 [tool.ty.environment]

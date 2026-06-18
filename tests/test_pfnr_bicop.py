@@ -1105,7 +1105,6 @@ class TestSinkhornProjection:
         w[1:-1] = (grid[2:] - grid[:-2]) / 2.0
       return w
 
-    wu = _trap_weights(u_grid)
     wv = _trap_weights(v_grid)
 
     # Row integrals (should sum to ~1 after projection)
@@ -1187,3 +1186,64 @@ class TestSinkhornProjection:
 
     assert m._u_grid_borders_ is not None
     assert m._v_grid_borders_ is not None
+
+
+# ===========================================================================
+# Fine-tuned-checkpoint loading seam (finetuned_path)
+# ===========================================================================
+
+
+class TestFinetunedPath:
+  def test_threads_model_path_to_both_directions(self) -> None:
+    path = "/runs/exp1/finetuned_v2.5.pth"
+    m = PFNRBicop(finetuned_path=path)
+    assert m.v_given_ux_.model_kwargs["model_path"] == path
+    assert m.u_given_vx_ is not None
+    assert m.u_given_vx_.model_kwargs["model_path"] == path
+
+  def test_asymmetric_threads_only_forward_direction(self) -> None:
+    path = "/runs/exp1/finetuned_v2.5.pth"
+    m = PFNRBicop(symmetric=False, finetuned_path=path)
+    assert m.v_given_ux_.model_kwargs["model_path"] == path
+    assert m.u_given_vx_ is None
+
+  @pytest.mark.parametrize("method", ["criterion", "quantiles"])
+  def test_threads_for_both_methods(self, method: str) -> None:
+    path = "/ckpt/finetuned_v2.5.pth"
+    m = PFNRBicop(method=method, finetuned_path=path)  # ty: ignore[invalid-argument-type]
+    assert m.v_given_ux_.model_kwargs["model_path"] == path
+
+  def test_explicit_model_kwargs_path_takes_precedence(self) -> None:
+    m = PFNRBicop(
+      finetuned_path="/from/finetuned_v2.5.pth",
+      model_kwargs={"model_path": "/explicit/other_v2.5.pth"},
+    )
+    assert (
+      m.v_given_ux_.model_kwargs["model_path"] == "/explicit/other_v2.5.pth"
+    )
+
+  def test_no_finetuned_path_leaves_model_path_unset(self) -> None:
+    m = PFNRBicop()
+    assert "model_path" not in m.v_given_ux_.model_kwargs
+
+  def test_non_v2_5_filename_warns_on_fit(
+    self, patch_uniform: None, caplog: pytest.LogCaptureFixture
+  ) -> None:
+    rng = np.random.default_rng(7)
+    u, v = rng.uniform(0.1, 0.9, 16), rng.uniform(0.1, 0.9, 16)
+    m = PFNRBicop(method="quantiles", finetuned_path="/ckpt/finetuned.pth")
+    with caplog.at_level("WARNING", logger="npcc.tabpfn_distribution1d"):
+      m.fit(u, v)
+    assert any("does not contain 'v2.5'" in r.message for r in caplog.records)
+
+  def test_v2_5_filename_does_not_warn_on_fit(
+    self, patch_uniform: None, caplog: pytest.LogCaptureFixture
+  ) -> None:
+    rng = np.random.default_rng(8)
+    u, v = rng.uniform(0.1, 0.9, 16), rng.uniform(0.1, 0.9, 16)
+    m = PFNRBicop(method="quantiles", finetuned_path="/ckpt/finetuned_v2.5.pth")
+    with caplog.at_level("WARNING", logger="npcc.tabpfn_distribution1d"):
+      m.fit(u, v)
+    assert not any(
+      "does not contain 'v2.5'" in r.message for r in caplog.records
+    )

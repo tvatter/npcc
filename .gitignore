@@ -208,3 +208,5 @@ __marimo__/
 
 .coverage
 uv.lock
+# Fine-tuning run outputs (checkpoints, logs)
+runs/

@@ -74,6 +74,7 @@ pulled from HuggingFace on first use into the platform cache directory.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Literal, Self
 
 import numpy as np
@@ -87,7 +88,6 @@ from npcc._common import (
   _resolve_device,
   _to_tensor,
   _torch_interp,
-  _torch_interp_batched_fp,
   _wrap_output,
 )
 from npcc.tabpfn_criterion_distribution1d import TabPFNCriterionDistribution1D
@@ -200,6 +200,14 @@ class PFNRBicop:
       Default chunk size used by criterion-based inner ``pdf`` / ``cdf``
       calls.  If ``None`` (default), uses 400 on CPU and 2000 on CUDA.
       A positive value overrides this device-based default.
+  finetuned_path
+      Optional path to a fine-tuned TabPFN-v2.5 checkpoint (produced by
+      :mod:`npcc.finetune`).  Loaded into *both* Rosenblatt directions —
+      valid because ``f_{V|U,X} = f_{U|V,X} = c(u,v|x)`` share the same
+      target functional.  Threaded into TabPFN via
+      ``model_kwargs["model_path"]``; the filename must contain ``"v2.5"``
+      (TabPFN resolves the architecture from it).  An explicit
+      ``model_kwargs["model_path"]`` takes precedence.
   model_kwargs
       Forwarded into the inner ``TabPFNRegressor`` (via
       :py:meth:`TabPFNRegressor.create_default_for_version`).  Useful
@@ -243,6 +251,7 @@ class PFNRBicop:
     transform: Literal["identity", "logit", "probit"] = "logit",
     device: str | torch.device | None = None,
     batch_size: int | None = None,
+    finetuned_path: str | os.PathLike[str] | None = None,
     model_kwargs: dict[str, Any] | None = None,
     sinkhorn_iters: int | None = None,
     projection_grid_size: int = 101,
@@ -254,6 +263,7 @@ class PFNRBicop:
     self.method = method
     self.quantile_config = quantile_config or QuantileGridConfig()
     self.transform = transform
+    self.finetuned_path = finetuned_path
     self._device = _resolve_device(device)
     if batch_size is None:
       self.batch_size = 2000 if self._device.type == "cuda" else 400
@@ -282,6 +292,7 @@ class PFNRBicop:
         transform=self.transform,
         config=self.quantile_config,
         device=self._device,
+        finetuned_path=self.finetuned_path,
         model_kwargs=self.model_kwargs,
       )
     return TabPFNCriterionDistribution1D(
@@ -289,6 +300,7 @@ class PFNRBicop:
       eps=self.quantile_config.eps,
       device=self._device,
       batch_size=self.batch_size,
+      finetuned_path=self.finetuned_path,
       model_kwargs=self.model_kwargs,
     )
 

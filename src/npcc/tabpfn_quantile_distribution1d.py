@@ -64,6 +64,7 @@ while ``T(y) = Phi^{-1}(y)`` gives
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -156,6 +157,7 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
     transform: Literal["identity", "logit", "probit"] = "logit",
     config: QuantileGridConfig | None = None,
     device: str | torch.device | None = None,
+    finetuned_path: str | os.PathLike[str] | None = None,
     model_kwargs: dict[str, Any] | None = None,
   ) -> None:
     cfg = config or QuantileGridConfig()
@@ -163,6 +165,7 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
       transform=transform,
       eps=cfg.eps,
       device=device,
+      finetuned_path=finetuned_path,
       model_kwargs=model_kwargs,
     )
     self.config = cfg
