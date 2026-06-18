@@ -214,12 +214,13 @@ class PFNRBicop:
 
       The projection is carried out on a 2-D grid derived from the fitted
       inner univariate conditional density models. For
-      ``method="criterion"``, the grid borders are taken from TabPFN's
-      native bar-distribution borders (after applying the inverse support
-      transform). In the symmetric case, separate borders may be used for
-      the ``u`` and ``v`` axes from the two fitted directions. For
-      ``method="quantiles"``, the projection grid is given by the
-      predefined quantile alpha grid.
+      ``method="criterion"``, the grid of size ``projection_grid_size``
+      per axis is used. For ``method="quantiles"``, the projection grid is
+      given by the predefined quantile alpha grid.
+  projection_grid_size
+      Number of points per axis in the uniform copula-scale grid used for
+      the optional Sinkhorn projection in ``method="criterion"``; the
+      default is 101.
 
   Notes
   -----
@@ -244,6 +245,7 @@ class PFNRBicop:
     batch_size: int | None = None,
     model_kwargs: dict[str, Any] | None = None,
     sinkhorn_iters: int | None = None,
+    projection_grid_size: int = 101,
   ) -> None:
     if sinkhorn_iters is not None and sinkhorn_iters <= 0:
       raise ValueError("sinkhorn_iters must be None or a positive integer.")
@@ -261,6 +263,9 @@ class PFNRBicop:
       self.batch_size = batch_size
     self.model_kwargs = dict(model_kwargs or {})
     self.sinkhorn_iters = sinkhorn_iters
+    if projection_grid_size < 2:
+      raise ValueError("projections_grid_size must be at least 2.")
+    self.projection_grid_size = projection_grid_size
 
     self.v_given_ux_: _Distribution1D = self._make_distribution()
     self.u_given_vx_: _Distribution1D | None = (
@@ -288,37 +293,24 @@ class PFNRBicop:
     )
 
   def _get_grid_borders(self) -> None:
-    """Cache the grid borders for Sinkhorn projection.
+    """Cache the 1-D projection grids used for Sinkhorn projection.
 
-    For ``method="criterion"``, read TabPFN's native bar-distribution
-    borders (z-space) and map to y-space via the same inverse transform
-    used by the inner TabPFN distribution class.
+    For ``method="criterion"``, the Sinkhorn correction uses a separate
+    uniform projection grid on the copula scale.
     For ``method="quantiles"``, use the alpha grid.
     """
     if self.method == "criterion":
-      assert isinstance(self.v_given_ux_, TabPFNCriterionDistribution1D)
-
-      model_v = self.v_given_ux_.model_
-      n_features_v = int(getattr(model_v, "n_features_in_", 1))
-      dummy_w_v = torch.ones(
-        (1, n_features_v), dtype=torch.float64, device=self._device
+      eps = self.quantile_config.eps
+      borders = torch.linspace(
+        eps,
+        1 - eps,
+        steps=self.projection_grid_size,
+        dtype=torch.float64,
+        device=self._device,
       )
-      logits_v, criterion_v = self.v_given_ux_._predict_full(dummy_w_v)
-      z_borders_v = self._extract_criterion_borders(criterion_v, logits_v)
-      self._v_grid_borders_ = self.v_given_ux_._inverse_transform(z_borders_v)
 
-      if self.symmetric and self.u_given_vx_ is not None:
-        assert isinstance(self.u_given_vx_, TabPFNCriterionDistribution1D)
-        model_u = self.u_given_vx_.model_
-        n_features_u = int(getattr(model_u, "n_features_in_", 1))
-        dummy_w_u = torch.ones(
-          (1, n_features_u), dtype=torch.float64, device=self._device
-        )
-        logits_u, criterion_u = self.u_given_vx_._predict_full(dummy_w_u)
-        z_borders_u = self._extract_criterion_borders(criterion_u, logits_u)
-        self._u_grid_borders_ = self.u_given_vx_._inverse_transform(z_borders_u)
-      else:
-        self._u_grid_borders_ = self._v_grid_borders_
+      self._v_grid_borders_ = borders
+      self._u_grid_borders_ = borders
       return
 
     alphas = torch.as_tensor(
