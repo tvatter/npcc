@@ -39,6 +39,12 @@ class FinetuneConfig:
       quality (bar-distribution NLL + CRPS) over point accuracy (MSE off).
   n_estimators_finetune
       In-context ensemble size during fine-tuning.
+  freeze_backbone
+      If ``True``, freeze the transformer backbone and train only the output
+      decoder head (``decoder_dict``) — parameter-efficient fine-tuning that
+      specializes the conditional-copula-density readout without disturbing
+      TabPFN's in-context reasoning. Permits a higher learning rate than
+      full-weight tuning.
   device
       Torch device string (``"cuda"`` for real runs; ``"cpu"`` for the smoke).
   ignore_pretraining_limits
@@ -73,6 +79,7 @@ class FinetuneConfig:
   crls_loss_weight: float = 0.0
   mse_loss_weight: float = 0.0
   n_estimators_finetune: int = 2
+  freeze_backbone: bool = False
   max_data_size: int | None = None
   device: str = "cuda"
   ignore_pretraining_limits: bool = True

@@ -75,6 +75,26 @@ def _transform_targets(y: np.ndarray, transform: str, eps: float) -> np.ndarray:
   return z.numpy()
 
 
+def _trainable_parameters(
+  model: torch.nn.Module, freeze_backbone: bool
+) -> list[torch.nn.Parameter]:
+  """Parameters to optimize.
+
+  With ``freeze_backbone`` the transformer backbone is frozen and only the
+  output decoder head (``decoder_dict``) is trained — parameter-efficient
+  fine-tuning that specializes the copula-density readout while preserving
+  TabPFN's in-context reasoning. Since the head is the last module, backward
+  also stops there, so head-only steps are cheaper.
+  """
+  if not freeze_backbone:
+    return list(model.parameters())
+  for param in model.parameters():
+    param.requires_grad_(False)
+  for param in model.get_submodule("decoder_dict").parameters():
+    param.requires_grad_(True)
+  return [p for p in model.parameters() if p.requires_grad]
+
+
 def build_base_regressor(cfg: FinetuneConfig) -> TabPFNRegressor:
   """Instantiate the base TabPFN-v2.5 regressor in batched fine-tuning mode."""
   return TabPFNRegressor.create_default_for_version(
@@ -135,8 +155,18 @@ def meta_train(
     # setattr: the model's custom __setattr__ is not typed for this flag.
     setattr(model, "recompute_layer", True)
 
+  trainable = _trainable_parameters(model, cfg.freeze_backbone)
+  n_train = sum(p.numel() for p in trainable)
+  n_total = sum(p.numel() for p in model.parameters())
+  logger.info(
+    "trainable params: %s / %s (%.1f%%)%s",
+    f"{n_train:,}",
+    f"{n_total:,}",
+    100.0 * n_train / n_total,
+    " [decoder head only]" if cfg.freeze_backbone else "",
+  )
   optimizer = get_and_init_optimizer(
-    model.parameters(), cfg.learning_rate, cfg.weight_decay, device=cfg.device
+    iter(trainable), cfg.learning_rate, cfg.weight_decay, device=cfg.device
   )
 
   pool = sample_pool(
@@ -209,7 +239,7 @@ def meta_train(
       loss = _batch_loss(reg, batch, cfg, device)
       loss.backward()
       if cfg.grad_clip_value is not None:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip_value)
+        torch.nn.utils.clip_grad_norm_(trainable, cfg.grad_clip_value)
       optimizer.step()
       scheduler.step()
       step_loss = float(loss.detach().item())

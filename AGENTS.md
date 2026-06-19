@@ -136,7 +136,7 @@ src/npcc/
     prior.py      #   ConditionalCopulaPrior + sample_spec -> PriorDraw
     datasets.py   #   sample_pool / direction_datasets (TabPFN-ready (W, y) lists)
   finetune/       # TabPFN meta-training harness (opt-in; GPU for real runs):
-    config.py     #   FinetuneConfig (+ .smoke() CPU preset)
+    config.py     #   FinetuneConfig (+ .smoke() CPU preset; freeze_backbone PEFT)
     loop.py       #   meta_train(): low-level get_preprocessed_dataset_chunks loop
     save_load.py  #   save_finetuned() (enforces 'v2.5' in the filename)
     evaluate.py   #   ClaytonReference + conditional_report (before/after metrics)

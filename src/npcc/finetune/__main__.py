@@ -20,13 +20,16 @@ from npcc.priors import ConditionalCopulaPrior
 
 def _build_config(args: argparse.Namespace) -> FinetuneConfig:
   if args.smoke:
-    return FinetuneConfig.smoke(output_dir=args.output_dir)
+    cfg = FinetuneConfig.smoke(output_dir=args.output_dir)
+    cfg.freeze_backbone = args.freeze_backbone
+    return cfg
   return FinetuneConfig(
     n_datasets=args.n_datasets,
     rows_per_dataset=args.rows_per_dataset,
     epochs=args.epochs,
     learning_rate=args.learning_rate,
     n_estimators_finetune=args.n_estimators,
+    freeze_backbone=args.freeze_backbone,
     device=args.device,
     transform=args.transform,
     random_state=args.seed,
@@ -45,6 +48,11 @@ def main() -> None:
   parser.add_argument("--epochs", type=int, default=20)
   parser.add_argument("--learning-rate", type=float, default=1e-5)
   parser.add_argument("--n-estimators", type=int, default=2)
+  parser.add_argument(
+    "--freeze-backbone",
+    action="store_true",
+    help="train only the decoder head (parameter-efficient fine-tuning)",
+  )
   parser.add_argument("--device", default="cuda")
   parser.add_argument(
     "--transform", default="logit", choices=["identity", "logit", "probit"]

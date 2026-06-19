@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 from npcc.eval import ConditionalGridSpec
 from npcc.finetune.config import FinetuneConfig
@@ -163,12 +164,16 @@ class TestCli:
       epochs=9,
       learning_rate=1.0,
       n_estimators=9,
+      freeze_backbone=True,
       device="cuda",
       transform="logit",
       seed=0,
     )
     cfg = _build_config(args)
     assert cfg.device == "cpu" and cfg.n_datasets == 2  # smoke preset wins
+    assert (
+      cfg.freeze_backbone is True
+    )  # flag threads even into the smoke preset
 
   def test_build_config_full(self) -> None:
     import argparse
@@ -183,6 +188,7 @@ class TestCli:
       epochs=3,
       learning_rate=2e-5,
       n_estimators=4,
+      freeze_backbone=False,
       device="cpu",
       transform="probit",
       seed=7,
@@ -224,3 +230,34 @@ class TestLazyImports:
 
     with pytest.raises(AttributeError):
       _ = ft.does_not_exist
+
+
+class TestTrainableParameters:
+  """_trainable_parameters: full vs decoder-head-only (frozen backbone)."""
+
+  @staticmethod
+  def _toy_model() -> torch.nn.Module:
+    model = torch.nn.Module()
+    model.add_module("transformer_encoder", torch.nn.Linear(4, 4))  # backbone
+    model.add_module(
+      "decoder_dict", torch.nn.ModuleDict({"standard": torch.nn.Linear(4, 8)})
+    )  # head
+    return model
+
+  def test_full_returns_all_params(self) -> None:
+    from npcc.finetune.loop import _trainable_parameters
+
+    model = self._toy_model()
+    params = _trainable_parameters(model, freeze_backbone=False)
+    assert len(params) == len(list(model.parameters()))
+
+  def test_head_only_freezes_backbone(self) -> None:
+    from npcc.finetune.loop import _trainable_parameters
+
+    model = self._toy_model()
+    params = _trainable_parameters(model, freeze_backbone=True)
+    head = model.get_submodule("decoder_dict")
+    backbone = model.get_submodule("transformer_encoder")
+    assert {id(p) for p in params} == {id(p) for p in head.parameters()}
+    assert all(not p.requires_grad for p in backbone.parameters())
+    assert all(p.requires_grad for p in head.parameters())
