@@ -72,6 +72,8 @@ from typing import Any, Literal, Self
 import numpy as np
 import torch
 
+from tabpfn.constants import ModelVersion
+
 from npcc._common import (
   TensorLike,
   _as_2d,
@@ -229,6 +231,7 @@ class PFNRBicop:
     device: str | torch.device | None = None,
     batch_size: int | None = None,
     model_kwargs: dict[str, Any] | None = None,
+    model_version: ModelVersion | None = ModelVersion.V3,
     sinkhorn_iters: int | None = None,
   ) -> None:
     if sinkhorn_iters is not None and sinkhorn_iters <= 0:
@@ -246,6 +249,7 @@ class PFNRBicop:
         raise ValueError("batch_size must be positive.")
       self.batch_size = batch_size
     self.model_kwargs = dict(model_kwargs or {})
+    self.model_version = model_version
     self.sinkhorn_iters = sinkhorn_iters
 
     self.v_given_ux_: _Distribution1D = self._make_distribution()
@@ -264,6 +268,7 @@ class PFNRBicop:
         config=self.quantile_config,
         device=self._device,
         model_kwargs=self.model_kwargs,
+        model_version=self.model_version,
       )
     return TabPFNCriterionDistribution1D(
       transform=self.transform,
@@ -271,6 +276,7 @@ class PFNRBicop:
       device=self._device,
       batch_size=self.batch_size,
       model_kwargs=self.model_kwargs,
+      model_version=self.model_version,
     )
 
   def _get_grid_borders(self) -> None:

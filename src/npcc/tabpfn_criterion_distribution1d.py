@@ -61,6 +61,8 @@ from typing import Any, Literal, Protocol
 import numpy as np
 import torch
 
+from tabpfn.constants import ModelVersion
+
 from npcc._common import (
   TensorLike,
   _as_2d,
@@ -121,12 +123,14 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     device: str | torch.device | None = None,
     batch_size: int | None = None,
     model_kwargs: dict[str, Any] | None = None,
+    model_version: ModelVersion | None = ModelVersion.V3,
   ) -> None:
     super().__init__(
       transform=transform,
       eps=eps,
       device=device,
       model_kwargs=model_kwargs,
+      model_version=model_version,
     )
     if batch_size is None:
       self.batch_size = 2000 if self._device.type == "cuda" else 400
