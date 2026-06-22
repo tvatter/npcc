@@ -12,7 +12,35 @@ from npcc.tabpfn_criterion_distribution1d import TabPFNCriterionDistribution1D
 from tests.conftest import uniform_density_y
 
 
+def _stdnorm_cdf(z: np.ndarray) -> np.ndarray:
+  z_t = torch.as_tensor(z, dtype=torch.float64)
+  out = 0.5 * (1.0 + torch.erf(z_t / np.sqrt(2.0)))
+  return out.detach().cpu().numpy()
+
+
+def _stdnorm_ppf(p: np.ndarray) -> np.ndarray:
+  p_t = torch.as_tensor(p, dtype=torch.float64)
+  out = np.sqrt(2.0) * torch.erfinv(2.0 * p_t - 1.0)
+  return out.detach().cpu().numpy()
+
+
 class TestTabPFNCriterionDistribution1D:
+  def test_default_batch_size_on_cpu_is_400(self) -> None:
+    d = TabPFNCriterionDistribution1D(device="cpu")
+    assert d.batch_size == 400
+
+  def test_default_batch_size_on_cuda_is_2000(self) -> None:
+    d = TabPFNCriterionDistribution1D(device="cuda")
+    assert d.batch_size == 2000
+
+  def test_custom_batch_size_overrides_device_default(self) -> None:
+    d = TabPFNCriterionDistribution1D(device="cpu", batch_size=123)
+    assert d.batch_size == 123
+
+  def test_nonpositive_constructor_batch_size_rejected(self) -> None:
+    with pytest.raises(ValueError, match="batch_size"):
+      TabPFNCriterionDistribution1D(batch_size=0)
+
   def test_pdf_before_fit_raises(self, patch_uniform: None) -> None:
     d = TabPFNCriterionDistribution1D()
     with pytest.raises(RuntimeError, match="not fitted"):
@@ -80,6 +108,52 @@ class TestTabPFNCriterionDistribution1D:
     full = d.pdf(w, y)
     chunked = d.pdf(w, y, batch_size=4)
     np.testing.assert_allclose(full, chunked, atol=1e-8)
+
+  def test_pdf_uses_instance_batch_size_when_omitted(
+    self, patch_uniform: None, monkeypatch: pytest.MonkeyPatch
+  ) -> None:
+    rng = np.random.default_rng(1)
+    d = TabPFNCriterionDistribution1D(transform="logit", batch_size=4)
+    d.fit(np.zeros((10, 1)), np.full(10, 0.5))
+
+    n = 17
+    y = rng.uniform(0.15, 0.85, n)
+    w = np.zeros((n, 1))
+    calls = 0
+    original_predict_full = d._predict_full
+
+    def _spy_predict_full(w_t: torch.Tensor) -> tuple[torch.Tensor, Any]:
+      nonlocal calls
+      calls += 1
+      return original_predict_full(w_t)
+
+    monkeypatch.setattr(d, "_predict_full", _spy_predict_full)
+
+    d.pdf(w, y)
+    assert calls == 5
+
+  def test_cdf_per_call_batch_size_overrides_instance_default(
+    self, patch_uniform: None, monkeypatch: pytest.MonkeyPatch
+  ) -> None:
+    rng = np.random.default_rng(2)
+    d = TabPFNCriterionDistribution1D(transform="logit", batch_size=4)
+    d.fit(np.zeros((10, 1)), np.full(10, 0.5))
+
+    n = 17
+    y = rng.uniform(0.15, 0.85, n)
+    w = np.zeros((n, 1))
+    calls = 0
+    original_predict_full = d._predict_full
+
+    def _spy_predict_full(w_t: torch.Tensor) -> tuple[torch.Tensor, Any]:
+      nonlocal calls
+      calls += 1
+      return original_predict_full(w_t)
+
+    monkeypatch.setattr(d, "_predict_full", _spy_predict_full)
+
+    d.cdf(w, y, batch_size=10)
+    assert calls == 2
 
   def test_pdf_grid_shape(self, patch_uniform: None) -> None:
     d = TabPFNCriterionDistribution1D(transform="logit")
@@ -231,6 +305,31 @@ class TestTabPFNCriterionDistribution1D:
     w = np.zeros((len(z), 1))
     actual = d.pdf(w, z)
     np.testing.assert_allclose(actual, np.full(3, 0.25), atol=1e-8)
+
+  def test_probit_transform_pdf_cdf_icdf_match_analytic(
+    self, patch_uniform: None
+  ) -> None:
+    d = TabPFNCriterionDistribution1D(transform="probit")
+    d.fit(np.zeros((10, 1)), np.full(10, 0.5))
+
+    y = np.array([0.2, 0.5, 0.8])
+    w = np.zeros((len(y), 1))
+    z = _stdnorm_ppf(y)
+    phi_z = np.exp(-0.5 * z * z) / np.sqrt(2.0 * np.pi)
+
+    pdf_actual = d.pdf(w, y)
+    pdf_expected = 0.25 / phi_z
+    np.testing.assert_allclose(pdf_actual, pdf_expected, atol=1e-6)
+
+    cdf_actual = d.cdf(w, y)
+    cdf_expected = np.clip((z + 2.0) / 4.0, 0.0, 1.0)
+    np.testing.assert_allclose(cdf_actual, cdf_expected, atol=1e-6)
+
+    alphas = np.array([0.1, 0.3, 0.5, 0.7, 0.9])
+    w_alpha = np.zeros((len(alphas), 1))
+    icdf_actual = d.icdf(w_alpha, alphas)
+    icdf_expected = _stdnorm_cdf(-2.0 + 4.0 * alphas)
+    np.testing.assert_allclose(icdf_actual, icdf_expected, atol=1e-6)
 
   def test_unknown_transform_raises(self) -> None:
     bad: Any = "exp"

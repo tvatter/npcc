@@ -8,7 +8,7 @@ distribution head directly) and
 :mod:`npcc.tabpfn_quantile_distribution1d` (numerical inversion of the
 predicted quantile table).  Both share:
 
-- the optional logit support transform (and its Jacobian / inverse),
+- the optional support transforms (and their Jacobians / inverses),
 - the ``transform`` / ``eps`` / ``device`` / ``model_kwargs`` / ``model_``
   fields set up at construction time,
 - the public ``fit`` / ``pdf`` / ``cdf`` / ``icdf`` interface,
@@ -23,6 +23,7 @@ at instantiation time; the per-class fast paths (``pdf_grid`` /
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import math
 from typing import Any, Literal, Self
 
 import torch
@@ -53,10 +54,11 @@ class TabPFNDistribution1D(ABC):
       on ``Z = logit(Y)`` and applies the inverse Jacobian when
       evaluating densities; this is the only sensible choice when
       ``Y`` is bounded in ``(0, 1)``, which is always the case for
-      copula scores.
+      copula scores. ``"probit"`` uses ``Z = Phi^{-1}(Y)`` with the
+      standard-normal Jacobian.
   eps
-      Clip distance from the boundary of ``(0, 1)`` used by the logit
-      transform.
+      Clip distance from the boundary of ``(0, 1)`` used by support
+      transforms.
   device
       Device for internal tensors and TabPFN inference.  ``None``
       auto-selects ``cuda`` if available, else ``cpu``.  Forwarded into
@@ -68,7 +70,7 @@ class TabPFNDistribution1D(ABC):
       subclasses.
   """
 
-  transform: Literal["identity", "logit"]
+  transform: Literal["identity", "logit", "probit"]
   eps: float
   model_kwargs: dict[str, Any]
   model_: TabPFNRegressor | None
@@ -77,7 +79,7 @@ class TabPFNDistribution1D(ABC):
   def __init__(
     self,
     *,
-    transform: Literal["identity", "logit"] = "logit",
+    transform: Literal["identity", "logit", "probit"] = "logit",
     eps: float = 1e-6,
     device: str | torch.device | None = None,
     model_kwargs: dict[str, Any] | None = None,
@@ -90,7 +92,7 @@ class TabPFNDistribution1D(ABC):
     self.model_ = None
 
   # ------------------------------------------------------------------
-  # Shared concrete helpers (logit support transform machinery).
+  # Shared concrete helpers (support transform machinery).
   # ------------------------------------------------------------------
 
   def _transform_y(self, y: torch.Tensor) -> torch.Tensor:
@@ -99,6 +101,9 @@ class TabPFNDistribution1D(ABC):
     if self.transform == "logit":
       y_clip = torch.clamp(y, self.eps, 1.0 - self.eps)
       return _logit(y_clip)
+    if self.transform == "probit":
+      y_clip = torch.clamp(y, self.eps, 1.0 - self.eps)
+      return math.sqrt(2.0) * torch.erfinv(2.0 * y_clip - 1.0)
     raise ValueError(f"Unknown transform: {self.transform}")
 
   def _jacobian_inverse(self, y: torch.Tensor) -> torch.Tensor:
@@ -107,6 +112,11 @@ class TabPFNDistribution1D(ABC):
     if self.transform == "logit":
       y_clip = torch.clamp(y, self.eps, 1.0 - self.eps)
       return 1.0 / (y_clip * (1.0 - y_clip))
+    if self.transform == "probit":
+      y_clip = torch.clamp(y, self.eps, 1.0 - self.eps)
+      z = math.sqrt(2.0) * torch.erfinv(2.0 * y_clip - 1.0)
+      phi_z = torch.exp(-0.5 * z * z) / math.sqrt(2.0 * math.pi)
+      return 1.0 / phi_z
     raise ValueError(f"Unknown transform: {self.transform}")
 
   def _inverse_transform(self, z: torch.Tensor) -> torch.Tensor:
@@ -115,6 +125,8 @@ class TabPFNDistribution1D(ABC):
       return z
     if self.transform == "logit":
       return torch.sigmoid(z)
+    if self.transform == "probit":
+      return 0.5 * (1.0 + torch.erf(z / math.sqrt(2.0)))
     raise ValueError(f"Unknown transform: {self.transform}")
 
   # ------------------------------------------------------------------
@@ -122,12 +134,13 @@ class TabPFNDistribution1D(ABC):
   # ------------------------------------------------------------------
 
   def fit(self, w: TensorLike, y: TensorLike) -> Self:
-    """Fit a TabPFN-v3 regressor on ``(w, transform(y))``. Override via 
-    ``model_kwargs`` if needed.
+    """Fit a TabPFN-v3 regressor on ``(w, transform(y))``.
 
-    The fit-time tensors live on CPU: TabPFN does its own GPU
-    placement internally and would reject CUDA tensors at the input
-    boundary.
+      Locked to TabPFN-v3.  Override via ``model_kwargs`` if needed.
+    transform: Literal["identity", "logit", "probit"]
+      The fit-time tensors live on CPU: TabPFN does its own GPU
+      placement internally and would reject CUDA tensors at the input
+      boundary.
     """
     cpu = torch.device("cpu")
     w_t = _as_2d(w, device=cpu)

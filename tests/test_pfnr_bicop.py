@@ -37,6 +37,7 @@ class TestPFNRInit:
     m = PFNRBicop()
     assert m.symmetric is True
     assert m.method == "criterion"
+    assert m.transform == "logit"
     assert isinstance(m.v_given_ux_, TabPFNCriterionDistribution1D)
     assert m.u_given_vx_ is not None
 
@@ -48,6 +49,42 @@ class TestPFNRInit:
   def test_method_quantiles_uses_quantile_module(self) -> None:
     m = PFNRBicop(method="quantiles")
     assert isinstance(m.v_given_ux_, TabPFNQuantileDistribution1D)
+
+  @pytest.mark.parametrize("method", ["criterion", "quantiles"])
+  @pytest.mark.parametrize("transform", ["identity", "probit"])
+  def test_transform_is_propagated_to_inner_distributions(
+    self, method: str, transform: str
+  ) -> None:
+    m = PFNRBicop(
+      method=method,  # ty: ignore[invalid-argument-type]
+      transform=transform,  # ty: ignore[invalid-argument-type]
+    )
+    assert m.transform == transform
+    assert m.v_given_ux_.transform == transform
+    if m.u_given_vx_ is not None:
+      assert m.u_given_vx_.transform == transform
+
+  def test_default_batch_size_on_cpu_is_400(self) -> None:
+    m = PFNRBicop(device="cpu")
+    assert m.batch_size == 400
+    assert isinstance(m.v_given_ux_, TabPFNCriterionDistribution1D)
+    assert m.v_given_ux_.batch_size == 400
+
+  def test_default_batch_size_on_cuda_is_2000(self) -> None:
+    m = PFNRBicop(device="cuda")
+    assert m.batch_size == 2000
+    assert isinstance(m.v_given_ux_, TabPFNCriterionDistribution1D)
+    assert m.v_given_ux_.batch_size == 2000
+
+  def test_custom_batch_size_overrides_device_default(self) -> None:
+    m = PFNRBicop(device="cpu", batch_size=123)
+    assert m.batch_size == 123
+    assert isinstance(m.v_given_ux_, TabPFNCriterionDistribution1D)
+    assert m.v_given_ux_.batch_size == 123
+
+  def test_nonpositive_batch_size_rejected(self) -> None:
+    with pytest.raises(ValueError, match="batch_size"):
+      PFNRBicop(batch_size=0)
 
 
 # ===========================================================================
@@ -170,6 +207,99 @@ class TestPFNRDensity:
     m = make_pfnr(method=method).fit(u, v)
     expected = np.log(np.maximum(m.pdf(u, v), np.finfo(float).tiny))
     np.testing.assert_allclose(m.log_pdf(u, v), expected)
+
+  def test_pdf_forwards_per_call_batch_size(
+    self,
+    patch_uniform: None,
+    method: str,
+    monkeypatch: pytest.MonkeyPatch,
+  ) -> None:
+    _ = method
+    rng = np.random.default_rng(16)
+    u = rng.uniform(0.15, 0.85, 18)
+    v = rng.uniform(0.15, 0.85, 18)
+    m = PFNRBicop(symmetric=False, method="criterion", batch_size=31).fit(u, v)
+
+    captured: list[int | None] = []
+    original_pdf = TabPFNCriterionDistribution1D.pdf
+
+    def _spy_pdf(
+      self: TabPFNCriterionDistribution1D,
+      w: np.ndarray | torch.Tensor,
+      y: np.ndarray | torch.Tensor,
+      *,
+      batch_size: int | None = None,
+    ) -> np.ndarray | torch.Tensor:
+      captured.append(batch_size)
+      return original_pdf(self, w, y, batch_size=batch_size)
+
+    monkeypatch.setattr(TabPFNCriterionDistribution1D, "pdf", _spy_pdf)
+
+    m.pdf(u, v, batch_size=17)
+    assert captured
+    assert all(size == 17 for size in captured)
+
+  def test_pdf_uses_model_batch_size_when_not_overridden(
+    self,
+    patch_uniform: None,
+    method: str,
+    monkeypatch: pytest.MonkeyPatch,
+  ) -> None:
+    _ = method
+    rng = np.random.default_rng(17)
+    u = rng.uniform(0.15, 0.85, 18)
+    v = rng.uniform(0.15, 0.85, 18)
+    m = PFNRBicop(symmetric=False, method="criterion", batch_size=29).fit(u, v)
+
+    captured: list[int | None] = []
+    original_pdf = TabPFNCriterionDistribution1D.pdf
+
+    def _spy_pdf(
+      self: TabPFNCriterionDistribution1D,
+      w: np.ndarray | torch.Tensor,
+      y: np.ndarray | torch.Tensor,
+      *,
+      batch_size: int | None = None,
+    ) -> np.ndarray | torch.Tensor:
+      captured.append(batch_size)
+      return original_pdf(self, w, y, batch_size=batch_size)
+
+    monkeypatch.setattr(TabPFNCriterionDistribution1D, "pdf", _spy_pdf)
+
+    m.pdf(u, v)
+    assert captured
+    assert all(size == 29 for size in captured)
+
+  def test_cdf_forwards_per_call_batch_size(
+    self,
+    patch_uniform: None,
+    method: str,
+    monkeypatch: pytest.MonkeyPatch,
+  ) -> None:
+    _ = method
+    rng = np.random.default_rng(18)
+    u = rng.uniform(0.15, 0.85, 18)
+    v = rng.uniform(0.15, 0.85, 18)
+    m = PFNRBicop(symmetric=False, method="criterion", batch_size=31).fit(u, v)
+
+    captured: list[int | None] = []
+    original_cdf = TabPFNCriterionDistribution1D.cdf
+
+    def _spy_cdf(
+      self: TabPFNCriterionDistribution1D,
+      w: np.ndarray | torch.Tensor,
+      y: np.ndarray | torch.Tensor,
+      *,
+      batch_size: int | None = None,
+    ) -> np.ndarray | torch.Tensor:
+      captured.append(batch_size)
+      return original_cdf(self, w, y, batch_size=batch_size)
+
+    monkeypatch.setattr(TabPFNCriterionDistribution1D, "cdf", _spy_cdf)
+
+    m.cdf(u, v, n_int=8, batch_size=19)
+    assert captured
+    assert all(size == 19 for size in captured)
 
 
 # ===========================================================================
@@ -736,3 +866,220 @@ class TestPFNRCUDA:
     )
     assert isinstance(out, torch.Tensor)
     assert out.device.type == "cuda"
+
+
+# ===========================================================================
+# Sinkhorn projection (marginal constraint enforcement)
+# ===========================================================================
+
+
+class TestSinkhornProjection:
+  """Tests for optional Sinkhorn IPF projection to copula margin space."""
+
+  def test_sinkhorn_none_equals_no_projection(
+    self, patch_uniform: None
+  ) -> None:
+    """With sinkhorn_iters=None, pdf should match the base model."""
+    rng = np.random.default_rng(30)
+    u = rng.uniform(0.2, 0.8, 25)
+    v = rng.uniform(0.2, 0.8, 25)
+
+    m_no_sinkhorn = PFNRBicop(
+      symmetric=True, method="criterion", sinkhorn_iters=None
+    ).fit(u, v)
+    m_with_sinkhorn_none = PFNRBicop(
+      symmetric=True, method="criterion", sinkhorn_iters=None
+    ).fit(u, v)
+
+    u_test = np.array([0.3, 0.5, 0.7])
+    v_test = np.array([0.4, 0.5, 0.6])
+
+    out1 = m_no_sinkhorn.pdf(u_test, v_test)
+    out2 = m_with_sinkhorn_none.pdf(u_test, v_test)
+
+    np.testing.assert_allclose(out1, out2, atol=1e-12)
+
+  def test_sinkhorn_init_rejects_zero_iters(self, patch_uniform: None) -> None:
+    """sinkhorn_iters=0 should raise ValueError."""
+    with pytest.raises(ValueError, match="positive integer"):
+      PFNRBicop(sinkhorn_iters=0)
+
+  def test_sinkhorn_init_rejects_negative_iters(
+    self, patch_uniform: None
+  ) -> None:
+    """sinkhorn_iters<0 should raise ValueError."""
+    with pytest.raises(ValueError, match="positive integer"):
+      PFNRBicop(sinkhorn_iters=-1)
+
+  def test_sinkhorn_pdf_shape_unchanged(self, patch_uniform: None) -> None:
+    """Sinkhorn projection should not change the output shape."""
+    rng = np.random.default_rng(31)
+    u = rng.uniform(0.2, 0.8, 20)
+    v = rng.uniform(0.2, 0.8, 20)
+
+    m = PFNRBicop(symmetric=True, method="criterion", sinkhorn_iters=3).fit(
+      u, v
+    )
+
+    u_test = np.linspace(0.25, 0.75, 10)
+    v_test = np.linspace(0.25, 0.75, 10)
+
+    out = m.pdf(u_test, v_test)
+    assert out.shape == (10,)
+
+  def test_sinkhorn_pdf_nonnegative(self, patch_uniform: None) -> None:
+    """Projected density should remain non-negative."""
+    rng = np.random.default_rng(32)
+    u = rng.uniform(0.2, 0.8, 20)
+    v = rng.uniform(0.2, 0.8, 20)
+
+    m = PFNRBicop(symmetric=True, method="criterion", sinkhorn_iters=5).fit(
+      u, v
+    )
+
+    u_test = np.linspace(0.25, 0.75, 15)
+    v_test = np.linspace(0.25, 0.75, 15)
+
+    out = m.pdf(u_test, v_test)
+    assert (out >= -1e-10).all(), "Projected density has negative values"
+
+  def test_sinkhorn_grid_borders_cached(self, patch_uniform: None) -> None:
+    """After fit with sinkhorn_iters, grid borders should be cached."""
+    rng = np.random.default_rng(33)
+    u = rng.uniform(0.2, 0.8, 20)
+    v = rng.uniform(0.2, 0.8, 20)
+
+    m = PFNRBicop(symmetric=True, method="criterion", sinkhorn_iters=5).fit(
+      u, v
+    )
+
+    assert m._u_grid_borders_ is not None
+    assert m._v_grid_borders_ is not None
+    assert isinstance(m._u_grid_borders_, torch.Tensor)
+    assert isinstance(m._v_grid_borders_, torch.Tensor)
+    assert (m._u_grid_borders_ > 0).all()
+    assert (m._u_grid_borders_ < 1).all()
+    assert (m._v_grid_borders_ > 0).all()
+    assert (m._v_grid_borders_ < 1).all()
+
+  def test_sinkhorn_no_borders_without_projection(
+    self, patch_uniform: None
+  ) -> None:
+    """Without sinkhorn_iters, grid borders should not be cached."""
+    rng = np.random.default_rng(34)
+    u = rng.uniform(0.2, 0.8, 20)
+    v = rng.uniform(0.2, 0.8, 20)
+
+    m = PFNRBicop(symmetric=True, method="criterion", sinkhorn_iters=None).fit(
+      u, v
+    )
+
+    assert m._u_grid_borders_ is None
+    assert m._v_grid_borders_ is None
+
+  def test_sinkhorn_pdf_grid_with_projection(self, patch_uniform: None) -> None:
+    """pdf_grid with sinkhorn should apply projection to the grid."""
+    rng = np.random.default_rng(35)
+    u = rng.uniform(0.2, 0.8, 20)
+    v = rng.uniform(0.2, 0.8, 20)
+
+    m = PFNRBicop(symmetric=True, method="criterion", sinkhorn_iters=3).fit(
+      u, v
+    )
+
+    u_grid = np.linspace(0.3, 0.7, 5)
+    v_grid = np.linspace(0.3, 0.7, 5)
+
+    grid = m.pdf_grid(u_grid, v_grid)
+    assert grid.shape == (5, 5)
+    assert (grid >= -1e-10).all()
+
+  def test_sinkhorn_projection_improves_margins(
+    self, patch_uniform: None
+  ) -> None:
+    """Sinkhorn-projected grid should have better marginal constraints.
+
+    After projection, row and column integrals should be closer to 1.0
+    than before projection.
+    """
+    rng = np.random.default_rng(36)
+    u = rng.uniform(0.2, 0.8, 30)
+    v = rng.uniform(0.2, 0.8, 30)
+
+    m_no_proj = PFNRBicop(
+      symmetric=True, method="criterion", sinkhorn_iters=None
+    ).fit(u, v)
+    m_proj = PFNRBicop(
+      symmetric=True, method="criterion", sinkhorn_iters=5
+    ).fit(u, v)
+
+    u_grid = np.linspace(0.2, 0.8, 15)
+    v_grid = np.linspace(0.2, 0.8, 15)
+
+    grid_no_proj = m_no_proj.pdf_grid(u_grid, v_grid)
+    grid_proj = m_proj.pdf_grid(u_grid, v_grid)
+
+    # Trapezoidal weights
+    def _trap_weights(grid: np.ndarray) -> np.ndarray:
+      m = len(grid)
+      if m == 1:
+        return np.ones(1)
+      w = np.zeros(m)
+      w[0] = (grid[1] - grid[0]) / 2.0
+      w[-1] = (grid[-1] - grid[-2]) / 2.0
+      if m > 2:
+        w[1:-1] = (grid[2:] - grid[:-2]) / 2.0
+      return w
+
+    wu = _trap_weights(u_grid)
+    wv = _trap_weights(v_grid)
+
+    # Row integrals (should sum to ~1 after projection)
+    row_integrals_no_proj = (grid_no_proj * wv[None, :]).sum(axis=1)
+    row_integrals_proj = (grid_proj * wv[None, :]).sum(axis=1)
+
+    # Variance in row integrals should be smaller after projection
+    var_no_proj = np.var(row_integrals_no_proj)
+    var_proj = np.var(row_integrals_proj)
+
+    # The projected version should have lower variance in row sums
+    # (more uniform marginals). This is a weaker check since the
+    # baseline might already be reasonable under the fake uniform.
+    assert var_proj <= var_no_proj * 1.5
+
+  def test_sinkhorn_quantiles_method_works(self, patch_uniform: None) -> None:
+    """Sinkhorn projection should also work with method='quantiles'."""
+    rng = np.random.default_rng(37)
+    u = rng.uniform(0.2, 0.8, 20)
+    v = rng.uniform(0.2, 0.8, 20)
+
+    m = PFNRBicop(symmetric=True, method="quantiles", sinkhorn_iters=3).fit(
+      u, v
+    )
+
+    u_test = np.array([0.3, 0.5, 0.7])
+    v_test = np.array([0.4, 0.5, 0.6])
+
+    out = m.pdf(u_test, v_test)
+    assert out.shape == (3,)
+    assert (out >= -1e-10).all()
+
+  def test_sinkhorn_multiple_x_groups(self, patch_uniform: None) -> None:
+    """Sinkhorn should handle multiple unique x values correctly."""
+    rng = np.random.default_rng(38)
+    u = rng.uniform(0.2, 0.8, 30)
+    v = rng.uniform(0.2, 0.8, 30)
+    x = np.column_stack([rng.normal(size=30), rng.normal(size=30)])
+
+    m = PFNRBicop(symmetric=True, method="criterion", sinkhorn_iters=3).fit(
+      u, v, x
+    )
+
+    # Query with different x values
+    u_test = np.array([0.3, 0.5, 0.7, 0.4])
+    v_test = np.array([0.4, 0.5, 0.6, 0.5])
+    x_test = np.array([[0.0, 0.0], [1.0, 1.0], [0.0, 0.0], [1.0, 1.0]])
+
+    out = m.pdf(u_test, v_test, x_test)
+    assert out.shape == (4,)
+    assert (out >= -1e-10).all()

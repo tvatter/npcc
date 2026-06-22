@@ -29,9 +29,7 @@ pytest.importorskip("tabpfn")
 
 # The shared ``fit`` lives on the base class, so we only need to patch
 # the ``TabPFNRegressor`` symbol there.
-_TABPFN_REGRESSOR_TARGETS = (
-  "npcc.tabpfn_distribution1d.TabPFNRegressor",
-)
+_TABPFN_REGRESSOR_TARGETS = ("npcc.tabpfn_distribution1d.TabPFNRegressor",)
 
 
 class _UniformCriterion:

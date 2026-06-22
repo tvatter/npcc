@@ -46,16 +46,33 @@ which reduces directional bias.  It still does not impose exact uniform
 copula margins; if you need that, evaluate the density on a grid and
 apply iterative-proportional-fitting / Sinkhorn projection.
 
-### Logit transform
+### Support transforms
 
-Both copula scores live in $(0, 1)$.  By default the inner density
-estimator fits TabPFN on $Z = \mathrm{logit}(Y)$ — the unbounded image —
-and converts back via the standard Jacobian,
+Both copula scores live in $(0, 1)$.  The inner estimator can fit
+TabPFN on a transformed target
 
-$$f_Y(y \mid w) = f_Z(\mathrm{logit}(y) \mid w) \, \tfrac{1}{y(1-y)}.$$
+$$Z = T(Y),$$
 
-This is generally numerically better behaved than estimating a density
-on a bounded interval.
+and convert the density back via the change-of-variables formula
+
+$$f_Y(y \mid w) = f_Z(T(y) \mid w) \left|\tfrac{dT(y)}{dy}\right|.$$
+
+Currently supported transforms are:
+
+- `transform="logit"` (default):
+
+   $$f_Y(y \mid w) = f_Z(\mathrm{logit}(y) \mid w) \, \tfrac{1}{y(1-y)}.$$
+
+- `transform="probit"`:
+
+   $$f_Y(y \mid w) = f_Z(\Phi^{-1}(y) \mid w) \, \tfrac{1}{\phi(\Phi^{-1}(y))}.$$
+
+- `transform="identity"`:
+
+   $$f_Y(y \mid w) = f_Z(y \mid w).$$
+
+The default transform is usually numerically better behaved than
+estimating a density directly on a bounded interval.
 
 ---
 
@@ -99,13 +116,18 @@ direct than the criterion approach, but model-agnostic.
 
 `PFNRBicop` is the main entry point.  Its key methods:
 
+For `method="criterion"`, batching defaults are device-aware: CPU uses
+`batch_size=400`, CUDA uses `batch_size=2000`.  You can override this
+model-wide via `PFNRBicop(..., batch_size=...)` and per-call via
+`pdf(..., batch_size=...)` / `cdf(..., batch_size=...)`.
+
 | Method                              | What it returns                                                                  |
 | ----------------------------------- | -------------------------------------------------------------------------------- |
 | `fit(u, v, x=None)`                 | Fits the inner predictive-distribution estimator(s).  `x=None` → unconditional fit. |
-| `pdf(u, v, x=None)`                 | Pointwise $\hat c(u_i, v_i \mid x_i)$ (vectorised over rows).                    |
-| `log_pdf(u, v, x=None)`             | $\log$ of `pdf`, floored at the smallest positive float.                         |
+| `pdf(u, v, x=None, *, batch_size=None)`                 | Pointwise $\hat c(u_i, v_i \mid x_i)$ (vectorised over rows).                    |
+| `log_pdf(u, v, x=None, *, batch_size=None)`             | $\log$ of `pdf`, floored at the smallest positive float.                         |
 | `pdf_grid(u_grid, v_grid, x_row=None)` | Cartesian-grid density `out[i, j] = c(u_grid[i], v_grid[j] | x_row)`.  Requires `method="criterion"`. |
-| `cdf(u, v, x=None, *, n_int=64)`    | Pointwise joint CDF $\hat C(u_i, v_i \mid x_i)$, trapezoidal in $s$ (and $t$ for symmetric). |
+| `cdf(u, v, x=None, *, n_int=64, batch_size=None)`    | Pointwise joint CDF $\hat C(u_i, v_i \mid x_i)$, trapezoidal in $s$ (and $t$ for symmetric). |
 | `cdf_grid(u_grid, v_grid, x_row=None, *, n_int=64)` | Cartesian-grid joint CDF.  Requires `method="criterion"`.            |
 | `hfunc1(u, v, x=None)`              | $h_1(u, v \mid x) = \partial C / \partial u = F_{V \mid U, X}(v \mid u, x)$.  Always available.  Conditions on the first argument (matches `pyvinecopulib`). |
 | `hfunc2(u, v, x=None)`              | $h_2(u, v \mid x) = \partial C / \partial v = F_{U \mid V, X}(u \mid v, x)$.  Requires `symmetric=True`. |

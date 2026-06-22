@@ -25,14 +25,23 @@ this avoids querying a quantile grid and inverting a numerical
 derivative for the PDF, so it is faster and typically more accurate,
 but it is specific to TabPFN's binned output.
 
-Logit support transform
------------------------
+Support transforms
+------------------
 ``U`` and ``V`` are copula scores in ``(0, 1)``.  When
-``transform="logit"`` we fit on ``Z = logit(Y)`` and convert back via
-the standard Jacobian for densities (CDFs and quantiles need no
+``transform="logit"`` we fit on ``Z = logit(Y)``; with
+``transform="probit"`` we use ``Z = Phi^{-1}(Y)``. Convert back via
+the corresponding Jacobian for densities (CDFs and quantiles need no
 correction since monotone transforms preserve them):
 
-    f_Y(y | w) = f_Z(logit(y) | w) / (y * (1 - y)).
+  f_Y(y | w) = f_Z(T(y) | w) * |dT(y)/dy|.
+
+For example, ``T(y) = logit(y)`` gives
+
+  f_Y(y | w) = f_Z(logit(y) | w) / (y * (1 - y)),
+
+while ``T(y) = Phi^{-1}(y)`` gives
+
+  f_Y(y | w) = f_Z(Phi^{-1}(y) | w) / phi(Phi^{-1}(y)).
 
 Cartesian-product evaluation (``pdf_grid`` / ``cdf_grid``)
 ----------------------------------------------------------
@@ -47,7 +56,7 @@ and are materially faster than calling :py:meth:`pdf` /
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Literal, Protocol
 
 import numpy as np
 import torch
@@ -104,6 +113,34 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
   # Internal helpers.
   # ------------------------------------------------------------------
 
+  def __init__(
+    self,
+    *,
+    transform: Literal["identity", "logit"] = "logit",
+    eps: float = 1e-6,
+    device: str | torch.device | None = None,
+    batch_size: int | None = None,
+    model_kwargs: dict[str, Any] | None = None,
+  ) -> None:
+    super().__init__(
+      transform=transform,
+      eps=eps,
+      device=device,
+      model_kwargs=model_kwargs,
+    )
+    if batch_size is None:
+      self.batch_size = 2000 if self._device.type == "cuda" else 400
+    else:
+      if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+      self.batch_size = batch_size
+
+  def _resolve_batch_size(self, batch_size: int | None) -> int:
+    effective_batch_size = self.batch_size if batch_size is None else batch_size
+    if effective_batch_size <= 0:
+      raise ValueError("batch_size must be positive.")
+    return effective_batch_size
+
   def _predict_full(
     self, w_t: torch.Tensor
   ) -> tuple[torch.Tensor, _CriterionLike]:
@@ -155,18 +192,19 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
   # ------------------------------------------------------------------
 
   def pdf(
-    self, w: TensorLike, y: TensorLike, *, batch_size: int = 400
+    self, w: TensorLike, y: TensorLike, *, batch_size: int | None = None
   ) -> TensorLike:
     """Return ``f(y_i | w_i)`` for each row ``i``.
 
-    Inference is chunked into pieces of ``batch_size`` rows to bound
-    GPU memory usage; results are concatenated and the inverse-Jacobian
-    is applied at the end.
+    Inference is chunked to bound GPU memory usage.  ``batch_size``
+    overrides the instance default for this call; when omitted the
+    instance default is used (400 on CPU, 2000 on CUDA unless
+    overridden at construction).  Results are concatenated and the
+    inverse-Jacobian is applied at the end.
     """
     if self.model_ is None:
       raise RuntimeError("The model is not fitted.")
-    if batch_size <= 0:
-      raise ValueError("batch_size must be positive.")
+    effective_batch_size = self._resolve_batch_size(batch_size)
 
     return_as_torch, (w_in, y_in) = _normalize_inputs(w, y, device=self._device)
     assert w_in is not None and y_in is not None
@@ -179,8 +217,8 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     n = y_t.shape[0]
     parts: list[torch.Tensor] = []
 
-    for start in range(0, n, batch_size):
-      end = min(start + batch_size, n)
+    for start in range(0, n, effective_batch_size):
+      end = min(start + effective_batch_size, n)
       logits_t, criterion = self._predict_full(w_t[start:end])
       parts.append(self._criterion_pdf_z(logits_t, criterion, z[start:end]))
 
@@ -218,19 +256,18 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     )
 
   def cdf(
-    self, w: TensorLike, y: TensorLike, *, batch_size: int = 400
+    self, w: TensorLike, y: TensorLike, *, batch_size: int | None = None
   ) -> TensorLike:
     """Return ``F(y_i | w_i) = P(Y <= y_i | W = w_i)`` per row.
 
     Uses ``criterion.cdf`` directly on the binned distribution head.
     No Jacobian correction is needed: monotone transforms preserve the
-    CDF, so ``F_Y(y | w) = F_Z(transform(y) | w)``.  Inference is
-    chunked into ``batch_size`` rows.
+    CDF, so ``F_Y(y | w) = F_Z(transform(y) | w)``.  ``batch_size``
+    overrides the instance default for this call.
     """
     if self.model_ is None:
       raise RuntimeError("The model is not fitted.")
-    if batch_size <= 0:
-      raise ValueError("batch_size must be positive.")
+    effective_batch_size = self._resolve_batch_size(batch_size)
 
     return_as_torch, (w_in, y_in) = _normalize_inputs(w, y, device=self._device)
     assert w_in is not None and y_in is not None
@@ -243,8 +280,8 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     n = y_t.shape[0]
     parts: list[torch.Tensor] = []
 
-    for start in range(0, n, batch_size):
-      end = min(start + batch_size, n)
+    for start in range(0, n, effective_batch_size):
+      end = min(start + effective_batch_size, n)
       logits_t, criterion = self._predict_full(w_t[start:end])
       parts.append(self._criterion_cdf_z(logits_t, criterion, z[start:end]))
 

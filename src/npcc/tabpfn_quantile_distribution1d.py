@@ -42,15 +42,23 @@ head.  The counterpart in
 ``criterion.{pdf,cdf,icdf}`` directly, which is faster and avoids the
 slope inversion, but is specific to TabPFN's "full" output.
 
-Logit support transform
------------------------
+Support transforms
+------------------
 ``U`` and ``V`` are copula scores in ``(0, 1)`` and quantile estimation
-on a bounded interval is awkward.  When ``transform="logit"`` we fit
-the regressor on ``Z = logit(Y)`` (the unbounded image) and convert
-back via the standard Jacobian for densities (CDFs and quantiles need
-no correction):
+on a bounded interval is awkward.  With ``transform="logit"`` we fit
+the regressor on ``Z = logit(Y)``. With ``transform="probit"`` we use
+``Z = Phi^{-1}(Y)``. For either choice, convert back via the matching
+Jacobian for densities (CDFs and quantiles need no correction):
 
-    f_Y(y | w) = f_Z(logit(y) | w) / (y * (1 - y)).
+  f_Y(y | w) = f_Z(T(y) | w) * |dT(y)/dy|.
+
+For example, ``T(y) = logit(y)`` gives
+
+  f_Y(y | w) = f_Z(logit(y) | w) / (y * (1 - y)),
+
+while ``T(y) = Phi^{-1}(y)`` gives
+
+  f_Y(y | w) = f_Z(Phi^{-1}(y) | w) / phi(Phi^{-1}(y)).
 """
 
 from __future__ import annotations
@@ -132,7 +140,7 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
   config
       Quantile-grid configuration.  Defaults to
       :class:`QuantileGridConfig`.  Its ``eps`` controls the boundary
-      clipping used by the logit transform.
+      clipping used by the support transforms.
   device
       Forwarded to the base class.
   model_kwargs
@@ -145,7 +153,7 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
   def __init__(
     self,
     *,
-    transform: Literal["identity", "logit"] = "logit",
+    transform: Literal["identity", "logit", "probit"] = "logit",
     config: QuantileGridConfig | None = None,
     device: str | torch.device | None = None,
     model_kwargs: dict[str, Any] | None = None,
