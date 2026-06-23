@@ -32,8 +32,15 @@ fits the reverse direction as well and averages::
       + 0.5 * f_{U | V, X}(u | v, x).
 
 This reduces the asymmetry but does not impose exact uniform copula
-margins.  If exact margins are required, evaluate ``c_sym`` on a grid
-and apply an iterative-proportional-fitting / Sinkhorn projection.
+margins. If exact margins are required, enable the optional Sinkhorn
+projection via ``sinkhorn_iters``. For ``method="criterion"``, the
+projection grid is derived from the fitted TabPFN bar-distribution
+borders; for ``method="quantiles"``, it is given by the predefined
+quantile grid. For :py:meth:`pdf_grid`, the projection is applied
+directly on the evaluated grid; for pointwise :py:meth:`pdf`, the
+correction is computed on the internal projection grid and interpolated
+back to the queried points.
+
 
 Density-recovery method
 -----------------------
@@ -189,7 +196,7 @@ class PFNRBicop:
       (default) auto-selects ``cuda`` if available, else ``cpu``.
       Forwarded into the inner distributions and into TabPFN via
       ``model_kwargs["device"]``.
-    batch_size
+  batch_size
       Default chunk size used by criterion-based inner ``pdf`` / ``cdf``
       calls.  If ``None`` (default), uses 400 on CPU and 2000 on CUDA.
       A positive value overrides this device-based default.
@@ -198,12 +205,22 @@ class PFNRBicop:
       :py:meth:`TabPFNRegressor.create_default_for_version`).  Useful
       for ``n_estimators=...``, etc.
   sinkhorn_iters
-      Number of iterative proportional fitting (Sinkhorn) iterations to
-      apply for projecting the density onto the space of bivariate
-      copula densities with uniform margins.  ``None`` (default) disables
-      projection.  When set to a positive integer (e.g. 5), each unique
-      covariate value is projected separately using the grid borders
-      extracted from the fitted models as anchor points.
+      Default number of Sinkhorn / iterative-proportional-fitting
+      iterations used to project the estimated density onto the space of
+      bivariate copula densities with approximately uniform margins.
+      ``None`` (default) disables projection. A positive integer enables
+      projection by default for :py:meth:`pdf`, :py:meth:`log_pdf`, and
+      :py:meth:`pdf_grid`, unless overridden per call.
+
+      The projection is carried out on a 2-D grid derived from the fitted
+      inner univariate conditional density models. For
+      ``method="criterion"``, the grid of size ``projection_grid_size``
+      per axis is used. For ``method="quantiles"``, the projection grid is
+      given by the predefined quantile alpha grid.
+  projection_grid_size
+      Number of points per axis in the uniform copula-scale grid used for
+      the optional Sinkhorn projection in ``method="criterion"``; the
+      default is 101.
 
   Notes
   -----
@@ -212,8 +229,6 @@ class PFNRBicop:
     option (one direction fit, one direction at evaluation).
   - The symmetric estimator reduces the directional bias but doubles
     both fit and inference cost.
-  - When ``sinkhorn_iters`` is not ``None``, marginal constraints are
-    approximated via Sinkhorn projection on the pre-computed grid.
   - Public methods accept either NumPy arrays or torch tensors.  When
     any positional numeric input is a torch tensor, the return value
     is a torch tensor on ``device``; otherwise it is a NumPy array.
@@ -230,6 +245,7 @@ class PFNRBicop:
     batch_size: int | None = None,
     model_kwargs: dict[str, Any] | None = None,
     sinkhorn_iters: int | None = None,
+    projection_grid_size: int = 101,
   ) -> None:
     if sinkhorn_iters is not None and sinkhorn_iters <= 0:
       raise ValueError("sinkhorn_iters must be None or a positive integer.")
@@ -247,6 +263,9 @@ class PFNRBicop:
       self.batch_size = batch_size
     self.model_kwargs = dict(model_kwargs or {})
     self.sinkhorn_iters = sinkhorn_iters
+    if projection_grid_size < 2:
+      raise ValueError("projections_grid_size must be at least 2.")
+    self.projection_grid_size = projection_grid_size
 
     self.v_given_ux_: _Distribution1D = self._make_distribution()
     self.u_given_vx_: _Distribution1D | None = (
@@ -274,37 +293,24 @@ class PFNRBicop:
     )
 
   def _get_grid_borders(self) -> None:
-    """Cache the grid borders for Sinkhorn projection.
+    """Cache the 1-D projection grids used for Sinkhorn projection.
 
-    For ``method="criterion"``, read TabPFN's native bar-distribution
-    borders (z-space) and map to y-space via the same inverse transform
-    used by the inner TabPFN distribution class.
+    For ``method="criterion"``, the Sinkhorn correction uses a separate
+    uniform projection grid on the copula scale.
     For ``method="quantiles"``, use the alpha grid.
     """
     if self.method == "criterion":
-      assert isinstance(self.v_given_ux_, TabPFNCriterionDistribution1D)
-
-      model_v = self.v_given_ux_.model_
-      n_features_v = int(getattr(model_v, "n_features_in_", 1))
-      dummy_w_v = torch.ones(
-        (1, n_features_v), dtype=torch.float64, device=self._device
+      eps = self.quantile_config.eps
+      borders = torch.linspace(
+        eps,
+        1 - eps,
+        steps=self.projection_grid_size,
+        dtype=torch.float64,
+        device=self._device,
       )
-      logits_v, criterion_v = self.v_given_ux_._predict_full(dummy_w_v)
-      z_borders_v = self._extract_criterion_borders(criterion_v, logits_v)
-      self._v_grid_borders_ = self.v_given_ux_._inverse_transform(z_borders_v)
 
-      if self.symmetric and self.u_given_vx_ is not None:
-        assert isinstance(self.u_given_vx_, TabPFNCriterionDistribution1D)
-        model_u = self.u_given_vx_.model_
-        n_features_u = int(getattr(model_u, "n_features_in_", 1))
-        dummy_w_u = torch.ones(
-          (1, n_features_u), dtype=torch.float64, device=self._device
-        )
-        logits_u, criterion_u = self.u_given_vx_._predict_full(dummy_w_u)
-        z_borders_u = self._extract_criterion_borders(criterion_u, logits_u)
-        self._u_grid_borders_ = self.u_given_vx_._inverse_transform(z_borders_u)
-      else:
-        self._u_grid_borders_ = self._v_grid_borders_
+      self._v_grid_borders_ = borders
+      self._u_grid_borders_ = borders
       return
 
     alphas = torch.as_tensor(
@@ -356,10 +362,18 @@ class PFNRBicop:
     )
 
   def _resolve_batch_size(self, batch_size: int | None) -> int:
-    effective_batch_size = self.batch_size if batch_size is None else batch_size
-    if effective_batch_size <= 0:
+    effective = self.batch_size if batch_size is None else batch_size
+    if effective <= 0:
       raise ValueError("batch_size must be positive.")
-    return effective_batch_size
+    return effective
+
+  def _resolve_sinkhorn_iters(self, sinkhorn_iters: int | None) -> int | None:
+    effective = (
+      self.sinkhorn_iters if sinkhorn_iters is None else sinkhorn_iters
+    )
+    if effective is not None and effective <= 0:
+      raise ValueError("sinkhorn_iters must be None or a positive integer.")
+    return effective
 
   def _features(
     self, first_coord: torch.Tensor, x: torch.Tensor
@@ -370,6 +384,51 @@ class PFNRBicop:
   def _default_x(self, n: int) -> torch.Tensor:
     """Constant covariate column of ones (used when ``x`` is omitted)."""
     return torch.ones((n, 1), dtype=torch.float64, device=self._device)
+
+  def _prepare_joint_inputs(
+    self, u: TensorLike, v: TensorLike, x: TensorLike | None
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
+    x_t = (
+      self._default_x(u_t.shape[0])
+      if x is None
+      else _as_2d(x, device=self._device)
+    )
+
+    if x_t.shape[0] != u_t.shape[0]:
+      raise ValueError("x, u, and v must have the same number of observations.")
+
+    return u_t, v_t, x_t
+
+  def _prepare_grid_inputs(
+    self, u_grid: TensorLike, v_grid: TensorLike, x_row: TensorLike | None
+  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    _, (u_in, v_in, x_in) = _normalize_inputs(
+      u_grid, v_grid, x_row, device=self._device
+    )
+
+    assert u_in is not None and v_in is not None
+
+    u_t = u_in.reshape(-1)
+    v_t = v_in.reshape(-1)
+
+    if torch.any((u_t <= 0.0) | (u_t >= 1.0)) or torch.any(
+      (v_t <= 0.0) | (v_t >= 1.0)
+    ):
+      raise ValueError("u_grid and v_grid must lie strictly inside (0, 1).")
+
+    eps = self.quantile_config.eps
+    u_t = torch.clamp(u_t, eps, 1.0 - eps)
+    v_t = torch.clamp(v_t, eps, 1.0 - eps)
+
+    if x_in is None:
+      x_row_t = torch.ones((1, 1), dtype=torch.float64, device=self._device)
+    else:
+      x_row_t = _as_2d(x_in, device=self._device)
+      if x_row_t.shape[0] != 1:
+        raise ValueError("x_row must contain exactly one row.")
+
+    return u_t, v_t, x_row_t
 
   @staticmethod
   def _trapezoidal_weights(grid: torch.Tensor) -> torch.Tensor:
@@ -405,6 +464,14 @@ class PFNRBicop:
     Fits ``f(V | U, X)``.  When ``symmetric=True`` also fits
     ``f(U | V, X)``.  ``x=None`` is shorthand for the unconditional
     case (a constant covariate column).
+
+    Notes
+    -----
+    When ``self.sinkhorn_iters`` is not ``None``, the 1-D border grids used
+    for the optional Sinkhorn projection are initialized and cached during
+    fit. For ``method="criterion"``, these borders are extracted from the
+    fitted TabPFN Riemann distribution head(s); for ``method="quantiles"``,
+    they are taken from the configured quantile alpha grid.
     """
     u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
     x_t = (
@@ -435,19 +502,30 @@ class PFNRBicop:
     x: TensorLike | None = None,
     *,
     batch_size: int | None = None,
+    sinkhorn_iters: int | None = None,
   ) -> TensorLike:
     """Return the conditional copula density ``c(u_i, v_i | x_i)``.
 
     ``batch_size`` overrides the model-level default chunk size for
     this call when using ``method="criterion"``.
+    sinkhorn_iters
+        Overrides the model-level default Sinkhorn / iterative-proportional-
+        fitting iteration count for this call. ``None`` means “use
+        ``self.sinkhorn_iters``”. If the effective value is ``None``, no
+        projection is applied. If it is a positive integer, the estimated
+        density is projected toward the space of bivariate copula densities
+        with approximately uniform margins using a grid-based Sinkhorn
+        correction.
     """
     return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
-    out = self._pdf_torch(
-      u,
-      v,
-      x,
-      batch_size=self._resolve_batch_size(batch_size),
-    )
+    with torch.inference_mode():
+      out = self._pdf_torch(
+        u,
+        v,
+        x,
+        batch_size=self._resolve_batch_size(batch_size),
+        sinkhorn_iters=self._resolve_sinkhorn_iters(sinkhorn_iters),
+      )
     return _wrap_output(out, return_as_torch=return_as_torch)
 
   def _pdf_torch(
@@ -457,127 +535,169 @@ class PFNRBicop:
     x: TensorLike | None,
     *,
     batch_size: int,
+    sinkhorn_iters: int | None,
   ) -> torch.Tensor:
-    u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
-    x_t = (
-      self._default_x(u_t.shape[0])
-      if x is None
-      else _as_2d(x, device=self._device)
+    u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
+    c_raw = self._raw_pdf_torch(u_t, v_t, x_t, batch_size=batch_size)
+
+    if sinkhorn_iters is None:
+      return c_raw
+
+    # Apply Sinkhorn projection if enabled
+    return self._project_points_by_x(
+      c_raw,
+      u_t,
+      v_t,
+      x_t,
+      batch_size=batch_size,
+      sinkhorn_iters=sinkhorn_iters,
     )
 
-    if x_t.shape[0] != u_t.shape[0]:
-      raise ValueError("x, u, and v must have the same number of observations.")
+  def _project_points_by_x(
+    self,
+    c_raw: torch.Tensor,
+    u: torch.Tensor,
+    v: torch.Tensor,
+    x: torch.Tensor,
+    *,
+    batch_size: int,
+    sinkhorn_iters: int,
+  ) -> torch.Tensor:
+    if self._u_grid_borders_ is None or self._v_grid_borders_ is None:
+      self._get_grid_borders()
 
-    if isinstance(self.v_given_ux_, TabPFNCriterionDistribution1D):
-      c_v_given_u = self.v_given_ux_.pdf(
-        self._features(u_t, x_t), v_t, batch_size=batch_size
+    assert self._u_grid_borders_ is not None
+    assert self._v_grid_borders_ is not None
+
+    u_grid = self._u_grid_borders_
+    v_grid = self._v_grid_borders_
+
+    wu = self._trapezoidal_weights(u_grid)
+    wv = self._trapezoidal_weights(v_grid)
+
+    x_unique, x_inverse = torch.unique(x, dim=0, return_inverse=True)
+    out = torch.empty_like(c_raw)
+
+    for x_idx in range(x_unique.shape[0]):
+      mask = x_inverse == x_idx
+      if not torch.any(mask):
+        continue
+
+      x_row = x_unique[x_idx : x_idx + 1]
+
+      density_grid = self._raw_pdf_grid_torch(
+        u_grid,
+        v_grid,
+        x_row,
+        batch_size=batch_size,
       )
-    else:
-      c_v_given_u = self.v_given_ux_.pdf(self._features(u_t, x_t), v_t)
+
+      r, s = _sinkhorn_project(density_grid, wu, wv, sinkhorn_iters)
+
+      r_interp = _torch_interp(u[mask], u_grid, r)
+      s_interp = _torch_interp(v[mask], v_grid, s)
+
+      out[mask] = c_raw[mask] * r_interp * s_interp
+
+    return out
+
+  def _project_grid(
+    self,
+    c_grid_raw: torch.Tensor,
+    u_grid: torch.Tensor,
+    v_grid: torch.Tensor,
+    *,
+    sinkhorn_iters: int,
+  ) -> torch.Tensor:
+    wu = self._trapezoidal_weights(u_grid)
+    wv = self._trapezoidal_weights(v_grid)
+    r, s = _sinkhorn_project(c_grid_raw, wu, wv, sinkhorn_iters)
+    return r[:, None] * c_grid_raw * s[None, :]
+
+  def _raw_pdf_torch(
+    self,
+    u: torch.Tensor,
+    v: torch.Tensor,
+    x: torch.Tensor,
+    *,
+    batch_size: int,
+  ) -> torch.Tensor:
+
+    c_v_given_u = self.v_given_ux_.pdf(
+      self._features(u, x), v, batch_size=batch_size
+    )
     assert isinstance(c_v_given_u, torch.Tensor)
 
     if not self.symmetric:
       c_raw = c_v_given_u
     else:
       assert self.u_given_vx_ is not None
-      if isinstance(self.u_given_vx_, TabPFNCriterionDistribution1D):
-        c_u_given_v = self.u_given_vx_.pdf(
-          self._features(v_t, x_t), u_t, batch_size=batch_size
-        )
-      else:
-        c_u_given_v = self.u_given_vx_.pdf(self._features(v_t, x_t), u_t)
+      c_u_given_v = self.u_given_vx_.pdf(
+        self._features(v, x), u, batch_size=batch_size
+      )
       assert isinstance(c_u_given_v, torch.Tensor)
       c_raw = 0.5 * (c_v_given_u + c_u_given_v)
 
-    # Apply Sinkhorn projection if enabled
-    if self.sinkhorn_iters is None:
-      return c_raw
+    return c_raw
 
-    assert self._u_grid_borders_ is not None
-    assert self._v_grid_borders_ is not None
+  def _raw_pdf_grid_torch(
+    self,
+    u_grid: torch.Tensor,
+    v_grid: torch.Tensor,
+    x_row: torch.Tensor,
+    *,
+    batch_size: int,
+  ) -> torch.Tensor:
+    x_for_u = x_row.repeat(u_grid.shape[0], 1)
 
-    # Group by unique x values
-    x_unique, x_inverse = torch.unique(x_t, dim=0, return_inverse=True)
+    if self.method == "criterion":
+      assert isinstance(self.v_given_ux_, TabPFNCriterionDistribution1D)
+      density_grid = self.v_given_ux_.pdf_grid(
+        self._features(u_grid, x_for_u),
+        v_grid,
+        batch_size=batch_size,
+      )
+    else:
+      u_tiled = u_grid.repeat_interleave(v_grid.shape[0])
+      v_tiled = v_grid.tile(u_grid.shape[0])
+      x_tiled = x_row.repeat(u_grid.shape[0] * v_grid.shape[0], 1)
 
-    result = torch.zeros_like(c_raw)
+      density_flat = self.v_given_ux_.pdf(
+        self._features(u_tiled, x_tiled),
+        v_tiled,
+        batch_size=batch_size,
+      )
+      density_grid = density_flat.reshape(u_grid.shape[0], v_grid.shape[0])
 
-    for x_idx in range(x_unique.shape[0]):
-      mask = x_inverse == x_idx
-      if not mask.any():
-        continue
+    assert isinstance(density_grid, torch.Tensor)
 
-      x_row = x_unique[x_idx : x_idx + 1]
+    if not self.symmetric:
+      return density_grid
 
-      # Evaluate raw density on the grid
-      u_grid = self._u_grid_borders_
-      v_grid = self._v_grid_borders_
+    assert self.u_given_vx_ is not None
+    x_for_v = x_row.repeat(v_grid.shape[0], 1)
 
-      # Build feature matrix for u_grid: repeat x_row to match u_grid size
-      x_expanded = x_row.repeat(u_grid.shape[0], 1)
-      features_u = self._features(u_grid, x_expanded)
+    if self.method == "criterion":
+      assert isinstance(self.u_given_vx_, TabPFNCriterionDistribution1D)
+      density_grid_u = self.u_given_vx_.pdf_grid(
+        self._features(v_grid, x_for_v),
+        u_grid,
+        batch_size=batch_size,
+      )
+    else:
+      u_tiled = u_grid.repeat_interleave(v_grid.shape[0])
+      v_tiled = v_grid.tile(u_grid.shape[0])
+      x_tiled = x_row.repeat(u_grid.shape[0] * v_grid.shape[0], 1)
 
-      # Use the appropriate method to evaluate on the Cartesian product
-      if self.method == "criterion":
-        assert isinstance(self.v_given_ux_, TabPFNCriterionDistribution1D)
-        density_grid = self.v_given_ux_.pdf_grid(
-          features_u,
-          v_grid,
-        )
-      else:
-        # quantile method: fall back to tiled point evaluation
-        u_tiled = u_grid.repeat_interleave(v_grid.shape[0])
-        v_tiled = v_grid.tile(u_grid.shape[0])
-        x_tiled = x_row.repeat(u_grid.shape[0] * v_grid.shape[0], 1)
-        features_tiled = self._features(u_tiled, x_tiled)
-        density_flat = self.v_given_ux_.pdf(features_tiled, v_tiled)
-        assert isinstance(density_flat, torch.Tensor)
-        density_grid = density_flat.reshape(u_grid.shape[0], v_grid.shape[0])
+      density_flat_u = self.u_given_vx_.pdf(
+        self._features(v_tiled, x_tiled),
+        u_tiled,
+        batch_size=batch_size,
+      )
+      density_grid_u = density_flat_u.reshape(v_grid.shape[0], u_grid.shape[0])
 
-      # For symmetric case, average the two directions
-      if self.symmetric:
-        assert self.u_given_vx_ is not None
-        x_expanded_v = x_row.repeat(v_grid.shape[0], 1)
-        features_v = self._features(v_grid, x_expanded_v)
-        if self.method == "criterion":
-          assert isinstance(self.u_given_vx_, TabPFNCriterionDistribution1D)
-          density_grid_u = self.u_given_vx_.pdf_grid(
-            features_v,
-            u_grid,
-          )
-          density_grid = 0.5 * (density_grid + density_grid_u.T)
-        else:
-          u_tiled = u_grid.repeat_interleave(v_grid.shape[0])
-          v_tiled = v_grid.tile(u_grid.shape[0])
-          x_tiled = x_row.repeat(u_grid.shape[0] * v_grid.shape[0], 1)
-          features_tiled = self._features(v_tiled, x_tiled)
-          density_flat_u = self.u_given_vx_.pdf(features_tiled, u_tiled)
-          assert isinstance(density_flat_u, torch.Tensor)
-          density_grid_u = density_flat_u.reshape(
-            v_grid.shape[0], u_grid.shape[0]
-          )
-          density_grid = 0.5 * (density_grid + density_grid_u.T)
-
-      # Compute trapezoidal weights
-      wu = self._trapezoidal_weights(u_grid)
-      wv = self._trapezoidal_weights(v_grid)
-
-      # Ensure density_grid is a Tensor for Sinkhorn projection
-      assert isinstance(density_grid, torch.Tensor)
-
-      # Sinkhorn projection
-      r, s = _sinkhorn_project(density_grid, wu, wv, self.sinkhorn_iters)
-
-      # Interpolate scalings at the query points in this group
-      u_group = u_t[mask]
-      v_group = v_t[mask]
-
-      r_interp = _torch_interp(u_group, u_grid, r)
-      s_interp = _torch_interp(v_group, v_grid, s)
-
-      # Apply scalings
-      result[mask] = c_raw[mask] * r_interp * s_interp
-
-    return result
+    assert isinstance(density_grid_u, torch.Tensor)
+    return 0.5 * (density_grid + density_grid_u.T)
 
   def log_pdf(
     self,
@@ -586,19 +706,30 @@ class PFNRBicop:
     x: TensorLike | None = None,
     *,
     batch_size: int | None = None,
+    sinkhorn_iters: int | None = None,
   ) -> TensorLike:
-    """Log of :py:meth:`pdf`, floored at the smallest positive float.
+    """Log of the optionally projected :py:meth:`pdf`, floored at the smallest positive float.
 
     ``batch_size`` matches :py:meth:`pdf` and is forwarded to the same
     underlying criterion calls when ``method="criterion"``.
+    sinkhorn_iters
+        Overrides the model-level default Sinkhorn / iterative-proportional-
+        fitting iteration count for this call. ``None`` means “use
+        ``self.sinkhorn_iters``”. If the effective value is ``None``, no
+        projection is applied. If it is a positive integer, the estimated
+        density is projected toward the space of bivariate copula densities
+        with approximately uniform margins using a grid-based Sinkhorn
+        correction.
     """
     return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
-    c = self._pdf_torch(
-      u,
-      v,
-      x,
-      batch_size=self._resolve_batch_size(batch_size),
-    )
+    with torch.inference_mode():
+      c = self._pdf_torch(
+        u,
+        v,
+        x,
+        batch_size=self._resolve_batch_size(batch_size),
+        sinkhorn_iters=self._resolve_sinkhorn_iters(sinkhorn_iters),
+      )
     out = torch.log(torch.clamp(c, min=torch.finfo(c.dtype).tiny))
     return _wrap_output(out, return_as_torch=return_as_torch)
 
@@ -607,6 +738,9 @@ class PFNRBicop:
     u_grid: TensorLike,
     v_grid: TensorLike,
     x_row: TensorLike | None = None,
+    *,
+    batch_size: int | None = None,
+    sinkhorn_iters: int | None = None,
   ) -> TensorLike:
     """Density on the Cartesian product ``out[i, j] = c(u_grid[i], v_grid[j] | x)``.
 
@@ -618,58 +752,64 @@ class PFNRBicop:
     For the symmetric estimator both directions are evaluated on the
     same Cartesian product (transposing the reverse one) and averaged.
 
-    When ``sinkhorn_iters`` is set, the output grid is projected onto
-    the space of copula densities using IPF on the input grids.
+    batch_size
+        Overrides the model-level batch size used by the inner criterion
+        ``pdf_grid`` calls for this Cartesian-grid evaluation.
+
+    sinkhorn_iters
+        Overrides the model-level default Sinkhorn / iterative-proportional-
+        fitting iteration count for this call. ``None`` means “use
+        ``self.sinkhorn_iters``”. If the effective value is ``None``, no
+        projection is applied. If it is a positive integer, the estimated
+        density is projected toward the space of bivariate copula densities
+        with approximately uniform margins using a grid-based Sinkhorn
+        correction.
     """
     if self.method != "criterion" or not isinstance(
       self.v_given_ux_, TabPFNCriterionDistribution1D
     ):
       raise RuntimeError("pdf_grid is only available when method='criterion'.")
 
-    return_as_torch, (u_in, v_in, x_in) = _normalize_inputs(
+    return_as_torch, _ = _normalize_inputs(
       u_grid, v_grid, x_row, device=self._device
     )
-    assert u_in is not None and v_in is not None
-    u_t = u_in.reshape(-1)
-    v_t = v_in.reshape(-1)
-    if torch.any((u_t <= 0.0) | (u_t >= 1.0)) or torch.any(
-      (v_t <= 0.0) | (v_t >= 1.0)
-    ):
-      raise ValueError("u_grid and v_grid must lie strictly inside (0, 1).")
-
-    eps = self.quantile_config.eps
-    u_t = torch.clamp(u_t, eps, 1.0 - eps)
-    v_t = torch.clamp(v_t, eps, 1.0 - eps)
-
-    if x_in is None:
-      x_row_t = torch.ones((1, 1), dtype=torch.float64, device=self._device)
-    else:
-      x_row_t = _as_2d(x_in, device=self._device)
-      if x_row_t.shape[0] != 1:
-        raise ValueError("x_row must contain exactly one row.")
-
-    x_for_u = x_row_t.repeat_interleave(u_t.shape[0], dim=0)
-    c_v_given_u = self.v_given_ux_.pdf_grid(self._features(u_t, x_for_u), v_t)
-    assert isinstance(c_v_given_u, torch.Tensor)
-
-    if not self.symmetric:
-      out = c_v_given_u
-    else:
-      assert isinstance(self.u_given_vx_, TabPFNCriterionDistribution1D)
-      x_for_v = x_row_t.repeat_interleave(v_t.shape[0], dim=0)
-      # pdf_grid returns (n_v, n_u); transpose to align with c_v_given_u.
-      c_u_given_v = self.u_given_vx_.pdf_grid(self._features(v_t, x_for_v), u_t)
-      assert isinstance(c_u_given_v, torch.Tensor)
-      out = 0.5 * (c_v_given_u + c_u_given_v.T)
-
-    # Apply Sinkhorn projection if enabled
-    if self.sinkhorn_iters is not None:
-      wu = self._trapezoidal_weights(u_t)
-      wv = self._trapezoidal_weights(v_t)
-      r, s = _sinkhorn_project(out, wu, wv, self.sinkhorn_iters)
-      out = r[:, None] * out * s[None, :]
-
+    with torch.inference_mode():
+      out = self._pdf_grid_torch(
+        u_grid,
+        v_grid,
+        x_row,
+        batch_size=self._resolve_batch_size(batch_size),
+        sinkhorn_iters=self._resolve_sinkhorn_iters(sinkhorn_iters),
+      )
     return _wrap_output(out, return_as_torch=return_as_torch)
+
+  def _pdf_grid_torch(
+    self,
+    u_grid: TensorLike,
+    v_grid: TensorLike,
+    x_row: TensorLike | None,
+    *,
+    batch_size: int,
+    sinkhorn_iters: int | None,
+  ) -> torch.Tensor:
+    u_t, v_t, x_row_t = self._prepare_grid_inputs(u_grid, v_grid, x_row)
+
+    c_raw = self._raw_pdf_grid_torch(
+      u_t,
+      v_t,
+      x_row_t,
+      batch_size=batch_size,
+    )
+
+    if sinkhorn_iters is None:
+      return c_raw
+
+    return self._project_grid(
+      c_raw,
+      u_t,
+      v_t,
+      sinkhorn_iters=sinkhorn_iters,
+    )
 
   # -------------------------------------------------------------------
   # h-functions (conditional CDFs along one axis)

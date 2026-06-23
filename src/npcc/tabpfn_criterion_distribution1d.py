@@ -116,7 +116,7 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
   def __init__(
     self,
     *,
-    transform: Literal["identity", "logit"] = "logit",
+    transform: Literal["identity", "logit", "probit"] = "logit",
     eps: float = 1e-6,
     device: str | torch.device | None = None,
     batch_size: int | None = None,
@@ -226,7 +226,13 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     out = dens_z * self._jacobian_inverse(y_t)
     return _wrap_output(out, return_as_torch=return_as_torch)
 
-  def pdf_grid(self, w: TensorLike, y_grid: TensorLike) -> TensorLike:
+  def pdf_grid(
+    self,
+    w: TensorLike,
+    y_grid: TensorLike,
+    *,
+    batch_size: int | None = None,
+  ) -> TensorLike:
     """Density on the Cartesian product of ``w`` rows and ``y_grid``.
 
     Returns shape ``(n_w, n_y)`` with ``out[i, j] = f(y_grid[j] | w[i])``.
@@ -236,24 +242,55 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     """
     if self.model_ is None:
       raise RuntimeError("The model is not fitted.")
+    effective_batch_size = self._resolve_batch_size(batch_size)
 
     return_as_torch, (w_in, y_in) = _normalize_inputs(
       w, y_grid, device=self._device
     )
     assert w_in is not None and y_in is not None
-    w_t = _as_2d(w_in, device=self._device)
-    y_t = y_in.reshape(-1)
-    n_w, n_y = w_t.shape[0], y_t.shape[0]
 
-    logits_t, criterion = self._predict_full(w_t)
-    logits_eval = logits_t.repeat_interleave(n_y, dim=0)
-    y_tiled = y_t.tile(n_w)
-    z = self._transform_y(y_tiled)
-    dens_z = self._criterion_pdf_z(logits_eval, criterion, z)
-    dens_y = dens_z * self._jacobian_inverse(y_tiled)
-    return _wrap_output(
-      dens_y.reshape(n_w, n_y), return_as_torch=return_as_torch
-    )
+    w_t = _as_2d(w_in, device=self._device)
+    y_grid_t = y_in.reshape(-1)
+
+    if y_grid_t.numel() == 0:
+      raise ValueError("y_grid must contain at least one value.")
+
+    # Transform once to z-space; same y_grid for every row of w.
+    z_grid_t = self._transform_y(y_grid_t)
+    jac = self._jacobian_inverse(y_grid_t)
+
+    chunks: list[torch.Tensor] = []
+    n_grid = y_grid_t.shape[0]
+
+    for start in range(0, w_t.shape[0], effective_batch_size):
+      stop = min(start + effective_batch_size, w_t.shape[0])
+
+      w_chunk = w_t[start:stop]
+      logits_t, criterion = self._predict_full(w_chunk)
+
+      logits_rep = logits_t.repeat_interleave(n_grid, dim=0)
+
+      z_flat = (
+        z_grid_t.repeat(w_chunk.shape[0])
+        .to(dtype=logits_t.dtype, device=logits_t.device)
+        .reshape(-1, 1)
+      )
+
+      pdf_z_flat = criterion.pdf(logits_rep, z_flat)
+      if not isinstance(pdf_z_flat, torch.Tensor):
+        pdf_z_flat = torch.as_tensor(
+          pdf_z_flat, dtype=torch.float32, device=self._device
+        )
+
+      pdf_z = pdf_z_flat.reshape(w_chunk.shape[0], n_grid).to(
+        dtype=y_grid_t.dtype
+      )
+      pdf_y = pdf_z * jac.unsqueeze(0)
+
+      chunks.append(pdf_y)
+
+    out = torch.cat(chunks, dim=0)
+    return _wrap_output(out, return_as_torch=return_as_torch)
 
   def cdf(
     self, w: TensorLike, y: TensorLike, *, batch_size: int | None = None
