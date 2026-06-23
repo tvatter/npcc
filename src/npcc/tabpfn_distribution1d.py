@@ -171,7 +171,9 @@ class TabPFNDistribution1D(ABC):
   # ------------------------------------------------------------------
 
   @abstractmethod
-  def pdf(self, w: TensorLike, y: TensorLike) -> TensorLike:
+  def pdf(
+    self, w: TensorLike, y: TensorLike, *, batch_size: int | None = None
+  ) -> TensorLike:
     """Conditional density ``f(y_i | w_i)`` per row."""
 
   @abstractmethod

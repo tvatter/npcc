@@ -222,7 +222,9 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
   # Public API: pdf / cdf / icdf.
   # ------------------------------------------------------------------
 
-  def pdf(self, w: TensorLike, y: TensorLike) -> TensorLike:
+  def pdf(
+    self, w: TensorLike, y: TensorLike, batch_size: int | None = None
+  ) -> TensorLike:
     """Return ``f(y_i | w_i)`` for each row ``i``.
 
     ``w`` and ``y`` must have the same number of rows.  Out-of-support
