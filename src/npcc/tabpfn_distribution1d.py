@@ -73,6 +73,7 @@ class TabPFNDistribution1D(ABC):
   transform: Literal["identity", "logit", "probit"]
   eps: float
   model_kwargs: dict[str, Any]
+  model_version: ModelVersion | None
   model_: TabPFNRegressor | None
   _device: torch.device
 
@@ -83,13 +84,24 @@ class TabPFNDistribution1D(ABC):
     eps: float = 1e-6,
     device: str | torch.device | None = None,
     model_kwargs: dict[str, Any] | None = None,
+    model_version: ModelVersion | None = ModelVersion.V3,
   ) -> None:
     self.transform = transform
     self.eps = eps
     self._device = _resolve_device(device)
     self.model_kwargs = dict(model_kwargs or {})
     self.model_kwargs.setdefault("device", str(self._device))
+    self.model_version = model_version
     self.model_ = None
+
+  def _make_model(self) -> TabPFNRegressor:
+    if self.model_version is None:
+      return TabPFNRegressor(**self.model_kwargs)
+
+    return TabPFNRegressor.create_default_for_version(
+      self.model_version,
+      **self.model_kwargs,
+    )
 
   # ------------------------------------------------------------------
   # Shared concrete helpers (support transform machinery).
@@ -130,14 +142,13 @@ class TabPFNDistribution1D(ABC):
     raise ValueError(f"Unknown transform: {self.transform}")
 
   # ------------------------------------------------------------------
-  # Shared fit (TabPFN-v2.5 regressor on (w, transform(y))).
+  # Shared fit (TabPFN-v3 regressor on (w, transform(y))).
   # ------------------------------------------------------------------
 
   def fit(self, w: TensorLike, y: TensorLike) -> Self:
-    """Fit a TabPFN-v2.5 regressor on ``(w, transform(y))``.
+    """Fit a TabPFN-v3 regressor on ``(w, transform(y))``.
 
-      Locked to TabPFN-v2.5 because v2.6 has reported regressions on
-      tabular regression tasks.  Override via ``model_kwargs`` if needed.
+      Locked to TabPFN-v3.  Override via ``model_kwargs`` if needed.
     transform: Literal["identity", "logit", "probit"]
       The fit-time tensors live on CPU: TabPFN does its own GPU
       placement internally and would reject CUDA tensors at the input
@@ -151,9 +162,7 @@ class TabPFNDistribution1D(ABC):
 
     z = self._transform_y(y_t)
 
-    self.model_ = TabPFNRegressor.create_default_for_version(
-      ModelVersion.V2_5, **self.model_kwargs
-    )
+    self.model_ = self._make_model()
     self.model_.fit(w_t, z)
     return self
 

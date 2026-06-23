@@ -68,7 +68,7 @@ Authentication
 --------------
 The local ``tabpfn`` package authenticates once via the
 ``TABPFN_TOKEN`` environment variable and then runs locally.  Set the
-token before calling :py:meth:`fit`.  Model weights for TabPFN-v2.5 are
+token before calling :py:meth:`fit`.  Model weights for TabPFN-v3 are
 pulled from HuggingFace on first use into the platform cache directory.
 """
 
@@ -78,6 +78,8 @@ from typing import Any, Literal, Self
 
 import numpy as np
 import torch
+
+from tabpfn.constants import ModelVersion
 
 from npcc._common import (
   TensorLike,
@@ -244,6 +246,7 @@ class PFNRBicop:
     device: str | torch.device | None = None,
     batch_size: int | None = None,
     model_kwargs: dict[str, Any] | None = None,
+    model_version: ModelVersion | None = ModelVersion.V3,
     sinkhorn_iters: int | None = None,
     projection_grid_size: int = 101,
   ) -> None:
@@ -262,6 +265,7 @@ class PFNRBicop:
         raise ValueError("batch_size must be positive.")
       self.batch_size = batch_size
     self.model_kwargs = dict(model_kwargs or {})
+    self.model_version = model_version
     self.sinkhorn_iters = sinkhorn_iters
     if projection_grid_size < 2:
       raise ValueError("projections_grid_size must be at least 2.")
@@ -283,6 +287,7 @@ class PFNRBicop:
         config=self.quantile_config,
         device=self._device,
         model_kwargs=self.model_kwargs,
+        model_version=self.model_version,
       )
     return TabPFNCriterionDistribution1D(
       transform=self.transform,
@@ -290,6 +295,7 @@ class PFNRBicop:
       device=self._device,
       batch_size=self.batch_size,
       model_kwargs=self.model_kwargs,
+      model_version=self.model_version,
     )
 
   def _get_grid_borders(self) -> None:

@@ -70,6 +70,8 @@ from typing import Any, Literal
 import numpy as np
 import torch
 
+from tabpfn.constants import ModelVersion
+
 from npcc._common import (
   TensorLike,
   _as_2d,
@@ -157,6 +159,7 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
     config: QuantileGridConfig | None = None,
     device: str | torch.device | None = None,
     model_kwargs: dict[str, Any] | None = None,
+    model_version: ModelVersion | None = ModelVersion.V3,
   ) -> None:
     cfg = config or QuantileGridConfig()
     super().__init__(
@@ -164,6 +167,7 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
       eps=cfg.eps,
       device=device,
       model_kwargs=model_kwargs,
+      model_version=model_version,
     )
     self.config = cfg
 
