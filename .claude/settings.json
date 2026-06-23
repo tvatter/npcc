@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run:*)",
+      "Bash(find *)",
+      "Bash(uv pip:*)",
+      "Bash(jupyter nbconvert *)",
+      "Bash(awk *)",
+      "Bash(find *)",
+      "Bash(sed *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git checkout:*)",
+      "Bash(git stash:*)",
+      "Bash(git push *)",
+      "Bash(git ls-tree:*)",
+      "Bash(git ls-remote *)",
+      "Bash(gh pr *)",
+      "Bash(git fetch *)",
+      "WebFetch(domain:web.archive.org)",
+      "WebSearch"
+    ],
+    "additionalDirectories": [
+      "/tmp"
+    ]
+  }
+}
