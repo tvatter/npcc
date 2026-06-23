@@ -127,7 +127,7 @@ model-wide via `PFNRBicop(..., batch_size=...)` and per-call via
 | `pdf(u, v, x=None, *, batch_size=None)`                 | Pointwise $\hat c(u_i, v_i \mid x_i)$ (vectorised over rows).                    |
 | `log_pdf(u, v, x=None, *, batch_size=None)`             | $\log$ of `pdf`, floored at the smallest positive float.                         |
 | `pdf_grid(u_grid, v_grid, x_row=None)` | Cartesian-grid density `out[i, j] = c(u_grid[i], v_grid[j] | x_row)`.  Requires `method="criterion"`. |
-| `cdf(u, v, x=None, *, n_int=64, batch_size=None)`    | Pointwise joint CDF $\hat C(u_i, v_i \mid x_i)$, trapezoidal in $s$ (and $t$ for symmetric). |
+| `cdf(u, v, x=None, *, n_int=12, batch_size=None)`    | Pointwise joint CDF $\hat C(u_i, v_i \mid x_i)$, trapezoidal in $s$ (and $t$ for symmetric). |
 | `cdf_grid(u_grid, v_grid, x_row=None, *, n_int=64)` | Cartesian-grid joint CDF.  Requires `method="criterion"`.            |
 | `hfunc1(u, v, x=None)`              | $h_1(u, v \mid x) = \partial C / \partial u = F_{V \mid U, X}(v \mid u, x)$.  Always available.  Conditions on the first argument (matches `pyvinecopulib`). |
 | `hfunc2(u, v, x=None)`              | $h_2(u, v \mid x) = \partial C / \partial v = F_{U \mid V, X}(u \mid v, x)$.  Requires `symmetric=True`. |

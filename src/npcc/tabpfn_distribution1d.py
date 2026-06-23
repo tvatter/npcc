@@ -38,6 +38,14 @@ from npcc._common import (
   _to_tensor,
 )
 
+_DEFAULT_MODEL_VERSION = ModelVersion.V3
+"""Default TabPFN model version shared by every npcc distribution/copula class.
+
+Centralized here so a version bump is a one-line change rather than four
+scattered defaults (the two inner distributions and
+:class:`~npcc.pfnr_bicop.PFNRBicop` all reference this single value).
+"""
+
 
 class TabPFNDistribution1D(ABC):
   """Abstract base class for univariate conditional predictive distributions.
@@ -64,6 +72,12 @@ class TabPFNDistribution1D(ABC):
       auto-selects ``cuda`` if available, else ``cpu``.  Forwarded into
       ``model_kwargs["device"]`` (without overriding an explicit user
       setting).
+  batch_size
+      Default chunk size for batched inference.  ``None`` (default) uses
+      400 on CPU and 2000 on CUDA.  Subclasses that read the predictive
+      distribution in one forward pass (e.g. the quantile method) ignore
+      it; it is honoured by the criterion method's chunked ``pdf`` /
+      ``cdf``.
   model_kwargs
       Forwarded to
       :py:meth:`TabPFNRegressor.create_default_for_version` by
@@ -72,6 +86,7 @@ class TabPFNDistribution1D(ABC):
 
   transform: Literal["identity", "logit", "probit"]
   eps: float
+  batch_size: int
   model_kwargs: dict[str, Any]
   model_version: ModelVersion | None
   model_: TabPFNRegressor | None
@@ -83,16 +98,30 @@ class TabPFNDistribution1D(ABC):
     transform: Literal["identity", "logit", "probit"] = "logit",
     eps: float = 1e-6,
     device: str | torch.device | None = None,
+    batch_size: int | None = None,
     model_kwargs: dict[str, Any] | None = None,
-    model_version: ModelVersion | None = ModelVersion.V3,
+    model_version: ModelVersion | None = _DEFAULT_MODEL_VERSION,
   ) -> None:
     self.transform = transform
     self.eps = eps
     self._device = _resolve_device(device)
+    if batch_size is None:
+      self.batch_size = 2000 if self._device.type == "cuda" else 400
+    else:
+      if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+      self.batch_size = batch_size
     self.model_kwargs = dict(model_kwargs or {})
     self.model_kwargs.setdefault("device", str(self._device))
     self.model_version = model_version
     self.model_ = None
+
+  def _resolve_batch_size(self, batch_size: int | None) -> int:
+    """Per-call override of :attr:`batch_size`, validated positive."""
+    effective = self.batch_size if batch_size is None else batch_size
+    if effective <= 0:
+      raise ValueError("batch_size must be positive.")
+    return effective
 
   def _make_model(self) -> TabPFNRegressor:
     if self.model_version is None:
@@ -146,13 +175,12 @@ class TabPFNDistribution1D(ABC):
   # ------------------------------------------------------------------
 
   def fit(self, w: TensorLike, y: TensorLike) -> Self:
-    """Fit a TabPFN-v3 regressor on ``(w, transform(y))``.
+    """Fit a TabPFN regressor on ``(w, transform(y))``.
 
-      Locked to TabPFN-v3.  Override via ``model_kwargs`` if needed.
-    transform: Literal["identity", "logit", "probit"]
-      The fit-time tensors live on CPU: TabPFN does its own GPU
-      placement internally and would reject CUDA tensors at the input
-      boundary.
+    Defaults to TabPFN-v3 (configurable via ``model_version`` /
+    ``model_kwargs``).  The fit-time tensors live on CPU: TabPFN does its
+    own GPU placement internally and would reject CUDA tensors at the
+    input boundary.
     """
     cpu = torch.device("cpu")
     w_t = _as_2d(w, device=cpu)

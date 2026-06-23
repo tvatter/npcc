@@ -148,39 +148,6 @@ def test_trapezoidal_weights_singleton_grid() -> None:
   assert torch.allclose(w, torch.tensor([1.0], dtype=torch.float64))
 
 
-def test_extract_criterion_borders_accepts_tensor() -> None:
-  m = PFNRBicop()
-  crit = type("C", (), {"borders": torch.tensor([0.0, 0.5, 1.0])})()
-  logits = torch.zeros((1, 2), dtype=torch.float32)
-
-  out = m._extract_criterion_borders(crit, logits)
-  expected = torch.tensor(
-    [0.0, 0.5, 1.0], dtype=torch.float64, device=m._device
-  )
-  assert torch.allclose(out, expected)
-
-
-def test_extract_criterion_borders_accepts_array_like() -> None:
-  m = PFNRBicop()
-  crit = type("C", (), {"borders": [0.0, 0.5, 1.0]})()
-  logits = torch.zeros((1, 2), dtype=torch.float32)
-
-  out = m._extract_criterion_borders(crit, logits)
-  expected = torch.tensor(
-    [0.0, 0.5, 1.0], dtype=torch.float64, device=m._device
-  )
-  assert torch.allclose(out, expected)
-
-
-def test_extract_criterion_borders_raises_when_missing() -> None:
-  m = PFNRBicop()
-  crit = type("C", (), {})()
-  logits = torch.zeros((1, 2), dtype=torch.float32)
-
-  with pytest.raises(RuntimeError, match="Could not extract criterion borders"):
-    m._extract_criterion_borders(crit, logits)
-
-
 # ===========================================================================
 # density()
 # ===========================================================================
@@ -454,6 +421,36 @@ class TestPFNRDensityGrid:
     out = m._raw_pdf_grid_torch(u_g, v_g, x_row, batch_size=8)
     assert isinstance(out, torch.Tensor)
     assert out.shape == (4, 5)
+
+  def test_raw_pdf_grid_torch_quantiles_symmetric_matches_pointwise(
+    self, patch_uniform: None
+  ) -> None:
+    """Symmetric quantiles grid must match the pointwise pdf.
+
+    Regression: the reverse (U|V) half once reshaped a (u-slow, v-fast)
+    tile into (n_v, n_u), transposing the contribution.  A non-square
+    grid with a value-varying density exposes the mis-orientation that a
+    constant-density square grid hides.
+    """
+    rng = np.random.default_rng(104)
+    u = rng.uniform(0.2, 0.8, 20)
+    v = rng.uniform(0.2, 0.8, 20)
+
+    m = PFNRBicop(method="quantiles", symmetric=True).fit(u, v)
+    u_g = torch.linspace(0.25, 0.75, 4, dtype=torch.float64, device=m._device)
+    v_g = torch.linspace(0.3, 0.7, 5, dtype=torch.float64, device=m._device)
+    x_row = torch.ones((1, 1), dtype=torch.float64, device=m._device)
+
+    grid = m._raw_pdf_grid_torch(u_g, v_g, x_row, batch_size=8)
+    assert isinstance(grid, torch.Tensor)
+
+    u_tile = u_g.repeat_interleave(v_g.shape[0])
+    v_tile = v_g.tile(u_g.shape[0])
+    expected = m.pdf(u_tile, v_tile).reshape(u_g.shape[0], v_g.shape[0])
+    assert isinstance(expected, torch.Tensor)
+    np.testing.assert_allclose(
+      grid.cpu().numpy(), expected.cpu().numpy(), atol=1e-10
+    )
 
 
 # ===========================================================================
@@ -1105,7 +1102,6 @@ class TestSinkhornProjection:
         w[1:-1] = (grid[2:] - grid[:-2]) / 2.0
       return w
 
-    wu = _trap_weights(u_grid)
     wv = _trap_weights(v_grid)
 
     # Row integrals (should sum to ~1 after projection)

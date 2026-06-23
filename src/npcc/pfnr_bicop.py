@@ -34,12 +34,12 @@ fits the reverse direction as well and averages::
 This reduces the asymmetry but does not impose exact uniform copula
 margins. If exact margins are required, enable the optional Sinkhorn
 projection via ``sinkhorn_iters``. For ``method="criterion"``, the
-projection grid is derived from the fitted TabPFN bar-distribution
-borders; for ``method="quantiles"``, it is given by the predefined
-quantile grid. For :py:meth:`pdf_grid`, the projection is applied
-directly on the evaluated grid; for pointwise :py:meth:`pdf`, the
-correction is computed on the internal projection grid and interpolated
-back to the queried points.
+projection grid is a uniform grid of ``projection_grid_size`` points on
+the copula scale ``(0, 1)``; for ``method="quantiles"``, it is given by
+the predefined quantile alpha grid. For :py:meth:`pdf_grid`, the
+projection is applied directly on the evaluated grid; for pointwise
+:py:meth:`pdf`, the correction is computed on the internal projection
+grid and interpolated back to the queried points.
 
 
 Density-recovery method
@@ -89,10 +89,10 @@ from npcc._common import (
   _resolve_device,
   _to_tensor,
   _torch_interp,
-  _torch_interp_batched_fp,
   _wrap_output,
 )
 from npcc.tabpfn_criterion_distribution1d import TabPFNCriterionDistribution1D
+from npcc.tabpfn_distribution1d import _DEFAULT_MODEL_VERSION
 from npcc.tabpfn_quantile_distribution1d import (
   QuantileGridConfig,
   TabPFNQuantileDistribution1D,
@@ -246,7 +246,7 @@ class PFNRBicop:
     device: str | torch.device | None = None,
     batch_size: int | None = None,
     model_kwargs: dict[str, Any] | None = None,
-    model_version: ModelVersion | None = ModelVersion.V3,
+    model_version: ModelVersion | None = _DEFAULT_MODEL_VERSION,
     sinkhorn_iters: int | None = None,
     projection_grid_size: int = 101,
   ) -> None:
@@ -326,46 +326,6 @@ class PFNRBicop:
     )
     self._v_grid_borders_ = alphas
     self._u_grid_borders_ = alphas
-
-  def _extract_criterion_borders(
-    self,
-    criterion: object,
-    logits: torch.Tensor,
-  ) -> torch.Tensor:
-    """Extract z-space borders from TabPFN criterion-like objects.
-
-    Primary path uses the native ``borders`` attribute. A fallback path
-    reconstructs equally spaced borders for the test fake criterion.
-    """
-    borders_obj = getattr(criterion, "borders", None)
-    if isinstance(borders_obj, torch.Tensor):
-      return borders_obj.to(device=self._device, dtype=torch.float64).reshape(
-        -1
-      )
-
-    if borders_obj is not None:
-      return torch.as_tensor(
-        borders_obj,
-        dtype=torch.float64,
-        device=self._device,
-      ).reshape(-1)
-
-    # Fallback for the tests' fake criterion (_UniformCriterion).
-    lo = getattr(criterion, "Q_LO", None)
-    hi = getattr(criterion, "Q_HI", None)
-    if lo is not None and hi is not None:
-      n_bins = int(logits.shape[1])
-      return torch.linspace(
-        float(lo),
-        float(hi),
-        steps=n_bins + 1,
-        dtype=torch.float64,
-        device=self._device,
-      )
-
-    raise RuntimeError(
-      "Could not extract criterion borders from TabPFN output_type='full' head."
-    )
 
   def _resolve_batch_size(self, batch_size: int | None) -> int:
     effective = self.batch_size if batch_size is None else batch_size
@@ -473,21 +433,13 @@ class PFNRBicop:
 
     Notes
     -----
-    When ``self.sinkhorn_iters`` is not ``None``, the 1-D border grids used
-    for the optional Sinkhorn projection are initialized and cached during
-    fit. For ``method="criterion"``, these borders are extracted from the
-    fitted TabPFN Riemann distribution head(s); for ``method="quantiles"``,
-    they are taken from the configured quantile alpha grid.
+    When ``self.sinkhorn_iters`` is not ``None``, the 1-D grids used for the
+    optional Sinkhorn projection are initialized and cached during fit. For
+    ``method="criterion"`` they are a uniform grid of ``projection_grid_size``
+    points on the copula scale ``(0, 1)``; for ``method="quantiles"`` they are
+    the configured quantile alpha grid.
     """
-    u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
-    x_t = (
-      self._default_x(u_t.shape[0])
-      if x is None
-      else _as_2d(x, device=self._device)
-    )
-
-    if x_t.shape[0] != u_t.shape[0]:
-      raise ValueError("x, u, and v must have the same number of observations.")
+    u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
 
     self.v_given_ux_.fit(self._features(u_t, x_t), v_t)
 
@@ -646,6 +598,50 @@ class PFNRBicop:
 
     return c_raw
 
+  def _grid_one_direction(
+    self,
+    module: _Distribution1D,
+    first_grid: torch.Tensor,
+    second_grid: torch.Tensor,
+    x_row: torch.Tensor,
+    *,
+    batch_size: int,
+  ) -> torch.Tensor:
+    """Density grid ``out[i, j] = f(second_grid[j] | first_grid[i], x_row)``.
+
+    ``module`` predicts the *second* coordinate conditioned on
+    ``[first_grid, x_row]``.  The criterion method reuses one forward
+    pass per ``first`` row via
+    :py:meth:`TabPFNCriterionDistribution1D.pdf_grid`; the quantile
+    method has no such shortcut and evaluates the explicit Cartesian
+    tile (``first`` slow, ``second`` fast) before reshaping.
+
+    ponytail: one direction helper, called once per Rosenblatt direction
+    (forward V|U, reverse U|V) — the reverse caller transposes the result.
+    """
+    n_first, n_second = first_grid.shape[0], second_grid.shape[0]
+
+    if isinstance(module, TabPFNCriterionDistribution1D):
+      grid = module.pdf_grid(
+        self._features(first_grid, x_row.repeat(n_first, 1)),
+        second_grid,
+        batch_size=batch_size,
+      )
+    else:
+      first_tiled = first_grid.repeat_interleave(n_second)
+      second_tiled = second_grid.tile(n_first)
+      x_tiled = x_row.repeat(n_first * n_second, 1)
+      flat = module.pdf(
+        self._features(first_tiled, x_tiled),
+        second_tiled,
+        batch_size=batch_size,
+      )
+      assert isinstance(flat, torch.Tensor)
+      grid = flat.reshape(n_first, n_second)
+
+    assert isinstance(grid, torch.Tensor)
+    return grid
+
   def _raw_pdf_grid_torch(
     self,
     u_grid: torch.Tensor,
@@ -654,55 +650,19 @@ class PFNRBicop:
     *,
     batch_size: int,
   ) -> torch.Tensor:
-    x_for_u = x_row.repeat(u_grid.shape[0], 1)
-
-    if self.method == "criterion":
-      assert isinstance(self.v_given_ux_, TabPFNCriterionDistribution1D)
-      density_grid = self.v_given_ux_.pdf_grid(
-        self._features(u_grid, x_for_u),
-        v_grid,
-        batch_size=batch_size,
-      )
-    else:
-      u_tiled = u_grid.repeat_interleave(v_grid.shape[0])
-      v_tiled = v_grid.tile(u_grid.shape[0])
-      x_tiled = x_row.repeat(u_grid.shape[0] * v_grid.shape[0], 1)
-
-      density_flat = self.v_given_ux_.pdf(
-        self._features(u_tiled, x_tiled),
-        v_tiled,
-        batch_size=batch_size,
-      )
-      density_grid = density_flat.reshape(u_grid.shape[0], v_grid.shape[0])
-
-    assert isinstance(density_grid, torch.Tensor)
+    density_grid = self._grid_one_direction(
+      self.v_given_ux_, u_grid, v_grid, x_row, batch_size=batch_size
+    )
 
     if not self.symmetric:
       return density_grid
 
+    # Reverse direction returns f_{U|V}(u_i | v_j) at [j, i]; transpose
+    # before averaging so both grids index [u, v].
     assert self.u_given_vx_ is not None
-    x_for_v = x_row.repeat(v_grid.shape[0], 1)
-
-    if self.method == "criterion":
-      assert isinstance(self.u_given_vx_, TabPFNCriterionDistribution1D)
-      density_grid_u = self.u_given_vx_.pdf_grid(
-        self._features(v_grid, x_for_v),
-        u_grid,
-        batch_size=batch_size,
-      )
-    else:
-      u_tiled = u_grid.repeat_interleave(v_grid.shape[0])
-      v_tiled = v_grid.tile(u_grid.shape[0])
-      x_tiled = x_row.repeat(u_grid.shape[0] * v_grid.shape[0], 1)
-
-      density_flat_u = self.u_given_vx_.pdf(
-        self._features(v_tiled, x_tiled),
-        u_tiled,
-        batch_size=batch_size,
-      )
-      density_grid_u = density_flat_u.reshape(v_grid.shape[0], u_grid.shape[0])
-
-    assert isinstance(density_grid_u, torch.Tensor)
+    density_grid_u = self._grid_one_direction(
+      self.u_given_vx_, v_grid, u_grid, x_row, batch_size=batch_size
+    )
     return 0.5 * (density_grid + density_grid_u.T)
 
   def log_pdf(
@@ -846,14 +806,7 @@ class PFNRBicop:
     ``hfunc1`` conditions on the first argument.
     """
     return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
-    u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
-    x_t = (
-      self._default_x(u_t.shape[0])
-      if x is None
-      else _as_2d(x, device=self._device)
-    )
-    if x_t.shape[0] != u_t.shape[0]:
-      raise ValueError("x, u, and v must have the same number of observations.")
+    u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
 
     out = self.v_given_ux_.cdf(self._features(u_t, x_t), v_t)
     assert isinstance(out, torch.Tensor)
@@ -883,14 +836,7 @@ class PFNRBicop:
       )
 
     return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
-    u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
-    x_t = (
-      self._default_x(u_t.shape[0])
-      if x is None
-      else _as_2d(x, device=self._device)
-    )
-    if x_t.shape[0] != u_t.shape[0]:
-      raise ValueError("x, u, and v must have the same number of observations.")
+    u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
 
     out = self.u_given_vx_.cdf(self._features(v_t, x_t), u_t)
     assert isinstance(out, torch.Tensor)
@@ -919,7 +865,10 @@ class PFNRBicop:
                                + ∫_0^v F_{U|V,X}(u|t,x) dt) (symmetric)
 
     ``n_int`` is the number of trapezoid steps along the integration
-    axis; 64 is plenty for the typical bivariate copula.  ``batch_size``
+    axis; the default 12 trades a little accuracy for speed on this
+    per-row path (each step is a separate inner CDF evaluation).
+    :py:meth:`cdf_grid` shares one fine grid across the whole Cartesian
+    product, so it can afford a finer default (64).  ``batch_size``
     overrides the model-level default chunk size for the inner
     criterion CDF calls used during integration.
     """
@@ -928,14 +877,7 @@ class PFNRBicop:
     effective_batch_size = self._resolve_batch_size(batch_size)
 
     return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
-    u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
-    x_t = (
-      self._default_x(u_t.shape[0])
-      if x is None
-      else _as_2d(x, device=self._device)
-    )
-    if x_t.shape[0] != u_t.shape[0]:
-      raise ValueError("x, u, and v must have the same number of observations.")
+    u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
 
     cdf_v_dir = self._integrate_one_direction(
       upper=u_t,
@@ -1024,27 +966,10 @@ class PFNRBicop:
     if n_int < 2:
       raise ValueError("n_int must be at least 2.")
 
-    return_as_torch, (u_in, v_in, x_in) = _normalize_inputs(
+    return_as_torch, _ = _normalize_inputs(
       u_grid, v_grid, x_row, device=self._device
     )
-    assert u_in is not None and v_in is not None
-    u_t = u_in.reshape(-1)
-    v_t = v_in.reshape(-1)
-    if torch.any((u_t <= 0.0) | (u_t >= 1.0)) or torch.any(
-      (v_t <= 0.0) | (v_t >= 1.0)
-    ):
-      raise ValueError("u_grid and v_grid must lie strictly inside (0, 1).")
-
-    eps = self.quantile_config.eps
-    u_t = torch.clamp(u_t, eps, 1.0 - eps)
-    v_t = torch.clamp(v_t, eps, 1.0 - eps)
-
-    if x_in is None:
-      x_row_t = torch.ones((1, 1), dtype=torch.float64, device=self._device)
-    else:
-      x_row_t = _as_2d(x_in, device=self._device)
-      if x_row_t.shape[0] != 1:
-        raise ValueError("x_row must contain exactly one row.")
+    u_t, v_t, x_row_t = self._prepare_grid_inputs(u_grid, v_grid, x_row)
 
     cdf_v_dir = self._integrate_grid_one_direction(
       upper_grid=u_t,
