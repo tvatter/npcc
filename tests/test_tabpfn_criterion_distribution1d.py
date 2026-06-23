@@ -8,7 +8,9 @@ import numpy as np
 import pytest
 import torch
 
-from npcc.tabpfn_criterion_distribution1d import TabPFNCriterionDistribution1D
+from npcc.core.tabpfn_criterion_distribution1d import (
+  TabPFNCriterionDistribution1D,
+)
 from tests.conftest import uniform_density_y
 
 

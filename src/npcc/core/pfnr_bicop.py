@@ -80,7 +80,7 @@ import torch
 
 from tabpfn.constants import ModelVersion
 
-from npcc._common import (
+from npcc.core._common import (
   TensorLike,
   _as_2d,
   _check_uv,
@@ -90,9 +90,11 @@ from npcc._common import (
   _torch_interp,
   _wrap_output,
 )
-from npcc.tabpfn_criterion_distribution1d import TabPFNCriterionDistribution1D
-from npcc.tabpfn_distribution1d import _DEFAULT_MODEL_VERSION
-from npcc.tabpfn_quantile_distribution1d import (
+from npcc.core.tabpfn_criterion_distribution1d import (
+  TabPFNCriterionDistribution1D,
+)
+from npcc.core.tabpfn_distribution1d import _DEFAULT_MODEL_VERSION
+from npcc.core.tabpfn_quantile_distribution1d import (
   QuantileGridConfig,
   TabPFNQuantileDistribution1D,
 )

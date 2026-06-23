@@ -1,0 +1,33 @@
+# Example grid for the npcc simulation study.
+# Run with:  npcc-simstudy --config configs/study.toml --out results/ --workers 4
+#
+# The study sweeps the cartesian product of every axis below. Each
+# (family, tau_scenario, n, rep) cell samples its own data + ground truth once;
+# the (transform, method) estimators are fitted on that shared data and each is
+# evaluated under every `normalize` (Sinkhorn) variant.
+
+[grid]
+# Copula families (one-parameter): clayton, gumbel, frank, gaussian, joe.
+families = ["clayton", "gumbel", "frank", "gaussian"]
+
+# tau regimes. Conditional tau(x): linear, constant, sin, quadratic.
+# Unconditional fixed tau: uncond25, uncond50, uncond75.
+tau_scenarios = ["linear", "constant", "uncond50"]
+
+# Support transforms used by the inner TabPFN models.
+transforms = ["logit", "identity", "probit"]
+
+# Density-recovery methods.
+methods = ["criterion", "quantiles"]
+
+# Sinkhorn normalization variants applied to the density. "none" = off.
+normalize = ["none", 5]
+
+# Training sample sizes and Monte-Carlo repetitions.
+n = [200, 500, 1000]
+n_rep = 20
+
+# Grid resolution for the Sinkhorn projection (per axis). Larger = more
+# accurate margins but markedly slower for conditional scenarios (a density
+# grid is built per unique x). Optional; defaults to 30.
+projection_grid_size = 30

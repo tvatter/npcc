@@ -72,7 +72,7 @@ import torch
 
 from tabpfn.constants import ModelVersion
 
-from npcc._common import (
+from npcc.core._common import (
   TensorLike,
   _as_2d,
   _normalize_inputs,
@@ -81,7 +81,7 @@ from npcc._common import (
   _torch_interp_batched_xp,
   _wrap_output,
 )
-from npcc.tabpfn_distribution1d import (
+from npcc.core.tabpfn_distribution1d import (
   _DEFAULT_MODEL_VERSION,
   TabPFNDistribution1D,
 )

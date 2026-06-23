@@ -9,9 +9,13 @@ import pytest
 
 import torch
 
-from npcc.pfnr_bicop import PFNRBicop, _sinkhorn_project
-from npcc.tabpfn_criterion_distribution1d import TabPFNCriterionDistribution1D
-from npcc.tabpfn_quantile_distribution1d import TabPFNQuantileDistribution1D
+from npcc.core.pfnr_bicop import PFNRBicop, _sinkhorn_project
+from npcc.core.tabpfn_criterion_distribution1d import (
+  TabPFNCriterionDistribution1D,
+)
+from npcc.core.tabpfn_quantile_distribution1d import (
+  TabPFNQuantileDistribution1D,
+)
 
 
 def make_pfnr(method: str = "quantiles") -> PFNRBicop:
