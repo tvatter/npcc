@@ -19,20 +19,19 @@ The features fed to the inner regressor are::
 so the inner module sees the conditioning copula score and the
 covariates side by side.
 
-Symmetric variant
------------------
-The naive estimator factorises in a single direction and is therefore
-ordering-dependent: by construction it satisfies
-``int c(u, v | x) dv = 1`` but generally not
-``int c(u, v | x) du = 1``.  Setting ``symmetric=True`` (the default)
-fits the reverse direction as well and averages::
+Symmetric averaging
+-------------------
+A single Rosenblatt direction is ordering-dependent: it satisfies
+``int c(u, v | x) dv = 1`` by construction but generally not
+``int c(u, v | x) du = 1``.  To reduce this directional bias the
+estimator always fits both directions and averages::
 
-    c_sym(u, v | x) =
+    c(u, v | x) =
         0.5 * f_{V | U, X}(v | u, x)
       + 0.5 * f_{U | V, X}(u | v, x).
 
-This reduces the asymmetry but does not impose exact uniform copula
-margins. If exact margins are required, enable the optional Sinkhorn
+This does not impose exact uniform copula margins. If exact margins are
+required, enable the optional Sinkhorn
 projection via ``sinkhorn_iters``. For ``method="criterion"``, the
 projection grid is a uniform grid of ``projection_grid_size`` points on
 the copula scale ``(0, 1)``; for ``method="quantiles"``, it is given by
@@ -176,9 +175,6 @@ class PFNRBicop:
 
   Parameters
   ----------
-  symmetric
-      If ``True`` (default), also fit the reverse Rosenblatt direction
-      and return the average of the two density estimates.
   method
       ``"criterion"`` (default) → :class:`TabPFNCriterionDistribution1D`
       (direct PDF via TabPFN's binned head).  ``"quantiles"`` →
@@ -226,11 +222,8 @@ class PFNRBicop:
 
   Notes
   -----
-  - The asymmetric estimator (``symmetric=False``) enforces
-    ``int c(u, v | x) dv = 1`` by construction and is the cheaper
-    option (one direction fit, one direction at evaluation).
-  - The symmetric estimator reduces the directional bias but doubles
-    both fit and inference cost.
+  - The estimator fits both Rosenblatt directions and averages them to
+    reduce directional bias (see the module docstring).
   - Public methods accept either NumPy arrays or torch tensors.  When
     any positional numeric input is a torch tensor, the return value
     is a torch tensor on ``device``; otherwise it is a NumPy array.
@@ -239,7 +232,6 @@ class PFNRBicop:
   def __init__(
     self,
     *,
-    symmetric: bool = True,
     method: Literal["criterion", "quantiles"] = "criterion",
     quantile_config: QuantileGridConfig | None = None,
     transform: Literal["identity", "logit", "probit"] = "logit",
@@ -253,7 +245,6 @@ class PFNRBicop:
     if sinkhorn_iters is not None and sinkhorn_iters <= 0:
       raise ValueError("sinkhorn_iters must be None or a positive integer.")
 
-    self.symmetric = symmetric
     self.method = method
     self.quantile_config = quantile_config or QuantileGridConfig()
     self.transform = transform
@@ -272,9 +263,7 @@ class PFNRBicop:
     self.projection_grid_size = projection_grid_size
 
     self.v_given_ux_: _Distribution1D = self._make_distribution()
-    self.u_given_vx_: _Distribution1D | None = (
-      self._make_distribution() if symmetric else None
-    )
+    self.u_given_vx_: _Distribution1D = self._make_distribution()
 
     # Grid borders (cached after fit)
     self._v_grid_borders_: torch.Tensor | None = None
@@ -425,9 +414,9 @@ class PFNRBicop:
     v: TensorLike,
     x: TensorLike | None = None,
   ) -> Self:
-    """Fit the inner conditional density estimator(s).
+    """Fit the inner conditional density estimators.
 
-    Fits ``f(V | U, X)``.  When ``symmetric=True`` also fits
+    Fits both Rosenblatt directions, ``f(V | U, X)`` and
     ``f(U | V, X)``.  ``x=None`` is shorthand for the unconditional
     case (a constant covariate column).
 
@@ -442,10 +431,7 @@ class PFNRBicop:
     u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
 
     self.v_given_ux_.fit(self._features(u_t, x_t), v_t)
-
-    if self.symmetric:
-      assert self.u_given_vx_ is not None
-      self.u_given_vx_.fit(self._features(v_t, x_t), u_t)
+    self.u_given_vx_.fit(self._features(v_t, x_t), u_t)
 
     # Cache grid borders for Sinkhorn projection (if enabled)
     if self.sinkhorn_iters is not None:
@@ -584,19 +570,12 @@ class PFNRBicop:
     c_v_given_u = self.v_given_ux_.pdf(
       self._features(u, x), v, batch_size=batch_size
     )
+    c_u_given_v = self.u_given_vx_.pdf(
+      self._features(v, x), u, batch_size=batch_size
+    )
     assert isinstance(c_v_given_u, torch.Tensor)
-
-    if not self.symmetric:
-      c_raw = c_v_given_u
-    else:
-      assert self.u_given_vx_ is not None
-      c_u_given_v = self.u_given_vx_.pdf(
-        self._features(v, x), u, batch_size=batch_size
-      )
-      assert isinstance(c_u_given_v, torch.Tensor)
-      c_raw = 0.5 * (c_v_given_u + c_u_given_v)
-
-    return c_raw
+    assert isinstance(c_u_given_v, torch.Tensor)
+    return 0.5 * (c_v_given_u + c_u_given_v)
 
   def _grid_one_direction(
     self,
@@ -654,12 +633,8 @@ class PFNRBicop:
       self.v_given_ux_, u_grid, v_grid, x_row, batch_size=batch_size
     )
 
-    if not self.symmetric:
-      return density_grid
-
     # Reverse direction returns f_{U|V}(u_i | v_j) at [j, i]; transpose
     # before averaging so both grids index [u, v].
-    assert self.u_given_vx_ is not None
     density_grid_u = self._grid_one_direction(
       self.u_given_vx_, v_grid, u_grid, x_row, batch_size=batch_size
     )
@@ -715,8 +690,8 @@ class PFNRBicop:
     covariate row reused on both axes; when ``None`` a constant
     one-column row is used.
 
-    For the symmetric estimator both directions are evaluated on the
-    same Cartesian product (transposing the reverse one) and averaged.
+    Both Rosenblatt directions are evaluated on the same Cartesian
+    product (transposing the reverse one) and averaged.
 
     batch_size
         Overrides the model-level batch size used by the inner criterion
@@ -820,21 +795,11 @@ class PFNRBicop:
   ) -> TensorLike:
     """``h_2(u, v | x) = P(U ≤ u | V = v, X = x) = F_{U | V, X}(u | v, x)``.
 
-    Requires ``symmetric=True`` (the U|V regressor must have been
-    fitted).  For ``symmetric=False`` this raises with a clear pointer
-    to the workaround: fit a second :class:`PFNRBicop` with
-    ``(u, v)`` swapped.
+    A direct read of the U|V regressor's conditional CDF.
 
     Convention matches :py:meth:`pyvinecopulib.Bicop.hfunc2`:
     ``hfunc2`` conditions on the second argument.
     """
-    if self.u_given_vx_ is None:
-      raise RuntimeError(
-        "hfunc2 requires symmetric=True. Refit with "
-        "PFNRBicop(symmetric=True), or fit a second PFNRBicop with "
-        "(u, v) arguments swapped."
-      )
-
     return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
     u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
 
@@ -857,12 +822,11 @@ class PFNRBicop:
   ) -> TensorLike:
     """Joint CDF ``C(u_i, v_i | x_i)`` evaluated row-by-row.
 
-    Trapezoidal integration of the inner conditional CDF over the
-    Rosenblatt direction:
+    Trapezoidal integration of the inner conditional CDF, averaged over
+    both Rosenblatt directions:
 
-        C(u, v | x) = ∫_0^u F_{V | U, X}(v | s, x) ds       (asymmetric)
-        C^sym(u, v | x) = 0.5 (∫_0^u F_{V|U,X}(v|s,x) ds
-                               + ∫_0^v F_{U|V,X}(u|t,x) dt) (symmetric)
+        C(u, v | x) = 0.5 (∫_0^u F_{V|U,X}(v|s,x) ds
+                           + ∫_0^v F_{U|V,X}(u|t,x) dt)
 
     ``n_int`` is the number of trapezoid steps along the integration
     axis; the default 12 trades a little accuracy for speed on this
@@ -887,11 +851,6 @@ class PFNRBicop:
       n_int=n_int,
       batch_size=effective_batch_size,
     )
-
-    if not self.symmetric:
-      return _wrap_output(cdf_v_dir, return_as_torch=return_as_torch)
-
-    assert self.u_given_vx_ is not None
     cdf_u_dir = self._integrate_one_direction(
       upper=v_t,
       conditioned=u_t,
@@ -956,8 +915,7 @@ class PFNRBicop:
     Cartesian product ``(s_fine × v_grid)`` in one TabPFN forward
     pass per row of ``s_fine``, then for each ``u_grid[i]`` reads off
     the cumulative trapezoidal integral up to ``u_grid[i]`` via
-    interpolation. Symmetric case averages the analogous ``v``-axis
-    integral.
+    interpolation, then averages the analogous ``v``-axis integral.
     """
     if self.method != "criterion" or not isinstance(
       self.v_given_ux_, TabPFNCriterionDistribution1D
@@ -978,9 +936,6 @@ class PFNRBicop:
       module=self.v_given_ux_,
       n_int=n_int,
     )
-
-    if not self.symmetric:
-      return _wrap_output(cdf_v_dir, return_as_torch=return_as_torch)
 
     assert isinstance(self.u_given_vx_, TabPFNCriterionDistribution1D)
     cdf_u_dir = self._integrate_grid_one_direction(

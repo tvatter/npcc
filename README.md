@@ -30,21 +30,21 @@ exactly what a flexible distributional regressor like TabPFN provides.
 The features fed to the regressor are simply $W = [u, x]$ (or $[v, x]$
 for the reverse direction).
 
-### Symmetric variant
+### Symmetric averaging
 
-The naive estimator factorises in a single direction and is therefore
-ordering-dependent: it satisfies $\int_0^1 \hat c (u, v \mid x) \, dv =
-1$ by construction but generally not $\int_0^1 \hat c (u, v \mid x) \,
-du = 1$.  Setting `symmetric=True` (the default) also fits the reverse
-direction $f_{U \mid V, X}$ and averages,
+A single Rosenblatt direction is ordering-dependent: it satisfies
+$\int_0^1 \hat c (u, v \mid x) \, dv = 1$ by construction but generally
+not $\int_0^1 \hat c (u, v \mid x) \, du = 1$.  To reduce this
+directional bias the estimator always fits both directions and
+averages,
 
-$$\hat c_S(u, v \mid x)
+$$\hat c(u, v \mid x)
 = \tfrac{1}{2} \, \hat f_{V \mid U, X}(v \mid u, x)
-+ \tfrac{1}{2} \, \hat f_{U \mid V, X}(u \mid v, x),$$
++ \tfrac{1}{2} \, \hat f_{U \mid V, X}(u \mid v, x).$$
 
-which reduces directional bias.  It still does not impose exact uniform
-copula margins; if you need that, evaluate the density on a grid and
-apply iterative-proportional-fitting / Sinkhorn projection.
+This still does not impose exact uniform copula margins; if you need
+that, evaluate the density on a grid and apply
+iterative-proportional-fitting / Sinkhorn projection.
 
 ### Support transforms
 
@@ -127,10 +127,10 @@ model-wide via `PFNRBicop(..., batch_size=...)` and per-call via
 | `pdf(u, v, x=None, *, batch_size=None)`                 | Pointwise $\hat c(u_i, v_i \mid x_i)$ (vectorised over rows).                    |
 | `log_pdf(u, v, x=None, *, batch_size=None)`             | $\log$ of `pdf`, floored at the smallest positive float.                         |
 | `pdf_grid(u_grid, v_grid, x_row=None)` | Cartesian-grid density `out[i, j] = c(u_grid[i], v_grid[j] | x_row)`.  Requires `method="criterion"`. |
-| `cdf(u, v, x=None, *, n_int=12, batch_size=None)`    | Pointwise joint CDF $\hat C(u_i, v_i \mid x_i)$, trapezoidal in $s$ (and $t$ for symmetric). |
+| `cdf(u, v, x=None, *, n_int=12, batch_size=None)`    | Pointwise joint CDF $\hat C(u_i, v_i \mid x_i)$, trapezoidal in $s$ and $t$. |
 | `cdf_grid(u_grid, v_grid, x_row=None, *, n_int=64)` | Cartesian-grid joint CDF.  Requires `method="criterion"`.            |
 | `hfunc1(u, v, x=None)`              | $h_1(u, v \mid x) = \partial C / \partial u = F_{V \mid U, X}(v \mid u, x)$.  Always available.  Conditions on the first argument (matches `pyvinecopulib`). |
-| `hfunc2(u, v, x=None)`              | $h_2(u, v \mid x) = \partial C / \partial v = F_{U \mid V, X}(u \mid v, x)$.  Requires `symmetric=True`. |
+| `hfunc2(u, v, x=None)`              | $h_2(u, v \mid x) = \partial C / \partial v = F_{U \mid V, X}(u \mid v, x)$. |
 | `tau(x_row=None, *, n=1000, seeds=None)` | Kendall's $\tau(x)$ via [pyvinecopulib](https://github.com/vinecopulib/pyvinecopulib)'s recipe: quasi-random `ghalton(n, 2)` + inverse-Rosenblatt + `wdm`. Matches `pv.KernelBicop::parameters_to_tau`. |
 | `conditional_cdf_v_given_u(u, v_grid, x=None)` | Diagnostic: $C_{V \mid U, X}(v \mid u_i)$ broadcast over `v_grid`.  Wraps `hfunc2`. |
 | `as_bicop(x_row=None)`              | Returns a [`pyvinecopulib`](https://github.com/vinecopulib/pyvinecopulib)-compatible adapter (exposes `var_types = ["c", "c"]` and `pdf(uv)`). |
@@ -160,7 +160,7 @@ clayton = pv.Bicop(
 )
 u = clayton.simulate(n=1000, seeds=[2, 2, 4])
 
-# Fit the TabPFN-Rosenblatt copula (defaults: symmetric=True, method="criterion")
+# Fit the TabPFN-Rosenblatt copula (default method="criterion")
 model = PFNRBicop()
 model.fit(u[:, 0], u[:, 1])
 
@@ -175,7 +175,7 @@ grid = model.pdf_grid(u_grid, v_grid)   # shape (30, 30)
 # Joint CDF and h-functions (pyvinecopulib convention: h_i conditions on i-th arg)
 C = model.cdf_grid(u_grid, v_grid)            # shape (30, 30)
 h1 = model.hfunc1(np.array([0.3, 0.5]), np.array([0.4, 0.6]))   # F_{V|U,X}
-# h2 = model.hfunc2(...)  # F_{U|V,X}, requires symmetric=True
+h2 = model.hfunc2(np.array([0.3, 0.5]), np.array([0.4, 0.6]))   # F_{U|V,X}
 
 # Kendall's tau via the pyvinecopulib quasi-random recipe.
 tau = model.tau()
