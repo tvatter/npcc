@@ -577,35 +577,6 @@ class PFNRBicop:
     assert isinstance(c_u_given_v, torch.Tensor)
     return 0.5 * (c_v_given_u + c_u_given_v)
 
-  def _grid_one_direction(
-    self,
-    module: _Distribution1D,
-    first_grid: torch.Tensor,
-    second_grid: torch.Tensor,
-    x_row: torch.Tensor,
-    *,
-    batch_size: int,
-  ) -> torch.Tensor:
-    """Density grid ``out[i, j] = f(second_grid[j] | first_grid[i], x_row)``.
-
-    ``module`` predicts the *second* coordinate conditioned on
-    ``[first_grid, x_row]``.  Both density-recovery methods expose
-    ``pdf_grid``, which reuses one forward pass per ``first`` row (the
-    same logits / quantile table is evaluated against every ``second``
-    value), so no explicit ``n_first * n_second`` tile is materialised.
-
-    ponytail: one direction helper, called once per Rosenblatt direction
-    (forward V|U, reverse U|V) — the reverse caller transposes the result.
-    """
-    n_first = first_grid.shape[0]
-    grid = module.pdf_grid(
-      self._features(first_grid, x_row.repeat(n_first, 1)),
-      second_grid,
-      batch_size=batch_size,
-    )
-    assert isinstance(grid, torch.Tensor)
-    return grid
-
   def _raw_pdf_grid_torch(
     self,
     u_grid: torch.Tensor,
@@ -614,16 +585,15 @@ class PFNRBicop:
     *,
     batch_size: int,
   ) -> torch.Tensor:
-    density_grid = self._grid_one_direction(
-      self.v_given_ux_, u_grid, v_grid, x_row, batch_size=batch_size
-    )
+    """Symmetric raw density grid ``out[i, j] = c(u_grid[i], v_grid[j] | x_row)``.
 
-    # Reverse direction returns f_{U|V}(u_i | v_j) at [j, i]; transpose
-    # before averaging so both grids index [u, v].
-    density_grid_u = self._grid_one_direction(
-      self.u_given_vx_, v_grid, u_grid, x_row, batch_size=batch_size
-    )
-    return 0.5 * (density_grid + density_grid_u.T)
+    The single-covariate special case of :py:meth:`_raw_pdf_grids_by_x`;
+    ``x_row`` is a single ``(1, p)`` row, so ``n_x = 1`` and we slice it
+    back out.
+    """
+    return self._raw_pdf_grids_by_x(
+      u_grid, v_grid, x_row, batch_size=batch_size
+    )[:, 0, :]
 
   def _raw_pdf_grids_by_x(
     self,
@@ -642,8 +612,8 @@ class PFNRBicop:
     ``pdf_grid`` call each: the conditioning rows are the Cartesian
     product ``(grid, x_unique)``, so all ``n_x`` per-x grids share the
     forward passes instead of looping one TabPFN call per unique x.  This
-    is the batched analogue of :py:meth:`_raw_pdf_grid_torch` and the
-    main speed lever for the conditional Sinkhorn projection.
+    is the main speed lever for the conditional Sinkhorn projection;
+    :py:meth:`_raw_pdf_grid_torch` is the ``n_x = 1`` special case.
     """
     n_u, n_v, n_x = u_grid.shape[0], v_grid.shape[0], x_unique.shape[0]
 
@@ -658,7 +628,7 @@ class PFNRBicop:
     grid_vu = grid_vu.reshape(n_u, n_x, n_v)
 
     # U|V: conditioning rows (v_j, x_k) → [v, x, u]; permute to [u, x, v]
-    # (the 3-D analogue of the transpose in _raw_pdf_grid_torch).
+    # so both directions index [u, x, v] before averaging.
     first_uv = v_grid.repeat_interleave(n_x)
     x_uv = x_unique.repeat(n_v, 1)
     grid_uv = self.u_given_vx_.pdf_grid(
@@ -1085,50 +1055,6 @@ class PFNRBicop:
     assert isinstance(v_t, torch.Tensor)
 
     return float(wdm(u_np, v_t.detach().cpu().numpy(), "tau"))
-
-  # -------------------------------------------------------------------
-  # Diagnostic CDF (kept for backward compatibility)
-  # -------------------------------------------------------------------
-
-  def conditional_cdf_v_given_u(
-    self,
-    u: TensorLike,
-    v_grid: TensorLike,
-    x: TensorLike | None = None,
-  ) -> TensorLike:
-    """``C_{V | U, X}(v_grid[j] | u_i, x_i)`` on a grid of ``v`` values.
-
-    Thin wrapper over :py:meth:`hfunc1` (which conditions on ``u`` per
-    pyvinecopulib convention) that broadcasts each ``u_i`` against
-    ``v_grid``.  Inputs are validated to lie strictly inside
-    ``(0, 1)`` and ``v_grid`` must be strictly increasing.
-    """
-    return_as_torch, (u_in, v_in, x_in) = _normalize_inputs(
-      u, v_grid, x, device=self._device
-    )
-    assert u_in is not None and v_in is not None
-    u_t = u_in.reshape(-1)
-    v_t = v_in.reshape(-1)
-    x_t = (
-      self._default_x(u_t.shape[0])
-      if x_in is None
-      else _as_2d(x_in, device=self._device)
-    )
-
-    if u_t.shape[0] != x_t.shape[0]:
-      raise ValueError("u and x must have the same number of observations.")
-    if torch.any(torch.diff(v_t) <= 0):
-      raise ValueError("v_grid must be strictly increasing.")
-    if v_t[0] <= 0.0 or v_t[-1] >= 1.0:
-      raise ValueError("v_grid must lie strictly inside (0, 1).")
-
-    n_u, n_v = u_t.shape[0], v_t.shape[0]
-    u_flat = u_t.repeat_interleave(n_v)
-    v_flat = v_t.tile(n_u)
-    x_flat = x_t.repeat_interleave(n_v, dim=0)
-    out = self.hfunc1(u_flat, v_flat, x_flat)
-    assert isinstance(out, torch.Tensor)
-    return _wrap_output(out.reshape(n_u, n_v), return_as_torch=return_as_torch)
 
   # -------------------------------------------------------------------
   # pyvinecopulib-compatible plotting interface.

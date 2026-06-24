@@ -417,61 +417,6 @@ class TestPFNRDensityGrid:
 
 
 # ===========================================================================
-# conditional_cdf_v_given_u
-# ===========================================================================
-
-
-class TestPFNRConditionalCdf:
-  def _fit(self) -> PFNRBicop:
-    rng = np.random.default_rng(7)
-    u = rng.uniform(0.15, 0.85, 20)
-    v = rng.uniform(0.15, 0.85, 20)
-    return make_pfnr().fit(u, v)
-
-  def test_cdf_shape(self, patch_uniform: None) -> None:
-    m = self._fit()
-    u_q = np.array([0.3, 0.7])
-    v_grid = np.linspace(0.05, 0.95, 11)
-    cdf = m.conditional_cdf_v_given_u(u_q, v_grid)
-    assert cdf.shape == (2, 11)
-
-  def test_cdf_in_unit_interval(self, patch_uniform: None) -> None:
-    m = self._fit()
-    u_q = np.array([0.3, 0.7])
-    v_grid = np.linspace(0.05, 0.95, 11)
-    cdf = m.conditional_cdf_v_given_u(u_q, v_grid)
-    assert (cdf >= 0.0).all()
-    assert (cdf <= 1.0).all()
-
-  def test_cdf_monotone_nondecreasing(self, patch_uniform: None) -> None:
-    m = self._fit()
-    u_q = np.array([0.3, 0.5, 0.7])
-    v_grid = np.linspace(0.05, 0.95, 21)
-    cdf = m.conditional_cdf_v_given_u(u_q, v_grid)
-    diffs = np.diff(cdf, axis=1)
-    assert (diffs >= -1e-12).all()
-
-  def test_cdf_rejects_non_increasing_grid(self, patch_uniform: None) -> None:
-    m = self._fit()
-    with pytest.raises(ValueError, match="strictly increasing"):
-      m.conditional_cdf_v_given_u(np.array([0.5]), np.array([0.5, 0.4]))
-
-  def test_cdf_rejects_grid_outside_unit(self, patch_uniform: None) -> None:
-    m = self._fit()
-    with pytest.raises(ValueError, match="strictly inside"):
-      m.conditional_cdf_v_given_u(np.array([0.5]), np.array([0.0, 0.5, 0.95]))
-
-  def test_cdf_rejects_u_x_length_mismatch(self, patch_uniform: None) -> None:
-    m = self._fit()
-    with pytest.raises(ValueError, match="same number"):
-      m.conditional_cdf_v_given_u(
-        np.array([0.3, 0.7]),
-        np.linspace(0.1, 0.9, 5),
-        x=np.zeros((1, 1)),
-      )
-
-
-# ===========================================================================
 # h-functions
 # ===========================================================================
 
