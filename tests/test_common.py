@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 
-from npcc._common import _as_2d, _check_uv, _logit
+from npcc.core._common import _as_2d, _check_uv, _logit
 
 
 class TestAs2d:

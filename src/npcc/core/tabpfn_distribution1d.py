@@ -30,7 +30,7 @@ import torch
 from tabpfn import TabPFNRegressor
 from tabpfn.constants import ModelVersion
 
-from npcc._common import (
+from npcc.core._common import (
   TensorLike,
   _as_2d,
   _logit,

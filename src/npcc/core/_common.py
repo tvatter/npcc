@@ -166,6 +166,7 @@ def _torch_interp_batched_xp(
   (flat extrapolation).
   """
   n, k = xp.shape
+  xp = xp.contiguous()
   idx = torch.searchsorted(xp, x.unsqueeze(1)).squeeze(1).clamp(1, k - 1)
   rows = torch.arange(n, device=xp.device)
   x0 = xp[rows, idx - 1]

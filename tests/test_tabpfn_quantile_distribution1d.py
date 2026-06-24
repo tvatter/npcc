@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import torch
 
-from npcc.tabpfn_quantile_distribution1d import (
+from npcc.core.tabpfn_quantile_distribution1d import (
   QuantileGridConfig,
   TabPFNQuantileDistribution1D,
 )
