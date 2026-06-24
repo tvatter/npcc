@@ -235,3 +235,129 @@ class TestQuantileDistribution1D:
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
     with pytest.raises(ValueError, match="incompatible"):
       qd.icdf(np.zeros((5, 1)), np.array([0.5]))
+
+  # batch_size chunking ----------------------------------------------
+
+  def test_pdf_respects_batch_size(self, patch_uniform: None) -> None:
+    rng = np.random.default_rng(0)
+    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
+
+    n = 17  # not a multiple of batch_size
+    y = rng.uniform(0.15, 0.85, n)
+    w = np.zeros((n, 1))
+    full = qd.pdf(w, y)
+    chunked = qd.pdf(w, y, batch_size=4)
+    np.testing.assert_allclose(full, chunked, atol=1e-10)
+
+  def test_cdf_respects_batch_size(self, patch_uniform: None) -> None:
+    rng = np.random.default_rng(1)
+    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
+
+    n = 17
+    y = rng.uniform(0.15, 0.85, n)
+    w = np.zeros((n, 1))
+    np.testing.assert_allclose(
+      qd.cdf(w, y), qd.cdf(w, y, batch_size=4), atol=1e-12
+    )
+
+  def test_pdf_chunks_with_instance_batch_size(
+    self, patch_uniform: None, monkeypatch: pytest.MonkeyPatch
+  ) -> None:
+    rng = np.random.default_rng(2)
+    qd = TabPFNQuantileDistribution1D(transform="logit", batch_size=4)
+    qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
+    assert qd.model_ is not None
+
+    n = 17
+    y = rng.uniform(0.15, 0.85, n)
+    w = np.zeros((n, 1))
+    calls = 0
+    original_predict = qd.model_.predict
+
+    def _spy_predict(
+      x: np.ndarray,
+      *,
+      output_type: str = "mean",
+      quantiles: list[float] | None = None,
+    ) -> object:
+      nonlocal calls
+      calls += 1
+      return original_predict(x, output_type=output_type, quantiles=quantiles)
+
+    monkeypatch.setattr(qd.model_, "predict", _spy_predict)
+    qd.pdf(w, y)
+    assert calls == 5  # ceil(17 / 4)
+
+  def test_square_chunk_not_transposed(self, patch_uniform: None) -> None:
+    """A chunk whose row count equals n_quantiles must not be transposed.
+
+    Regression: the per-chunk orientation check used to test the
+    transposed shape first, so a square ``(n_chunk, n_alphas)`` chunk was
+    silently transposed and its rows scrambled.
+    """
+    rng = np.random.default_rng(7)
+    cfg = QuantileGridConfig(n_quantiles=11)
+    qd = TabPFNQuantileDistribution1D(transform="logit", config=cfg)
+    qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
+
+    n = 15  # first chunk is square (11, 11), second is (4, 11)
+    y = rng.uniform(0.15, 0.85, n)
+    w = np.zeros((n, 1))
+    chunked = qd.cdf(w, y, batch_size=11)
+    full = qd.cdf(w, y, batch_size=1000)
+    np.testing.assert_allclose(chunked, full, atol=1e-12)
+
+  # pdf_grid ----------------------------------------------------------
+
+  def test_pdf_grid_before_fit_raises(self, patch_uniform: None) -> None:
+    qd = TabPFNQuantileDistribution1D()
+    with pytest.raises(RuntimeError, match="not fitted"):
+      qd.pdf_grid(np.zeros((2, 1)), np.array([0.3, 0.5]))
+
+  def test_pdf_grid_empty_y_raises(self, patch_uniform: None) -> None:
+    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
+    with pytest.raises(ValueError, match="at least one value"):
+      qd.pdf_grid(np.zeros((2, 1)), np.array([]))
+
+  def test_pdf_grid_shape(self, patch_uniform: None) -> None:
+    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
+    out = qd.pdf_grid(np.zeros((4, 1)), np.array([0.3, 0.5, 0.7]))
+    assert out.shape == (4, 3)
+
+  def test_pdf_grid_matches_pdf(self, patch_uniform: None) -> None:
+    """The grid fast path must equal pdf on the explicit tile."""
+    rng = np.random.default_rng(5)
+    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd.fit(rng.uniform(0.1, 0.9, (20, 2)), rng.uniform(0.1, 0.9, 20))
+
+    w = rng.uniform(0.1, 0.9, (3, 2))
+    y_grid = np.array([0.25, 0.4, 0.6, 0.75])
+    grid = qd.pdf_grid(w, y_grid)
+
+    w_tiled = np.repeat(w, len(y_grid), axis=0)
+    y_tiled = np.tile(y_grid, w.shape[0])
+    tiled = qd.pdf(w_tiled, y_tiled).reshape(w.shape[0], len(y_grid))
+    np.testing.assert_allclose(grid, tiled, atol=1e-10)
+
+  def test_pdf_grid_zero_outside_support(self, patch_uniform: None) -> None:
+    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
+    out = qd.pdf_grid(np.zeros((2, 1)), np.array([0.02, 0.98]))
+    np.testing.assert_array_equal(out, np.zeros_like(out))
+
+  def test_pdf_grid_chunked_matches_full(self, patch_uniform: None) -> None:
+    rng = np.random.default_rng(6)
+    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd.fit(rng.uniform(0.1, 0.9, (20, 1)), rng.uniform(0.1, 0.9, 20))
+
+    w = rng.uniform(0.1, 0.9, (17, 1))  # not a multiple of batch_size
+    y_grid = np.array([0.3, 0.5, 0.7])
+    np.testing.assert_allclose(
+      qd.pdf_grid(w, y_grid),
+      qd.pdf_grid(w, y_grid, batch_size=4),
+      atol=1e-10,
+    )

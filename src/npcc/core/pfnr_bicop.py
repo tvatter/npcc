@@ -277,6 +277,7 @@ class PFNRBicop:
         transform=self.transform,
         config=self.quantile_config,
         device=self._device,
+        batch_size=self.batch_size,
         model_kwargs=self.model_kwargs,
         model_version=self.model_version,
       )
@@ -522,23 +523,20 @@ class PFNRBicop:
     wv = self._trapezoidal_weights(v_grid)
 
     x_unique, x_inverse = torch.unique(x, dim=0, return_inverse=True)
-    out = torch.empty_like(c_raw)
 
+    # All unique-x density grids in a few batched forward passes.
+    density_all = self._raw_pdf_grids_by_x(
+      u_grid, v_grid, x_unique, batch_size=batch_size
+    )
+
+    out = torch.empty_like(c_raw)
     for x_idx in range(x_unique.shape[0]):
       mask = x_inverse == x_idx
       if not torch.any(mask):
         continue
 
-      x_row = x_unique[x_idx : x_idx + 1]
-
-      density_grid = self._raw_pdf_grid_torch(
-        u_grid,
-        v_grid,
-        x_row,
-        batch_size=batch_size,
-      )
-
-      r, s = _sinkhorn_project(density_grid, wu, wv, sinkhorn_iters)
+      # Sinkhorn IPF stays per-x (cheap, no forward pass).
+      r, s = _sinkhorn_project(density_all[:, x_idx, :], wu, wv, sinkhorn_iters)
 
       r_interp = _torch_interp(u[mask], u_grid, r)
       s_interp = _torch_interp(v[mask], v_grid, s)
@@ -591,35 +589,20 @@ class PFNRBicop:
     """Density grid ``out[i, j] = f(second_grid[j] | first_grid[i], x_row)``.
 
     ``module`` predicts the *second* coordinate conditioned on
-    ``[first_grid, x_row]``.  The criterion method reuses one forward
-    pass per ``first`` row via
-    :py:meth:`TabPFNCriterionDistribution1D.pdf_grid`; the quantile
-    method has no such shortcut and evaluates the explicit Cartesian
-    tile (``first`` slow, ``second`` fast) before reshaping.
+    ``[first_grid, x_row]``.  Both density-recovery methods expose
+    ``pdf_grid``, which reuses one forward pass per ``first`` row (the
+    same logits / quantile table is evaluated against every ``second``
+    value), so no explicit ``n_first * n_second`` tile is materialised.
 
     ponytail: one direction helper, called once per Rosenblatt direction
     (forward V|U, reverse U|V) — the reverse caller transposes the result.
     """
-    n_first, n_second = first_grid.shape[0], second_grid.shape[0]
-
-    if isinstance(module, TabPFNCriterionDistribution1D):
-      grid = module.pdf_grid(
-        self._features(first_grid, x_row.repeat(n_first, 1)),
-        second_grid,
-        batch_size=batch_size,
-      )
-    else:
-      first_tiled = first_grid.repeat_interleave(n_second)
-      second_tiled = second_grid.tile(n_first)
-      x_tiled = x_row.repeat(n_first * n_second, 1)
-      flat = module.pdf(
-        self._features(first_tiled, x_tiled),
-        second_tiled,
-        batch_size=batch_size,
-      )
-      assert isinstance(flat, torch.Tensor)
-      grid = flat.reshape(n_first, n_second)
-
+    n_first = first_grid.shape[0]
+    grid = module.pdf_grid(
+      self._features(first_grid, x_row.repeat(n_first, 1)),
+      second_grid,
+      batch_size=batch_size,
+    )
     assert isinstance(grid, torch.Tensor)
     return grid
 
@@ -641,6 +624,50 @@ class PFNRBicop:
       self.u_given_vx_, v_grid, u_grid, x_row, batch_size=batch_size
     )
     return 0.5 * (density_grid + density_grid_u.T)
+
+  def _raw_pdf_grids_by_x(
+    self,
+    u_grid: torch.Tensor,
+    v_grid: torch.Tensor,
+    x_unique: torch.Tensor,
+    *,
+    batch_size: int,
+  ) -> torch.Tensor:
+    """Symmetric raw density grids for every unique covariate row at once.
+
+    Returns shape ``(n_u, n_x, n_v)`` with ``out[i, k, j] = c(u_grid[i],
+    v_grid[j] | x_unique[k])`` (Rosenblatt-symmetric, pre-Sinkhorn).
+
+    Both Rosenblatt directions are evaluated with a single batched
+    ``pdf_grid`` call each: the conditioning rows are the Cartesian
+    product ``(grid, x_unique)``, so all ``n_x`` per-x grids share the
+    forward passes instead of looping one TabPFN call per unique x.  This
+    is the batched analogue of :py:meth:`_raw_pdf_grid_torch` and the
+    main speed lever for the conditional Sinkhorn projection.
+    """
+    n_u, n_v, n_x = u_grid.shape[0], v_grid.shape[0], x_unique.shape[0]
+
+    # V|U: conditioning rows (u_i, x_k) in u-major / x-minor order, so the
+    # flat result reshapes to [u, x, v].
+    first_vu = u_grid.repeat_interleave(n_x)
+    x_vu = x_unique.repeat(n_u, 1)
+    grid_vu = self.v_given_ux_.pdf_grid(
+      self._features(first_vu, x_vu), v_grid, batch_size=batch_size
+    )
+    assert isinstance(grid_vu, torch.Tensor)
+    grid_vu = grid_vu.reshape(n_u, n_x, n_v)
+
+    # U|V: conditioning rows (v_j, x_k) → [v, x, u]; permute to [u, x, v]
+    # (the 3-D analogue of the transpose in _raw_pdf_grid_torch).
+    first_uv = v_grid.repeat_interleave(n_x)
+    x_uv = x_unique.repeat(n_v, 1)
+    grid_uv = self.u_given_vx_.pdf_grid(
+      self._features(first_uv, x_uv), u_grid, batch_size=batch_size
+    )
+    assert isinstance(grid_uv, torch.Tensor)
+    grid_uv = grid_uv.reshape(n_v, n_x, n_u).permute(2, 1, 0)
+
+    return 0.5 * (grid_vu + grid_uv)
 
   def log_pdf(
     self,
@@ -889,10 +916,7 @@ class PFNRBicop:
     x_flat = x.repeat_interleave(n_int + 1, dim=0)
 
     feats = self._features(s_flat, x_flat)
-    if isinstance(module, TabPFNCriterionDistribution1D):
-      F_flat = module.cdf(feats, cond_flat, batch_size=batch_size)
-    else:
-      F_flat = module.cdf(feats, cond_flat)
+    F_flat = module.cdf(feats, cond_flat, batch_size=batch_size)
     assert isinstance(F_flat, torch.Tensor)
     F_grid = F_flat.reshape(n, n_int + 1)
 
