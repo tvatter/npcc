@@ -20,6 +20,8 @@ import numpy as np
 import pandas as pd
 import torch
 
+from tabpfn.constants import ModelVersion
+
 from npcc.core.pfnr_bicop import PFNRBicop
 from npcc.experiments import metrics, scenarios
 from npcc.experiments.config import Cell, EstimatorSpec, GridConfig, RunConfig
@@ -62,6 +64,7 @@ def _rows_for_quantity(
     "seed": seed,
     "transform": est.transform,
     "method": est.method,
+    "model_version": est.model_version,
     "normalize": normalize,
     "quantity": quantity,
   }
@@ -106,6 +109,7 @@ def summarize_one_cell(
       transform=cast(Literal["identity", "logit", "probit"], est.transform),
       device=device,
       projection_grid_size=projection_grid_size,
+      model_version=ModelVersion(est.model_version),
     )
     model.fit(u, v, x)
     fit_time = perf_counter() - t0
@@ -174,6 +178,7 @@ def summarize_one_cell(
         "seed": seed,
         "transform": est.transform,
         "method": est.method,
+        "model_version": est.model_version,
         "fit_time": fit_time,
         "pdf_time": pdf_time,
         "cdf_time": timings["cdf"],
@@ -233,7 +238,15 @@ def run_study(
   wall = perf_counter() - t0_wall
   logger.info("Study finished in %.1fs", wall)
 
-  sort_axes = ["family", "tau_scenario", "method", "transform", "n", "rep"]
+  sort_axes = [
+    "family",
+    "tau_scenario",
+    "method",
+    "transform",
+    "model_version",
+    "n",
+    "rep",
+  ]
   metrics_df = (
     pd.DataFrame(metric_rows)
     .sort_values([*sort_axes, "normalize", "quantity", "u", "v"])
@@ -259,6 +272,7 @@ def aggregate_results(
     "n",
     "transform",
     "method",
+    "model_version",
     "normalize",
     "quantity",
   ]
@@ -276,7 +290,14 @@ def aggregate_results(
     chunks.append(g)
   mc_summary = pd.concat(chunks, ignore_index=True)
 
-  rt_group = ["family", "tau_scenario", "n", "transform", "method"]
+  rt_group = [
+    "family",
+    "tau_scenario",
+    "n",
+    "transform",
+    "method",
+    "model_version",
+  ]
   runtime_summary = runtime_df.groupby(rt_group, as_index=False).agg(
     fit_time_mean=("fit_time", "mean"),
     fit_time_std=("fit_time", "std"),

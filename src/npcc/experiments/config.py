@@ -10,15 +10,19 @@ from __future__ import annotations
 
 import tomllib
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import product
 from pathlib import Path
 from typing import Any
+
+from tabpfn.constants import ModelVersion
 
 from npcc.experiments.scenarios import FAMILIES, TAU_SCENARIOS
 
 TRANSFORMS: tuple[str, ...] = ("identity", "logit", "probit")
 METHODS: tuple[str, ...] = ("criterion", "quantiles")
+MODEL_VERSIONS: tuple[str, ...] = tuple(v.value for v in ModelVersion)
+DEFAULT_MODEL_VERSION: str = ModelVersion.V3.value
 
 
 @dataclass(frozen=True)
@@ -27,6 +31,7 @@ class EstimatorSpec:
 
   transform: str
   method: str
+  model_version: str = DEFAULT_MODEL_VERSION
 
 
 @dataclass(frozen=True)
@@ -79,6 +84,9 @@ class GridConfig:
   normalize: list[int | None]
   n: list[int]
   n_rep: int
+  model_versions: list[str] = field(
+    default_factory=lambda: [DEFAULT_MODEL_VERSION]
+  )
   projection_grid_size: int = 30
 
   def __post_init__(self) -> None:
@@ -86,6 +94,7 @@ class GridConfig:
     _check_subset("tau_scenarios", self.tau_scenarios, TAU_SCENARIOS)
     _check_subset("transforms", self.transforms, TRANSFORMS)
     _check_subset("methods", self.methods, METHODS)
+    _check_subset("model_versions", self.model_versions, MODEL_VERSIONS)
     if not self.normalize:
       raise ValueError("normalize must be non-empty (e.g. [None]).")
     for entry in self.normalize:
@@ -105,8 +114,10 @@ class GridConfig:
 
   def estimator_specs(self) -> list[EstimatorSpec]:
     return [
-      EstimatorSpec(transform=t, method=m)
-      for t, m in product(self.transforms, self.methods)
+      EstimatorSpec(transform=t, method=m, model_version=mv)
+      for t, m, mv in product(
+        self.transforms, self.methods, self.model_versions
+      )
     ]
 
   def cells(self) -> list[Cell]:
@@ -151,6 +162,9 @@ def load_grid(path: str | Path) -> GridConfig:
       normalize=_coerce_normalize(list(grid["normalize"])),
       n=[int(v) for v in grid["n"]],
       n_rep=int(grid["n_rep"]),
+      model_versions=[
+        str(v) for v in grid.get("model_versions", [DEFAULT_MODEL_VERSION])
+      ],
       projection_grid_size=int(grid.get("projection_grid_size", 30)),
     )
   except KeyError as exc:

@@ -8,11 +8,11 @@
 
 [grid]
 # Copula families (one-parameter): clayton, gumbel, frank, gaussian, joe.
-families = ["clayton", "gumbel", "frank", "gaussian"]
+families = ["clayton", "gumbel", "frank", "gaussian", "joe"]
 
 # tau regimes. Conditional tau(x): linear, constant, sin, quadratic.
 # Unconditional fixed tau: uncond25, uncond50, uncond75.
-tau_scenarios = ["linear", "constant", "uncond50"]
+tau_scenarios = ["linear", "sin", "uncond50"]
 
 # Support transforms used by the inner TabPFN models.
 transforms = ["logit", "identity", "probit"]
@@ -20,8 +20,12 @@ transforms = ["logit", "identity", "probit"]
 # Density-recovery methods.
 methods = ["criterion", "quantiles"]
 
+# TabPFN model versions for the inner univariate regressors.
+# Allowed: v2, v2.5, v2.6, v3.
+model_versions = ["v2.5", "v3"]
+
 # Sinkhorn normalization variants applied to the density. "none" = off.
-normalize = ["none", 5]
+normalize = ["none", 3]
 
 # Training sample sizes and Monte-Carlo repetitions.
 n = [200, 500, 1000]

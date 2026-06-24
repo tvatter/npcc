@@ -81,6 +81,7 @@ def _config_echo(grid: GridConfig, run: RunConfig, wall: float) -> dict:
       "normalize": grid.normalize,
       "n": grid.n,
       "n_rep": grid.n_rep,
+      "model_versions": grid.model_versions,
       "projection_grid_size": grid.projection_grid_size,
     },
     "run": {
