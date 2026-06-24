@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
   "numpy>=2.0",
   "pyvinecopulib>=0.7.5",
-  "tabpfn>=2.0",
+  "tabpfn>=8.0",
   "torch>=2.11",
 ]
 
@@ -21,6 +21,11 @@ cu126 = ["torch>=2.11"]
 cu128 = ["torch>=2.11"]
 cu130 = ["torch>=2.11"]
 cu132 = ["torch>=2.11"]
+# Simulation-study package (npcc.experiments) and the npcc-simstudy CLI.
+experiments = ["pandas>=2.0", "matplotlib>=3.7"]
+
+[project.scripts]
+npcc-simstudy = "npcc.experiments.cli:main"
 
 [dependency-groups]
 dev = [

@@ -63,13 +63,16 @@ import torch
 
 from tabpfn.constants import ModelVersion
 
-from npcc._common import (
+from npcc.core._common import (
   TensorLike,
   _as_2d,
   _normalize_inputs,
   _wrap_output,
 )
-from npcc.tabpfn_distribution1d import TabPFNDistribution1D
+from npcc.core.tabpfn_distribution1d import (
+  _DEFAULT_MODEL_VERSION,
+  TabPFNDistribution1D,
+)
 
 
 class _CriterionLike(Protocol):
@@ -123,27 +126,16 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     device: str | torch.device | None = None,
     batch_size: int | None = None,
     model_kwargs: dict[str, Any] | None = None,
-    model_version: ModelVersion | None = ModelVersion.V3,
+    model_version: ModelVersion | None = _DEFAULT_MODEL_VERSION,
   ) -> None:
     super().__init__(
       transform=transform,
       eps=eps,
       device=device,
+      batch_size=batch_size,
       model_kwargs=model_kwargs,
       model_version=model_version,
     )
-    if batch_size is None:
-      self.batch_size = 2000 if self._device.type == "cuda" else 400
-    else:
-      if batch_size <= 0:
-        raise ValueError("batch_size must be positive.")
-      self.batch_size = batch_size
-
-  def _resolve_batch_size(self, batch_size: int | None) -> int:
-    effective_batch_size = self.batch_size if batch_size is None else batch_size
-    if effective_batch_size <= 0:
-      raise ValueError("batch_size must be positive.")
-    return effective_batch_size
 
   def _predict_full(
     self, w_t: torch.Tensor

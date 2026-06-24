@@ -72,7 +72,7 @@ import torch
 
 from tabpfn.constants import ModelVersion
 
-from npcc._common import (
+from npcc.core._common import (
   TensorLike,
   _as_2d,
   _normalize_inputs,
@@ -81,7 +81,10 @@ from npcc._common import (
   _torch_interp_batched_xp,
   _wrap_output,
 )
-from npcc.tabpfn_distribution1d import TabPFNDistribution1D
+from npcc.core.tabpfn_distribution1d import (
+  _DEFAULT_MODEL_VERSION,
+  TabPFNDistribution1D,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +162,7 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
     config: QuantileGridConfig | None = None,
     device: str | torch.device | None = None,
     model_kwargs: dict[str, Any] | None = None,
-    model_version: ModelVersion | None = ModelVersion.V3,
+    model_version: ModelVersion | None = _DEFAULT_MODEL_VERSION,
   ) -> None:
     cfg = config or QuantileGridConfig()
     super().__init__(
@@ -223,7 +226,7 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
   # ------------------------------------------------------------------
 
   def pdf(
-    self, w: TensorLike, y: TensorLike, batch_size: int | None = None
+    self, w: TensorLike, y: TensorLike, *, batch_size: int | None = None
   ) -> TensorLike:
     """Return ``f(y_i | w_i)`` for each row ``i``.
 

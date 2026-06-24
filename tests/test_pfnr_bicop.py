@@ -9,22 +9,20 @@ import pytest
 
 import torch
 
-from npcc.pfnr_bicop import PFNRBicop, _sinkhorn_project
-from npcc.tabpfn_criterion_distribution1d import TabPFNCriterionDistribution1D
-from npcc.tabpfn_quantile_distribution1d import TabPFNQuantileDistribution1D
+from npcc.core.pfnr_bicop import PFNRBicop, _sinkhorn_project
+from npcc.core.tabpfn_criterion_distribution1d import (
+  TabPFNCriterionDistribution1D,
+)
+from npcc.core.tabpfn_quantile_distribution1d import (
+  TabPFNQuantileDistribution1D,
+)
 
 
-def make_pfnr(
-  symmetric: bool = True,
-  method: str = "quantiles",
-) -> PFNRBicop:
+def make_pfnr(method: str = "quantiles") -> PFNRBicop:
   """Test factory.  Defaults to ``method="quantiles"`` so legacy tests
   exercise the slope-inversion path; the criterion path is opted into
   per-test."""
-  return PFNRBicop(
-    symmetric=symmetric,
-    method=method,  # ty: ignore[invalid-argument-type]
-  )
+  return PFNRBicop(method=method)  # ty: ignore[invalid-argument-type]
 
 
 # ===========================================================================
@@ -33,18 +31,12 @@ def make_pfnr(
 
 
 class TestPFNRInit:
-  def test_default_is_symmetric_and_criterion(self) -> None:
+  def test_default_is_criterion(self) -> None:
     m = PFNRBicop()
-    assert m.symmetric is True
     assert m.method == "criterion"
     assert m.transform == "logit"
     assert isinstance(m.v_given_ux_, TabPFNCriterionDistribution1D)
     assert m.u_given_vx_ is not None
-
-  def test_asymmetric_has_no_reverse_density(self) -> None:
-    m = PFNRBicop(symmetric=False)
-    assert m.symmetric is False
-    assert m.u_given_vx_ is None
 
   def test_method_quantiles_uses_quantile_module(self) -> None:
     m = PFNRBicop(method="quantiles")
@@ -61,8 +53,7 @@ class TestPFNRInit:
     )
     assert m.transform == transform
     assert m.v_given_ux_.transform == transform
-    if m.u_given_vx_ is not None:
-      assert m.u_given_vx_.transform == transform
+    assert m.u_given_vx_.transform == transform
 
   def test_default_batch_size_on_cpu_is_400(self) -> None:
     m = PFNRBicop(device="cpu")
@@ -148,39 +139,6 @@ def test_trapezoidal_weights_singleton_grid() -> None:
   assert torch.allclose(w, torch.tensor([1.0], dtype=torch.float64))
 
 
-def test_extract_criterion_borders_accepts_tensor() -> None:
-  m = PFNRBicop()
-  crit = type("C", (), {"borders": torch.tensor([0.0, 0.5, 1.0])})()
-  logits = torch.zeros((1, 2), dtype=torch.float32)
-
-  out = m._extract_criterion_borders(crit, logits)
-  expected = torch.tensor(
-    [0.0, 0.5, 1.0], dtype=torch.float64, device=m._device
-  )
-  assert torch.allclose(out, expected)
-
-
-def test_extract_criterion_borders_accepts_array_like() -> None:
-  m = PFNRBicop()
-  crit = type("C", (), {"borders": [0.0, 0.5, 1.0]})()
-  logits = torch.zeros((1, 2), dtype=torch.float32)
-
-  out = m._extract_criterion_borders(crit, logits)
-  expected = torch.tensor(
-    [0.0, 0.5, 1.0], dtype=torch.float64, device=m._device
-  )
-  assert torch.allclose(out, expected)
-
-
-def test_extract_criterion_borders_raises_when_missing() -> None:
-  m = PFNRBicop()
-  crit = type("C", (), {})()
-  logits = torch.zeros((1, 2), dtype=torch.float32)
-
-  with pytest.raises(RuntimeError, match="Could not extract criterion borders"):
-    m._extract_criterion_borders(crit, logits)
-
-
 # ===========================================================================
 # density()
 # ===========================================================================
@@ -234,7 +192,7 @@ class TestPFNRDensity:
     rng = np.random.default_rng(4)
     u = rng.uniform(0.15, 0.85, 20)
     v = rng.uniform(0.15, 0.85, 20)
-    m = make_pfnr(symmetric=True, method=method).fit(u, v)
+    m = make_pfnr(method=method).fit(u, v)
 
     x_default = np.ones((len(u), 1))
     c_v = m.v_given_ux_.pdf(np.column_stack([u, x_default]), v)
@@ -242,18 +200,6 @@ class TestPFNRDensity:
     c_u = m.u_given_vx_.pdf(np.column_stack([v, x_default]), u)
     expected = 0.5 * (c_v + c_u)
 
-    np.testing.assert_allclose(m.pdf(u, v), expected, atol=1e-12)
-
-  def test_asymmetric_equals_v_given_ux(
-    self, patch_uniform: None, method: str
-  ) -> None:
-    rng = np.random.default_rng(5)
-    u = rng.uniform(0.15, 0.85, 20)
-    v = rng.uniform(0.15, 0.85, 20)
-    m = make_pfnr(symmetric=False, method=method).fit(u, v)
-
-    x_default = np.ones((len(u), 1))
-    expected = m.v_given_ux_.pdf(np.column_stack([u, x_default]), v)
     np.testing.assert_allclose(m.pdf(u, v), expected, atol=1e-12)
 
   def test_log_density_matches_log_of_density(
@@ -276,7 +222,7 @@ class TestPFNRDensity:
     rng = np.random.default_rng(16)
     u = rng.uniform(0.15, 0.85, 18)
     v = rng.uniform(0.15, 0.85, 18)
-    m = PFNRBicop(symmetric=False, method="criterion", batch_size=31).fit(u, v)
+    m = PFNRBicop(method="criterion", batch_size=31).fit(u, v)
 
     captured: list[int | None] = []
     original_pdf = TabPFNCriterionDistribution1D.pdf
@@ -307,7 +253,7 @@ class TestPFNRDensity:
     rng = np.random.default_rng(17)
     u = rng.uniform(0.15, 0.85, 18)
     v = rng.uniform(0.15, 0.85, 18)
-    m = PFNRBicop(symmetric=False, method="criterion", batch_size=29).fit(u, v)
+    m = PFNRBicop(method="criterion", batch_size=29).fit(u, v)
 
     captured: list[int | None] = []
     original_pdf = TabPFNCriterionDistribution1D.pdf
@@ -338,7 +284,7 @@ class TestPFNRDensity:
     rng = np.random.default_rng(18)
     u = rng.uniform(0.15, 0.85, 18)
     v = rng.uniform(0.15, 0.85, 18)
-    m = PFNRBicop(symmetric=False, method="criterion", batch_size=31).fit(u, v)
+    m = PFNRBicop(method="criterion", batch_size=31).fit(u, v)
 
     captured: list[int | None] = []
     original_cdf = TabPFNCriterionDistribution1D.cdf
@@ -439,21 +385,35 @@ class TestPFNRDensityGrid:
         x_row=np.array([[1.0], [2.0]]),
       )
 
-  def test_raw_pdf_grid_torch_asymmetric_returns_forward_grid_only(
+  def test_raw_pdf_grid_torch_quantiles_symmetric_matches_pointwise(
     self, patch_uniform: None
   ) -> None:
-    rng = np.random.default_rng(103)
+    """Symmetric quantiles grid must match the pointwise pdf.
+
+    Regression: the reverse (U|V) half once reshaped a (u-slow, v-fast)
+    tile into (n_v, n_u), transposing the contribution.  A non-square
+    grid with a value-varying density exposes the mis-orientation that a
+    constant-density square grid hides.
+    """
+    rng = np.random.default_rng(104)
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = PFNRBicop(method="criterion", symmetric=False).fit(u, v)
+    m = PFNRBicop(method="quantiles").fit(u, v)
     u_g = torch.linspace(0.25, 0.75, 4, dtype=torch.float64, device=m._device)
-    v_g = torch.linspace(0.25, 0.75, 5, dtype=torch.float64, device=m._device)
+    v_g = torch.linspace(0.3, 0.7, 5, dtype=torch.float64, device=m._device)
     x_row = torch.ones((1, 1), dtype=torch.float64, device=m._device)
 
-    out = m._raw_pdf_grid_torch(u_g, v_g, x_row, batch_size=8)
-    assert isinstance(out, torch.Tensor)
-    assert out.shape == (4, 5)
+    grid = m._raw_pdf_grid_torch(u_g, v_g, x_row, batch_size=8)
+    assert isinstance(grid, torch.Tensor)
+
+    u_tile = u_g.repeat_interleave(v_g.shape[0])
+    v_tile = v_g.tile(u_g.shape[0])
+    expected = m.pdf(u_tile, v_tile).reshape(u_g.shape[0], v_g.shape[0])
+    assert isinstance(expected, torch.Tensor)
+    np.testing.assert_allclose(
+      grid.cpu().numpy(), expected.cpu().numpy(), atol=1e-10
+    )
 
 
 # ===========================================================================
@@ -572,29 +532,16 @@ class TestPFNRHfunc1:
 
 @pytest.mark.parametrize("method", ["quantiles", "criterion"])
 class TestPFNRHfunc2:
-  """``hfunc2(u, v) = F_{U|V}(u|v)`` — conditions on the second arg.
+  """``hfunc2(u, v) = F_{U|V}(u|v)`` — conditions on the second arg."""
 
-  Requires ``symmetric=True`` (U|V regressor must exist).
-  """
-
-  def test_symmetric_returns_F_U_given_V(
-    self, patch_uniform: None, method: str
-  ) -> None:
-    m = make_pfnr(symmetric=True, method=method).fit(
+  def test_returns_F_U_given_V(self, patch_uniform: None, method: str) -> None:
+    m = make_pfnr(method=method).fit(
       np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
     )
     u = np.array([0.3, 0.5, 0.7])
     v = np.array([0.4, 0.5, 0.6])
-    assert m.u_given_vx_ is not None
     expected = m.u_given_vx_.cdf(np.column_stack([v, np.ones(len(u))]), u)
     np.testing.assert_allclose(m.hfunc2(u, v), expected, atol=1e-12)
-
-  def test_asymmetric_raises(self, patch_uniform: None, method: str) -> None:
-    m = make_pfnr(symmetric=False, method=method).fit(
-      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
-    )
-    with pytest.raises(RuntimeError, match="symmetric"):
-      m.hfunc2(np.array([0.5]), np.array([0.5]))
 
 
 # ===========================================================================
@@ -840,7 +787,7 @@ def test_real_tabpfn_smoke() -> None:
   u, v = uv[:, 0], uv[:, 1]
 
   try:
-    m = PFNRBicop(symmetric=True).fit(u, v)
+    m = PFNRBicop().fit(u, v)
   except TabPFNLicenseError as exc:
     pytest.skip(f"TabPFN authentication unavailable: {exc}")
 
@@ -958,11 +905,9 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 25)
     v = rng.uniform(0.2, 0.8, 25)
 
-    m_no_sinkhorn = PFNRBicop(
-      symmetric=True, method="criterion", sinkhorn_iters=None
-    ).fit(u, v)
+    m_no_sinkhorn = PFNRBicop(method="criterion", sinkhorn_iters=None).fit(u, v)
     m_with_sinkhorn_none = PFNRBicop(
-      symmetric=True, method="criterion", sinkhorn_iters=None
+      method="criterion", sinkhorn_iters=None
     ).fit(u, v)
 
     u_test = np.array([0.3, 0.5, 0.7])
@@ -991,9 +936,7 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = PFNRBicop(symmetric=True, method="criterion", sinkhorn_iters=3).fit(
-      u, v
-    )
+    m = PFNRBicop(method="criterion", sinkhorn_iters=3).fit(u, v)
 
     u_test = np.linspace(0.25, 0.75, 10)
     v_test = np.linspace(0.25, 0.75, 10)
@@ -1007,9 +950,7 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = PFNRBicop(symmetric=True, method="criterion", sinkhorn_iters=5).fit(
-      u, v
-    )
+    m = PFNRBicop(method="criterion", sinkhorn_iters=5).fit(u, v)
 
     u_test = np.linspace(0.25, 0.75, 15)
     v_test = np.linspace(0.25, 0.75, 15)
@@ -1023,9 +964,7 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = PFNRBicop(symmetric=True, method="criterion", sinkhorn_iters=5).fit(
-      u, v
-    )
+    m = PFNRBicop(method="criterion", sinkhorn_iters=5).fit(u, v)
 
     assert m._u_grid_borders_ is not None
     assert m._v_grid_borders_ is not None
@@ -1044,9 +983,7 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = PFNRBicop(symmetric=True, method="criterion", sinkhorn_iters=None).fit(
-      u, v
-    )
+    m = PFNRBicop(method="criterion", sinkhorn_iters=None).fit(u, v)
 
     assert m._u_grid_borders_ is None
     assert m._v_grid_borders_ is None
@@ -1057,9 +994,7 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = PFNRBicop(symmetric=True, method="criterion", sinkhorn_iters=3).fit(
-      u, v
-    )
+    m = PFNRBicop(method="criterion", sinkhorn_iters=3).fit(u, v)
 
     u_grid = np.linspace(0.3, 0.7, 5)
     v_grid = np.linspace(0.3, 0.7, 5)
@@ -1080,12 +1015,8 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 30)
     v = rng.uniform(0.2, 0.8, 30)
 
-    m_no_proj = PFNRBicop(
-      symmetric=True, method="criterion", sinkhorn_iters=None
-    ).fit(u, v)
-    m_proj = PFNRBicop(
-      symmetric=True, method="criterion", sinkhorn_iters=5
-    ).fit(u, v)
+    m_no_proj = PFNRBicop(method="criterion", sinkhorn_iters=None).fit(u, v)
+    m_proj = PFNRBicop(method="criterion", sinkhorn_iters=5).fit(u, v)
 
     u_grid = np.linspace(0.2, 0.8, 15)
     v_grid = np.linspace(0.2, 0.8, 15)
@@ -1105,7 +1036,6 @@ class TestSinkhornProjection:
         w[1:-1] = (grid[2:] - grid[:-2]) / 2.0
       return w
 
-    wu = _trap_weights(u_grid)
     wv = _trap_weights(v_grid)
 
     # Row integrals (should sum to ~1 after projection)
@@ -1127,9 +1057,7 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = PFNRBicop(symmetric=True, method="quantiles", sinkhorn_iters=3).fit(
-      u, v
-    )
+    m = PFNRBicop(method="quantiles", sinkhorn_iters=3).fit(u, v)
 
     u_test = np.array([0.3, 0.5, 0.7])
     v_test = np.array([0.4, 0.5, 0.6])
@@ -1145,9 +1073,7 @@ class TestSinkhornProjection:
     v = rng.uniform(0.2, 0.8, 30)
     x = np.column_stack([rng.normal(size=30), rng.normal(size=30)])
 
-    m = PFNRBicop(symmetric=True, method="criterion", sinkhorn_iters=3).fit(
-      u, v, x
-    )
+    m = PFNRBicop(method="criterion", sinkhorn_iters=3).fit(u, v, x)
 
     # Query with different x values
     u_test = np.array([0.3, 0.5, 0.7, 0.4])
@@ -1158,16 +1084,14 @@ class TestSinkhornProjection:
     assert out.shape == (4,)
     assert (out >= -1e-10).all()
 
-  def test_get_grid_borders_asymmetric_criterion_reuses_v_borders(
+  def test_get_grid_borders_reuses_same_object(
     self, patch_uniform: None
   ) -> None:
     rng = np.random.default_rng(101)
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = PFNRBicop(method="criterion", symmetric=False, sinkhorn_iters=2).fit(
-      u, v
-    )
+    m = PFNRBicop(method="criterion", sinkhorn_iters=2).fit(u, v)
 
     assert m._v_grid_borders_ is not None
     assert m._u_grid_borders_ is m._v_grid_borders_
