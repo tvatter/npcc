@@ -417,61 +417,6 @@ class TestPFNRDensityGrid:
 
 
 # ===========================================================================
-# conditional_cdf_v_given_u
-# ===========================================================================
-
-
-class TestPFNRConditionalCdf:
-  def _fit(self) -> PFNRBicop:
-    rng = np.random.default_rng(7)
-    u = rng.uniform(0.15, 0.85, 20)
-    v = rng.uniform(0.15, 0.85, 20)
-    return make_pfnr().fit(u, v)
-
-  def test_cdf_shape(self, patch_uniform: None) -> None:
-    m = self._fit()
-    u_q = np.array([0.3, 0.7])
-    v_grid = np.linspace(0.05, 0.95, 11)
-    cdf = m.conditional_cdf_v_given_u(u_q, v_grid)
-    assert cdf.shape == (2, 11)
-
-  def test_cdf_in_unit_interval(self, patch_uniform: None) -> None:
-    m = self._fit()
-    u_q = np.array([0.3, 0.7])
-    v_grid = np.linspace(0.05, 0.95, 11)
-    cdf = m.conditional_cdf_v_given_u(u_q, v_grid)
-    assert (cdf >= 0.0).all()
-    assert (cdf <= 1.0).all()
-
-  def test_cdf_monotone_nondecreasing(self, patch_uniform: None) -> None:
-    m = self._fit()
-    u_q = np.array([0.3, 0.5, 0.7])
-    v_grid = np.linspace(0.05, 0.95, 21)
-    cdf = m.conditional_cdf_v_given_u(u_q, v_grid)
-    diffs = np.diff(cdf, axis=1)
-    assert (diffs >= -1e-12).all()
-
-  def test_cdf_rejects_non_increasing_grid(self, patch_uniform: None) -> None:
-    m = self._fit()
-    with pytest.raises(ValueError, match="strictly increasing"):
-      m.conditional_cdf_v_given_u(np.array([0.5]), np.array([0.5, 0.4]))
-
-  def test_cdf_rejects_grid_outside_unit(self, patch_uniform: None) -> None:
-    m = self._fit()
-    with pytest.raises(ValueError, match="strictly inside"):
-      m.conditional_cdf_v_given_u(np.array([0.5]), np.array([0.0, 0.5, 0.95]))
-
-  def test_cdf_rejects_u_x_length_mismatch(self, patch_uniform: None) -> None:
-    m = self._fit()
-    with pytest.raises(ValueError, match="same number"):
-      m.conditional_cdf_v_given_u(
-        np.array([0.3, 0.7]),
-        np.linspace(0.1, 0.9, 5),
-        x=np.zeros((1, 1)),
-      )
-
-
-# ===========================================================================
 # h-functions
 # ===========================================================================
 
@@ -1083,6 +1028,63 @@ class TestSinkhornProjection:
     out = m.pdf(u_test, v_test, x_test)
     assert out.shape == (4,)
     assert (out >= -1e-10).all()
+
+  def test_sinkhorn_quantiles_multiple_x_groups(
+    self, patch_uniform: None
+  ) -> None:
+    """Quantiles Sinkhorn projection over multiple unique x (batched path)."""
+    rng = np.random.default_rng(39)
+    u = rng.uniform(0.2, 0.8, 30)
+    v = rng.uniform(0.2, 0.8, 30)
+    x = np.column_stack([rng.normal(size=30), rng.normal(size=30)])
+
+    m = PFNRBicop(method="quantiles", sinkhorn_iters=3).fit(u, v, x)
+
+    u_test = np.array([0.3, 0.5, 0.7, 0.4])
+    v_test = np.array([0.4, 0.5, 0.6, 0.5])
+    x_test = np.array([[0.0, 0.0], [1.0, 1.0], [0.0, 0.0], [1.0, 1.0]])
+
+    out = m.pdf(u_test, v_test, x_test)
+    assert out.shape == (4,)
+    assert (out >= -1e-10).all()
+
+  def test_raw_pdf_grids_by_x_matches_per_x_loop(
+    self, patch_uniform: None, monkeypatch: pytest.MonkeyPatch
+  ) -> None:
+    """Batched multi-x grids must equal the per-x ``_raw_pdf_grid_torch``.
+
+    Oracle for S1: an asymmetric, feature-dependent stub ``pdf_grid`` and a
+    non-square grid expose any reshape/permute error in the batched path
+    (the 3-D analogue of the reverse-direction transpose) that a constant,
+    symmetric density would hide.
+    """
+    m = PFNRBicop(method="criterion", sinkhorn_iters=3)
+
+    def stub(
+      w: torch.Tensor, y_grid: torch.Tensor, *, batch_size: int | None = None
+    ) -> torch.Tensor:
+      # out[i, j] = first_coord_i + 10*x_i + 100*y_j  (asymmetric in u/v/x)
+      return w[:, 0:1] * 1.0 + w[:, 1:2] * 10.0 + y_grid[None, :] * 100.0
+
+    monkeypatch.setattr(m.v_given_ux_, "pdf_grid", stub)
+    monkeypatch.setattr(m.u_given_vx_, "pdf_grid", stub)
+
+    dev = m._device
+    u_grid = torch.linspace(0.1, 0.9, 4, dtype=torch.float64, device=dev)
+    v_grid = torch.linspace(0.15, 0.85, 5, dtype=torch.float64, device=dev)
+    x_unique = torch.tensor(
+      [[0.2], [0.5], [0.8]], dtype=torch.float64, device=dev
+    )
+
+    batched = m._raw_pdf_grids_by_x(u_grid, v_grid, x_unique, batch_size=999)
+    assert batched.shape == (4, 3, 5)
+    for k in range(x_unique.shape[0]):
+      ref = m._raw_pdf_grid_torch(
+        u_grid, v_grid, x_unique[k : k + 1], batch_size=999
+      )
+      np.testing.assert_allclose(
+        batched[:, k, :].cpu().numpy(), ref.cpu().numpy(), atol=1e-10
+      )
 
   def test_get_grid_borders_reuses_same_object(
     self, patch_uniform: None

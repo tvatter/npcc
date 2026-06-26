@@ -49,6 +49,23 @@ def coverage_study() -> tuple[pd.DataFrame, pd.DataFrame, float]:
 
 
 @pytest.fixture(scope="module")
+def model_version_study() -> tuple[pd.DataFrame, pd.DataFrame, float]:
+  """Two model versions on the same data cell (hermetic fake ignores them)."""
+  grid = GridConfig(
+    families=["clayton"],
+    tau_scenarios=["uncond50"],
+    transforms=["logit"],
+    methods=["criterion"],
+    normalize=[None],
+    n=[20],
+    n_rep=1,
+    model_versions=["v2.5", "v3"],
+    projection_grid_size=8,
+  )
+  return _run(grid)
+
+
+@pytest.fixture(scope="module")
 def norm_study() -> Iterator[pd.DataFrame]:
   """Sinkhorn on the unconditional path only (single grid, cheap)."""
   grid = GridConfig(
@@ -117,6 +134,18 @@ def test_aggregate_results_groups_over_reps(
   assert set(mc_summary["metric"].unique()) == {"IAE", "ISE", "KL"}
   assert not runtime_summary.empty
   assert {"fit_time_mean", "pdf_time_mean"}.issubset(runtime_summary.columns)
+
+
+def test_model_version_axis_labels_rows_and_aggregates(
+  model_version_study: tuple[pd.DataFrame, pd.DataFrame, float],
+) -> None:
+  metrics_df, runtime_df, _ = model_version_study
+  assert "model_version" in metrics_df.columns
+  assert "model_version" in runtime_df.columns
+  assert set(metrics_df["model_version"].unique()) == {"v2.5", "v3"}
+  mc_summary, runtime_summary = aggregate_results(metrics_df, runtime_df)
+  assert "model_version" in mc_summary.columns
+  assert set(runtime_summary["model_version"].unique()) == {"v2.5", "v3"}
 
 
 def test_normalize_axis_applies_only_to_pdf(norm_study: pd.DataFrame) -> None:
