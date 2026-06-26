@@ -71,6 +71,9 @@ instance/
 # Sphinx documentation
 docs/_build/
 
+# Paper build artifacts
+paper/*.pdf
+
 # PyBuilder
 .pybuilder/
 target/
