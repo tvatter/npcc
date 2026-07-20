@@ -1,6 +1,6 @@
 # Example grid for the npcc conditional-copula simulation study.
 # Run with:
-#   npcc-simstudy --config configs/study.toml --out results/ --workers 4
+#   npcc-simstudy --config configs/study.toml --out results/ --workers 1
 #
 # The study sweeps the cartesian product of every axis below. Each
 # (family, tau_scenario, n, rep) cell samples its own data + ground truth once;
@@ -8,6 +8,16 @@
 # are aggregated over a uv grid at each fixed x, diagnostics check margins and
 # dependence, and plot-ready quantities are written only for the families
 # listed in `surface_families`.
+#
+# Projected wall time for one seed (n_rep = 1) of the grid below on an
+# RTX 2080 Ti, workers=1: ~5.5-6 h (measured per-backend at n=500; the joint-CDF
+# integration dominates for the foundation models, not fitting).
+#
+# Backends intentionally EXCLUDED from this run (too slow for the full grid):
+#   - catboost   (~74 s/fit; ~1.5 h of grid) and gbm (101 sklearn models/dir) —
+#     redundant slow GBM-quantile variants; xgb-quantile is the representative.
+#   - tabpfn-finetune / tabicl-finetune — GPU training loops (minutes x 2
+#     directions x 72 fits = many hours); run those in a separate small study.
 
 [grid]
 # Copula families (one-parameter): clayton, gumbel, frank, gaussian, joe.
@@ -19,27 +29,34 @@ tau_scenarios = ["linear", "quadratic", "sin"]
 # Support transforms used by the inner distributional-regression models.
 transforms = ["logit", "probit"]
 
-# Inner distributional-regression backends (registry names). See
-# `npcc.available_backends()`. TabPFN version-pinned presets are e.g.
-# tabpfn-criterion-v2.5 / tabpfn-criterion-v3. Non-TabPFN backends
-# (catboost, xgb-quantile, pytabkit-realmlp/-tabm, ngboost, gbm, tabicl,
-# tabicl-finetune, tabpfn-finetune) require their optional extra installed.
+# Inner distributional-regression backends (registry names; see
+# `npcc.available_backends()`). Non-TabPFN backends require their optional
+# extra installed (`uv sync --extra cu130 --extra backends`; Nori via the fork,
+# see pyproject.toml).
 backends = [
   "tabpfn-criterion-v2.5",
   "tabpfn-criterion-v3",
+  "tabpfn-quantiles-v2.5",
   "tabpfn-quantiles-v3",
+  "nori",
+  "tabicl",
+  "ngboost",
+  "xgb-quantile",
+  "pytabkit-realmlp",
+  "pytabkit-tabm",
 ]
 
 # Sinkhorn normalization variants applied to the density. "none" = off.
-normalize = ["none", 3]
+# Kept at "none" only: the projection degenerates (±inf KL) for the sharper
+# tree/parametric densities — hardening it is a separate follow-up.
+normalize = ["none"]
 
-# Training sample sizes and Monte-Carlo repetitions.
+# Training sample sizes and Monte-Carlo repetitions (one seed).
 n = [200, 500, 1000]
-n_rep = 20
+n_rep = 1
 
-# Grid resolution for the Sinkhorn projection (per axis). Larger = more
-# accurate margins but markedly slower for conditional scenarios (a density
-# grid is built per unique x). Optional; defaults to 30.
+# Grid resolution for the (disabled) Sinkhorn projection; unused with
+# normalize = ["none"].
 projection_grid_size = 30
 
 # Conditional metric grid: 20x20 uv points and 10 x slices.
@@ -47,7 +64,7 @@ conditional_uv_grid_n = 20
 conditional_x_grid_n = 10
 
 # Plot-ready quantities are written only for these Kendall-tau slices and
-# families. Non-monotone tau(x) scenarios keep all matching x branches.
+# families.
 surface_tau_levels = [0.1, 0.5, 0.9]
 surface_families = ["clayton"]
 

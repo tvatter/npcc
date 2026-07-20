@@ -214,3 +214,6 @@ uv.lock
 
 # CatBoost training logs
 catboost_info/
+
+# Simulation-study outputs
+results/
