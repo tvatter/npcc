@@ -1,4 +1,4 @@
-"""Tests for ``QuantileGridConfig`` and ``TabPFNQuantileDistribution1D``."""
+"""Tests for generic quantile-inversion distribution recovery."""
 
 from __future__ import annotations
 
@@ -8,11 +8,44 @@ import numpy as np
 import pytest
 import torch
 
-from npcc.core.tabpfn_quantile_distribution1d import (
-  QuantileGridConfig,
-  TabPFNQuantileDistribution1D,
+from npcc.core.conditional_distribution import SupportTransform
+from npcc.core.quantile_inversion import (
+  QuantileInversionConfig,
+  QuantilePredictor,
+  QuantileInversionConfig as QuantileGridConfig,
+  create_quantile_inversion_distribution,
+)
+from npcc.core.tabpfn_backend import (
+  _TabPFNQuantileDistribution as TabPFNQuantileDistribution1D,
 )
 from tests.conftest import uniform_density_y
+
+
+class _LinearQuantilePredictor:
+  def fit(
+    self, features: torch.Tensor, target: torch.Tensor
+  ) -> _LinearQuantilePredictor:
+    return self
+
+  def predict_quantiles(
+    self, features: torch.Tensor, probabilities: torch.Tensor
+  ) -> torch.Tensor:
+    row = -2.0 + 4.0 * probabilities
+    return row.expand(features.shape[0], -1)
+
+
+def test_public_factory_is_provider_neutral() -> None:
+  predictor: QuantilePredictor = _LinearQuantilePredictor()
+  distribution = create_quantile_inversion_distribution(
+    predictor,
+    config=QuantileInversionConfig(n_quantiles=11),
+    transform=SupportTransform.IDENTITY,
+  )
+  features = torch.zeros((10, 1), dtype=torch.float64)
+  target = torch.linspace(-1.0, 1.0, 10, dtype=torch.float64)
+  distribution.fit(features, target)
+  density = distribution.pdf(features, target)
+  torch.testing.assert_close(density, torch.full_like(density, 0.25))
 
 
 def _stdnorm_cdf(z: np.ndarray) -> np.ndarray:
@@ -39,24 +72,20 @@ class TestQuantileGridConfig:
     assert a[-1] == pytest.approx(0.95)
 
   def test_alphas_rejects_inverted_bounds(self) -> None:
-    cfg = QuantileGridConfig(alpha_min=0.5, alpha_max=0.4)
     with pytest.raises(ValueError, match="alpha_min"):
-      cfg.alphas()
+      QuantileGridConfig(alpha_min=0.5, alpha_max=0.4)
 
   def test_alphas_rejects_alpha_min_zero(self) -> None:
-    cfg = QuantileGridConfig(alpha_min=0.0)
     with pytest.raises(ValueError, match="alpha_min"):
-      cfg.alphas()
+      QuantileGridConfig(alpha_min=0.0)
 
   def test_alphas_rejects_alpha_max_one(self) -> None:
-    cfg = QuantileGridConfig(alpha_max=1.0)
     with pytest.raises(ValueError, match="alpha_min"):
-      cfg.alphas()
+      QuantileGridConfig(alpha_max=1.0)
 
   def test_alphas_requires_at_least_5(self) -> None:
-    cfg = QuantileGridConfig(n_quantiles=4)
     with pytest.raises(ValueError, match="n_quantiles"):
-      cfg.alphas()
+      QuantileGridConfig(n_quantiles=4)
 
 
 class TestQuantileDistribution1D:

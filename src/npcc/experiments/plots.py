@@ -3,7 +3,8 @@
 These consume the tidy tables produced by :func:`npcc.experiments.run_study`
 and :func:`npcc.experiments.aggregate_results`.  They are deliberately small and
 generic: pick a ``(family, tau_scenario, quantity, metric)`` slice and compare
-across any axis (``method`` / ``transform`` / ``normalize`` / ...) via ``hue``.
+across any axis (``recovery`` / ``transform`` / ``normalize`` / ...) via
+``hue``.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ def mean_metric_lineplot(
   tau_scenario: str,
   quantity: str,
   metric: str,
-  hue: str = "method",
+  hue: str = "recovery",
   ax: Axes | None = None,
 ) -> Axes:
   """Plot the across-rep mean of ``metric`` vs ``n``, one line per ``hue`` level.
@@ -68,7 +69,7 @@ def metric_boxplot(
   quantity: str,
   metric: str,
   n: int,
-  by: str = "method",
+  by: str = "recovery",
   ax: Axes | None = None,
 ) -> Axes:
   """Boxplot of the per-rep ``metric`` distribution at sample size ``n``,
@@ -92,8 +93,10 @@ def metric_boxplot_by_n(
   tau_scenario: str,
   quantity: str,
   metric: str,
-  method: str | Sequence[str] | None = None,
-  model_version: str | Sequence[str] | None = None,
+  recovery: str | Sequence[str] | None = None,
+  label: str | Sequence[str] | None = None,
+  provider: str | Sequence[str] | None = None,
+  model_id: str | Sequence[str] | None = None,
   transform: str | Sequence[str] | None = None,
   normalize: str | Sequence[str] | None = None,
   ax: Axes | None = None,
@@ -102,7 +105,7 @@ def metric_boxplot_by_n(
 
   For conditional scenarios, metrics are averaged over conditioning values
   within each repetition before plotting. Each model identity is the full
-  ``(method, model_version, transform, normalize)`` combination. A selector
+  ``(provider, recovery, model_id, transform, normalize)`` combination. A selector
   may be ``None`` to include all values, a string to select one value, or a
   sequence of strings to select multiple values.
   """
@@ -110,10 +113,23 @@ def metric_boxplot_by_n(
   sub = _slice(metrics_df, family, tau_scenario, quantity).dropna(
     subset=[metric]
   )
-  model_columns = ["method", "model_version", "transform", "normalize"]
+  model_columns = [
+    column
+    for column in (
+      "label",
+      "provider",
+      "recovery",
+      "model_id",
+      "transform",
+      "normalize",
+    )
+    if column in sub.columns
+  ]
   selectors = {
-    "method": method,
-    "model_version": model_version,
+    "label": label,
+    "provider": provider,
+    "recovery": recovery,
+    "model_id": model_id,
     "transform": transform,
     "normalize": normalize,
   }

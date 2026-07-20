@@ -11,12 +11,14 @@ requires-python = ">=3.11"
 dependencies = [
   "numpy>=2.0",
   "pyvinecopulib>=0.7.5",
-  "tabpfn>=8.0",
   "torch>=2.11",
 ]
 
 [project.optional-dependencies]
 cpu = ["torch>=2.11"]
+tabpfn = ["tabpfn>=8.0"]
+tabicl = ["tabicl>=2.1.1"]
+foundation-models = ["tabpfn>=8.0", "tabicl>=2.1.1"]
 cu126 = ["torch>=2.11"]
 cu128 = ["torch>=2.11"]
 cu130 = ["torch>=2.11"]
@@ -118,6 +120,9 @@ extend-select = ["ANN"]
 # Marimo cell functions have a reactive-graph signature style that makes
 # ANN annotations on cell arguments extremely verbose and unidiomatic.
 "notebooks/**" = ["ANN"]
+
+[tool.pytest.ini_options]
+markers = ["integration: opt-in tests requiring cached model weights"]
 
 # Type checking with ty
 [tool.ty.environment]

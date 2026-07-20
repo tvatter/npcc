@@ -1,5 +1,5 @@
-"""Core estimators: the TabPFN-Rosenblatt copula and its inner distributions.
+"""Core conditional-copula estimators and extension contracts."""
 
-The public API is re-exported from :mod:`npcc`; import from there
-(``from npcc import PFNRBicop``) rather than reaching into ``npcc.core``.
-"""
+from npcc.core.foundation_model_bicop import FoundationModelBicop
+
+__all__ = ["FoundationModelBicop"]

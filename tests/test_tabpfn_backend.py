@@ -8,8 +8,8 @@ import numpy as np
 import pytest
 import torch
 
-from npcc.core.tabpfn_criterion_distribution1d import (
-  TabPFNCriterionDistribution1D,
+from npcc.core.tabpfn_backend import (
+  _NativeTabPFNDistribution as TabPFNCriterionDistribution1D,
 )
 from tests.conftest import uniform_density_y
 
@@ -178,6 +178,34 @@ class TestTabPFNCriterionDistribution1D:
     y_tiled = np.tile(y_grid, w.shape[0])
     tiled = d.pdf(w_tiled, y_tiled).reshape(w.shape[0], len(y_grid))
     np.testing.assert_allclose(grid, tiled, atol=1e-8)
+
+  def test_pdf_grid_allows_masked_native_logits(
+    self, patch_uniform: None, monkeypatch: pytest.MonkeyPatch
+  ) -> None:
+    d = TabPFNCriterionDistribution1D(transform="logit")
+    d.fit(np.zeros((10, 1)), np.full(10, 0.5))
+    assert d.model_ is not None
+    original_predict = d.model_.predict
+
+    def predict_with_masked_bin(
+      X: np.ndarray,
+      *,
+      output_type: str = "mean",
+      quantiles: list[float] | None = None,
+    ) -> object:
+      prediction = original_predict(
+        X, output_type=output_type, quantiles=quantiles
+      )
+      if output_type == "full":
+        assert isinstance(prediction, dict)
+        logits = np.asarray(prediction["logits"], dtype=object)
+        logits[0, 0] = None
+        prediction["logits"] = logits
+      return prediction
+
+    monkeypatch.setattr(d.model_, "predict", predict_with_masked_bin)
+    out = d.pdf_grid(np.zeros((1, 1)), np.array([0.3, 0.5, 0.7]))
+    assert np.isfinite(out).all()
 
   def test_pdf_grid_before_fit_raises(self, patch_uniform: None) -> None:
     d = TabPFNCriterionDistribution1D()

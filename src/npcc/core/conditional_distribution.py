@@ -1,34 +1,18 @@
-"""
-tabpfn_distribution1d.py — abstract base for univariate conditional
-predictive distributions backed by TabPFN.
+"""Provider-neutral distribution contracts and shared transformation logic.
 
-Concrete implementations live in
-:mod:`npcc.tabpfn_criterion_distribution1d` (uses TabPFN's binned
-distribution head directly) and
-:mod:`npcc.tabpfn_quantile_distribution1d` (numerical inversion of the
-predicted quantile table).  Both share:
-
-- the optional support transforms (and their Jacobians / inverses),
-- the ``transform`` / ``eps`` / ``device`` / ``model_kwargs`` / ``model_``
-  fields set up at construction time,
-- the public ``fit`` / ``pdf`` / ``cdf`` / ``icdf`` interface,
-- accept ``np.ndarray`` or ``torch.Tensor`` inputs and return the same
-  type the caller passed in.
-
-The base class is :class:`abc.ABC` so the abstract methods are enforced
-at instantiation time; the per-class fast paths (``pdf_grid`` /
-``cdf_grid`` on the criterion subclass) stay subclass-specific.
+The private regressor base centralizes fitting, device placement, support
+transforms, inverse transforms, and Jacobians. Provider adapters supply fresh
+regressor instances, while recovery modules implement PDF/CDF/iCDF behavior.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import math
-from typing import Any, Literal, Self
+from enum import StrEnum
+from typing import Any, Literal, Protocol, Self, runtime_checkable
 
 import torch
-from tabpfn import TabPFNRegressor
-from tabpfn.constants import ModelVersion
 
 from npcc.core._common import (
   TensorLike,
@@ -38,22 +22,92 @@ from npcc.core._common import (
   _to_tensor,
 )
 
-_DEFAULT_MODEL_VERSION = ModelVersion.V3
-"""Default TabPFN model version shared by every npcc distribution/copula class.
 
-Centralized here so a version bump is a one-line change rather than four
-scattered defaults (the two inner distributions and
-:class:`~npcc.pfnr_bicop.PFNRBicop` all reference this single value).
-"""
+class SupportTransform(StrEnum):
+  """Transformation applied to responses on bounded copula support."""
+
+  IDENTITY = "identity"
+  LOGIT = "logit"
+  PROBIT = "probit"
 
 
-class TabPFNDistribution1D(ABC):
+@runtime_checkable
+class ConditionalDistribution(Protocol):
+  """Torch-only distribution contract used by ``FoundationModelBicop``."""
+
+  def fit(self, features: torch.Tensor, target: torch.Tensor) -> Self: ...
+
+  def pdf(
+    self,
+    features: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    batch_size: int | None = None,
+  ) -> torch.Tensor: ...
+
+  def cdf(
+    self,
+    features: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    batch_size: int | None = None,
+  ) -> torch.Tensor: ...
+
+  def icdf(
+    self,
+    features: torch.Tensor,
+    probabilities: torch.Tensor,
+    *,
+    batch_size: int | None = None,
+  ) -> torch.Tensor: ...
+
+
+@runtime_checkable
+class SupportsPDFGrid(Protocol):
+  """Optional optimized Cartesian PDF evaluation capability."""
+
+  def pdf_grid(
+    self,
+    features: torch.Tensor,
+    target_grid: torch.Tensor,
+    *,
+    batch_size: int | None = None,
+  ) -> torch.Tensor: ...
+
+
+@runtime_checkable
+class SupportsCDFGrid(Protocol):
+  """Optional optimized Cartesian CDF evaluation capability."""
+
+  def cdf_grid(
+    self,
+    features: torch.Tensor,
+    target_grid: torch.Tensor,
+    *,
+    batch_size: int | None = None,
+  ) -> torch.Tensor: ...
+
+
+class _FitRegressor(Protocol):
+  """Small regressor surface shared by supported foundation models."""
+
+  def fit(self, x: TensorLike, y: TensorLike) -> object: ...
+
+  def predict(
+    self,
+    x: TensorLike,
+    *,
+    output_type: str = "mean",
+    quantiles: list[float] | None = None,
+  ) -> object: ...
+
+
+class _RegressorDistribution(ABC):
   """Abstract base class for univariate conditional predictive distributions.
 
-  A concrete instance, once :py:meth:`fit` has been called, represents
-  the conditional distribution of ``Y`` given ``W`` learned by a
-  TabPFN regressor.  Subclasses differ only in *how* that distribution
-  is read off the regressor's output.
+  A concrete instance represents the conditional distribution of ``Y`` given
+  ``W`` learned by a provider regressor. Subclasses determine how that
+  distribution is recovered from predictor output.
 
   Parameters
   ----------
@@ -88,8 +142,8 @@ class TabPFNDistribution1D(ABC):
   eps: float
   batch_size: int
   model_kwargs: dict[str, Any]
-  model_version: ModelVersion | None
-  model_: TabPFNRegressor | None
+  model_version: object | None
+  model_: _FitRegressor | None
   _device: torch.device
 
   def __init__(
@@ -100,7 +154,7 @@ class TabPFNDistribution1D(ABC):
     device: str | torch.device | None = None,
     batch_size: int | None = None,
     model_kwargs: dict[str, Any] | None = None,
-    model_version: ModelVersion | None = _DEFAULT_MODEL_VERSION,
+    model_version: object | None = None,
   ) -> None:
     self.transform = transform
     self.eps = eps
@@ -123,14 +177,9 @@ class TabPFNDistribution1D(ABC):
       raise ValueError("batch_size must be positive.")
     return effective
 
-  def _make_model(self) -> TabPFNRegressor:
-    if self.model_version is None:
-      return TabPFNRegressor(**self.model_kwargs)
-
-    return TabPFNRegressor.create_default_for_version(
-      self.model_version,
-      **self.model_kwargs,
-    )
+  @abstractmethod
+  def _make_model(self) -> _FitRegressor:
+    """Create a fresh provider-specific regressor."""
 
   # ------------------------------------------------------------------
   # Shared concrete helpers (support transform machinery).

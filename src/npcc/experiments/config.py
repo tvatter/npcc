@@ -9,29 +9,110 @@ run-level options come from the CLI.  TOML has no ``null`` literal, so the
 from __future__ import annotations
 
 import tomllib
+import hashlib
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from itertools import product
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
-from tabpfn.constants import ModelVersion
-
+from npcc.core.conditional_distribution import SupportTransform
+from npcc.core.providers import JSONValue, Recovery, TabICLConfig, TabPFNConfig
+from npcc.core.quantile_inversion import QuantileInversionConfig
 from npcc.experiments.scenarios import FAMILIES, TAU_SCENARIOS
 
-TRANSFORMS: tuple[str, ...] = ("identity", "logit", "probit")
-METHODS: tuple[str, ...] = ("criterion", "quantiles")
-MODEL_VERSIONS: tuple[str, ...] = tuple(v.value for v in ModelVersion)
-DEFAULT_MODEL_VERSION: str = ModelVersion.V3.value
+PROVIDERS: tuple[str, ...] = ("tabpfn", "tabicl")
 
 
 @dataclass(frozen=True)
 class EstimatorSpec:
   """An estimator configuration fitted once per data cell."""
 
-  transform: str
-  method: str
-  model_version: str = DEFAULT_MODEL_VERSION
+  label: str
+  provider: str
+  recovery: Recovery
+  transform: SupportTransform
+  provider_config: TabPFNConfig | TabICLConfig
+  quantile_inversion: QuantileInversionConfig | None = None
+
+  def __post_init__(self) -> None:
+    if not self.label:
+      raise ValueError("Estimator labels must be non-empty.")
+    if self.provider not in PROVIDERS:
+      raise ValueError(f"Unknown provider: {self.provider!r}.")
+    if self.provider == "tabpfn" and not isinstance(
+      self.provider_config, TabPFNConfig
+    ):
+      raise ValueError("TabPFN estimators require TabPFNConfig.")
+    if self.provider == "tabicl" and not isinstance(
+      self.provider_config, TabICLConfig
+    ):
+      raise ValueError("TabICL estimators require TabICLConfig.")
+    if (
+      self.provider == "tabicl"
+      and self.recovery is not Recovery.QUANTILE_INVERSION
+    ):
+      raise ValueError("TabICL supports only quantile_inversion recovery.")
+    if self.recovery is Recovery.NATIVE_DISTRIBUTION:
+      if self.quantile_inversion is not None:
+        raise ValueError(
+          "quantile_inversion is invalid for native distribution recovery."
+        )
+
+  def canonical_dict(self) -> dict[str, object]:
+    """Return the stable JSON-compatible estimator definition."""
+    config: dict[str, object]
+    if isinstance(self.provider_config, TabPFNConfig):
+      config = {
+        "model_version": self.provider_config.model_version,
+        "n_estimators": self.provider_config.n_estimators,
+        "ignore_pretraining_limits": (
+          self.provider_config.ignore_pretraining_limits
+        ),
+        "extra_regressor_kwargs": dict(
+          self.provider_config.extra_regressor_kwargs
+        ),
+      }
+    else:
+      config = {
+        "checkpoint": self.provider_config.checkpoint,
+        "n_estimators": self.provider_config.n_estimators,
+        "ensemble_batch_size": self.provider_config.ensemble_batch_size,
+        "cache_mode": self.provider_config.cache_mode,
+        "extra_regressor_kwargs": dict(
+          self.provider_config.extra_regressor_kwargs
+        ),
+      }
+    inversion = None
+    if self.quantile_inversion is not None:
+      inversion = {
+        "n_quantiles": self.quantile_inversion.n_quantiles,
+        "alpha_min": self.quantile_inversion.alpha_min,
+        "alpha_max": self.quantile_inversion.alpha_max,
+        "min_qprime": self.quantile_inversion.min_qprime,
+      }
+    return {
+      "provider": self.provider,
+      "recovery": self.recovery.value,
+      "transform": self.transform.value,
+      "provider_config": config,
+      "quantile_inversion": inversion,
+    }
+
+  @property
+  def estimator_id(self) -> str:
+    """Full SHA-256 of the canonical estimator definition."""
+    encoded = json.dumps(
+      self.canonical_dict(), sort_keys=True, separators=(",", ":")
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+  @property
+  def model_id(self) -> str:
+    """Provider-neutral upstream model identifier."""
+    if isinstance(self.provider_config, TabPFNConfig):
+      return self.provider_config.model_version
+    return self.provider_config.checkpoint
 
 
 @dataclass(frozen=True)
@@ -79,14 +160,10 @@ class GridConfig:
 
   families: list[str]
   tau_scenarios: list[str]
-  transforms: list[str]
-  methods: list[str]
+  estimators: list[EstimatorSpec]
   normalize: list[int | None]
   n: list[int]
   n_rep: int
-  model_versions: list[str] = field(
-    default_factory=lambda: [DEFAULT_MODEL_VERSION]
-  )
   projection_grid_size: int = 30
   conditional_uv_grid_n: int = 20
   conditional_x_grid_n: int = 10
@@ -100,9 +177,11 @@ class GridConfig:
   def __post_init__(self) -> None:
     _check_subset("families", self.families, FAMILIES)
     _check_subset("tau_scenarios", self.tau_scenarios, TAU_SCENARIOS)
-    _check_subset("transforms", self.transforms, TRANSFORMS)
-    _check_subset("methods", self.methods, METHODS)
-    _check_subset("model_versions", self.model_versions, MODEL_VERSIONS)
+    if not self.estimators:
+      raise ValueError("estimators must be non-empty.")
+    labels = [est.label for est in self.estimators]
+    if len(labels) != len(set(labels)):
+      raise ValueError("Estimator labels must be unique.")
     if not self.normalize:
       raise ValueError("normalize must be non-empty (e.g. [None]).")
     for entry in self.normalize:
@@ -134,12 +213,7 @@ class GridConfig:
       raise ValueError("tau_diagnostic_n must be >= 10.")
 
   def estimator_specs(self) -> list[EstimatorSpec]:
-    return [
-      EstimatorSpec(transform=t, method=m, model_version=mv)
-      for t, m, mv in product(
-        self.transforms, self.methods, self.model_versions
-      )
-    ]
+    return list(self.estimators)
 
   def cells(self) -> list[Cell]:
     return [
@@ -174,18 +248,17 @@ def load_grid(path: str | Path) -> GridConfig:
   with Path(path).open("rb") as fh:
     data = tomllib.load(fh)
   grid = data.get("grid", data)
+  raw_estimators = grid.get("estimators", data.get("estimators"))
+  if not isinstance(raw_estimators, list):
+    raise ValueError("Define at least one [[estimators]] table.")
   try:
     return GridConfig(
       families=list(grid["families"]),
       tau_scenarios=list(grid["tau_scenarios"]),
-      transforms=list(grid["transforms"]),
-      methods=list(grid["methods"]),
+      estimators=[_parse_estimator(est) for est in raw_estimators],
       normalize=_coerce_normalize(list(grid["normalize"])),
       n=[int(v) for v in grid["n"]],
       n_rep=int(grid["n_rep"]),
-      model_versions=[
-        str(v) for v in grid.get("model_versions", [DEFAULT_MODEL_VERSION])
-      ],
       projection_grid_size=int(grid.get("projection_grid_size", 30)),
       conditional_uv_grid_n=int(grid.get("conditional_uv_grid_n", 20)),
       conditional_x_grid_n=int(grid.get("conditional_x_grid_n", 10)),
@@ -200,3 +273,74 @@ def load_grid(path: str | Path) -> GridConfig:
     )
   except KeyError as exc:
     raise ValueError(f"Missing required [grid] key: {exc}.") from exc
+
+
+def _parse_estimator(est: dict[str, object]) -> EstimatorSpec:
+  provider = str(est["provider"])
+  raw_config = est.get("provider_config")
+  if not isinstance(raw_config, dict):
+    raise ValueError("Each estimator requires a [provider_config] table.")
+  try:
+    if provider == "tabpfn":
+      allowed = {
+        "model_version",
+        "n_estimators",
+        "ignore_pretraining_limits",
+        "extra_regressor_kwargs",
+      }
+      unknown = set(raw_config).difference(allowed)
+      if unknown:
+        raise ValueError(f"Invalid tabpfn provider_config fields: {unknown}.")
+      provider_config: TabPFNConfig | TabICLConfig = TabPFNConfig(
+        model_version=str(raw_config.get("model_version", "v3")),
+        n_estimators=cast(int | None, raw_config.get("n_estimators")),
+        ignore_pretraining_limits=bool(
+          raw_config.get("ignore_pretraining_limits", False)
+        ),
+        extra_regressor_kwargs=cast(
+          dict[str, JSONValue], raw_config.get("extra_regressor_kwargs", {})
+        ),
+      )
+    elif provider == "tabicl":
+      allowed = {
+        "checkpoint",
+        "n_estimators",
+        "ensemble_batch_size",
+        "cache_mode",
+        "extra_regressor_kwargs",
+      }
+      unknown = set(raw_config).difference(allowed)
+      if unknown:
+        raise ValueError(f"Invalid tabicl provider_config fields: {unknown}.")
+      provider_config = TabICLConfig(
+        checkpoint=str(
+          raw_config.get("checkpoint", "tabicl-regressor-v2-20260212.ckpt")
+        ),
+        n_estimators=cast(int, raw_config.get("n_estimators", 8)),
+        ensemble_batch_size=cast(int, raw_config.get("ensemble_batch_size", 8)),
+        cache_mode=str(raw_config.get("cache_mode", "repr")),
+        extra_regressor_kwargs=cast(
+          dict[str, JSONValue], raw_config.get("extra_regressor_kwargs", {})
+        ),
+      )
+    else:
+      raise ValueError(f"Unknown provider: {provider!r}.")
+    raw_inversion = est.get("quantile_inversion")
+    inversion = None
+    if isinstance(raw_inversion, dict):
+      inversion = QuantileInversionConfig(
+        n_quantiles=cast(int, raw_inversion.get("n_quantiles", 101)),
+        alpha_min=cast(float, raw_inversion.get("alpha_min", 1e-3)),
+        alpha_max=cast(float, raw_inversion.get("alpha_max", 1.0 - 1e-3)),
+        min_qprime=cast(float, raw_inversion.get("min_qprime", 1e-6)),
+      )
+    return EstimatorSpec(
+      label=str(est["label"]),
+      provider=provider,
+      recovery=Recovery(str(est["recovery"])),
+      transform=SupportTransform(str(est["transform"])),
+      provider_config=provider_config,
+      quantile_inversion=inversion,
+    )
+  except TypeError as exc:
+    raise ValueError(f"Invalid {provider} provider_config: {exc}.") from exc

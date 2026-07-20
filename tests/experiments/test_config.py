@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from npcc import Recovery, SupportTransform, TabICLConfig, TabPFNConfig
 from npcc.experiments.config import (
+  EstimatorSpec,
   GridConfig,
   RunConfig,
   load_grid,
@@ -16,8 +18,6 @@ _TOML = """
 [grid]
 families = ["clayton", "gumbel"]
 tau_scenarios = ["linear", "uncond50"]
-transforms = ["logit", "identity"]
-methods = ["criterion", "quantiles"]
 normalize = ["none", 5]
 n = [50, 100]
 n_rep = 3
@@ -27,6 +27,20 @@ surface_tau_levels = [0.1, 0.5]
 surface_families = ["clayton"]
 enable_tau_diagnostics = false
 tau_diagnostic_n = 100
+
+[[grid.estimators]]
+label = "native-logit"
+provider = "tabpfn"
+recovery = "native_distribution"
+transform = "logit"
+provider_config = { model_version = "v3" }
+
+[[grid.estimators]]
+label = "quantile-identity"
+provider = "tabpfn"
+recovery = "quantile_inversion"
+transform = "identity"
+provider_config = { model_version = "v3" }
 """
 
 
@@ -53,29 +67,29 @@ def test_cells_and_estimator_specs_are_cartesian(tmp_path: Path) -> None:
   grid = load_grid(_write(tmp_path, _TOML))
   # 2 families x 2 scenarios x 2 n x 3 rep
   assert len(grid.cells()) == 2 * 2 * 2 * 3
-  # 2 transforms x 2 methods x 1 (default) model version
-  assert len(grid.estimator_specs()) == 4
+  assert len(grid.estimator_specs()) == 2
 
 
-def test_model_versions_default_to_v3(tmp_path: Path) -> None:
+def test_estimator_records_preserve_versions(tmp_path: Path) -> None:
   grid = load_grid(_write(tmp_path, _TOML))
-  assert grid.model_versions == ["v3"]
-  assert all(s.model_version == "v3" for s in grid.estimator_specs())
+  assert all(s.model_id == "v3" for s in grid.estimator_specs())
+  assert all(len(s.estimator_id) == 64 for s in grid.estimator_specs())
 
 
-def test_model_versions_multiply_estimator_specs(tmp_path: Path) -> None:
-  text = _TOML + '\nmodel_versions = ["v2.5", "v3"]\n'
-  grid = load_grid(_write(tmp_path, text))
-  assert grid.model_versions == ["v2.5", "v3"]
-  # 2 transforms x 2 methods x 2 model versions
-  specs = grid.estimator_specs()
-  assert len(specs) == 8
-  assert {s.model_version for s in specs} == {"v2.5", "v3"}
+def test_tabicl_native_rejected() -> None:
+  with pytest.raises(ValueError, match="quantile_inversion"):
+    EstimatorSpec(
+      "bad",
+      "tabicl",
+      Recovery.NATIVE_DISTRIBUTION,
+      SupportTransform.LOGIT,
+      TabICLConfig(),
+    )
 
 
-def test_unknown_model_version_rejected(tmp_path: Path) -> None:
-  text = _TOML + '\nmodel_versions = ["v2.5", "v99"]\n'
-  with pytest.raises(ValueError, match="Unknown model_versions"):
+def test_duplicate_estimator_labels_rejected(tmp_path: Path) -> None:
+  text = _TOML.replace('label = "quantile-identity"', 'label = "native-logit"')
+  with pytest.raises(ValueError, match="unique"):
     load_grid(_write(tmp_path, text))
 
 
@@ -90,8 +104,6 @@ def test_normalize_zero_and_off_become_none(tmp_path: Path) -> None:
   [
     ("families", '["clayton", "nope"]'),
     ("tau_scenarios", '["linear", "nope"]'),
-    ("transforms", '["logit", "nope"]'),
-    ("methods", '["criterion", "nope"]'),
   ],
 )
 def test_unknown_axis_value_rejected(
@@ -134,12 +146,10 @@ def test_shipped_study_config_loads() -> None:
   assert grid.tau_scenarios == ["linear", "quadratic", "sin"]
   assert grid.n == [200, 500, 1000]
   assert grid.n_rep == 20
-  assert grid.transforms == ["logit", "identity", "probit"]
-  assert grid.methods == ["criterion", "quantiles"]
-  assert grid.model_versions == ["v2.5", "v3"]
-  assert grid.normalize == [None, 3]
+  assert {est.provider for est in grid.estimators} == {"tabpfn", "tabicl"}
+  assert grid.normalize == [None, 100]
   assert len(grid.cells()) == 5 * 3 * 3 * 20
-  assert len(grid.estimator_specs()) == 3 * 2 * 2
+  assert len(grid.estimator_specs()) == 15
 
 
 def test_runconfig_validates_workers_and_fmt(tmp_path: Path) -> None:
@@ -155,8 +165,15 @@ def test_gridconfig_rejects_empty_axis() -> None:
     GridConfig(
       families=[],
       tau_scenarios=["linear"],
-      transforms=["logit"],
-      methods=["criterion"],
+      estimators=[
+        EstimatorSpec(
+          "base",
+          "tabpfn",
+          Recovery.NATIVE_DISTRIBUTION,
+          SupportTransform.LOGIT,
+          TabPFNConfig(),
+        )
+      ],
       normalize=[None],
       n=[100],
       n_rep=1,

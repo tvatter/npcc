@@ -8,7 +8,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from npcc.experiments.config import GridConfig, RunConfig
+from npcc import Recovery, SupportTransform, TabPFNConfig
+from npcc.experiments.config import EstimatorSpec, GridConfig, RunConfig
 from npcc.experiments.runner import (
   aggregate_results,
   aggregate_study_outputs,
@@ -32,6 +33,21 @@ def _run(
     mp.undo()
 
 
+def _spec(
+  label: str,
+  recovery: Recovery,
+  transform: SupportTransform = SupportTransform.LOGIT,
+  model_version: str = "v3",
+) -> EstimatorSpec:
+  return EstimatorSpec(
+    label,
+    "tabpfn",
+    recovery,
+    transform,
+    TabPFNConfig(model_version=model_version),
+  )
+
+
 @pytest.fixture(scope="module")
 def coverage_study() -> tuple[
   pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float
@@ -40,8 +56,14 @@ def coverage_study() -> tuple[
   grid = GridConfig(
     families=["clayton"],
     tau_scenarios=["linear", "quadratic"],
-    transforms=["logit", "identity"],
-    methods=["criterion", "quantiles"],
+    estimators=[
+      _spec("native-logit", Recovery.NATIVE_DISTRIBUTION),
+      _spec(
+        "quantile-identity",
+        Recovery.QUANTILE_INVERSION,
+        SupportTransform.IDENTITY,
+      ),
+    ],
     normalize=[None],
     n=[20],
     n_rep=1,
@@ -61,12 +83,13 @@ def model_version_study() -> tuple[
   grid = GridConfig(
     families=["clayton"],
     tau_scenarios=["linear"],
-    transforms=["logit"],
-    methods=["criterion"],
+    estimators=[
+      _spec("v2.5", Recovery.NATIVE_DISTRIBUTION, model_version="v2.5"),
+      _spec("v3", Recovery.NATIVE_DISTRIBUTION),
+    ],
     normalize=[None],
     n=[20],
     n_rep=1,
-    model_versions=["v2.5", "v3"],
     projection_grid_size=8,
     conditional_uv_grid_n=3,
     conditional_x_grid_n=2,
@@ -82,9 +105,8 @@ def projection_study() -> tuple[
   grid = GridConfig(
     families=["clayton"],
     tau_scenarios=["linear"],
-    transforms=["logit"],
-    methods=["criterion"],
-    normalize=[None, 2],
+    estimators=[_spec("native", Recovery.NATIVE_DISTRIBUTION)],
+    normalize=[None, 100],
     n=[20],
     n_rep=1,
     projection_grid_size=8,
@@ -109,7 +131,7 @@ def test_run_study_covers_conditional_axes(
     "rep",
     "seed",
     "transform",
-    "method",
+    "recovery",
     "normalize",
     "quantity",
     "x",
@@ -124,7 +146,10 @@ def test_run_study_covers_conditional_axes(
     diagnostic_df.columns
   )
   assert "tau_time" in runtime_df.columns
-  assert set(metric_df["method"].unique()) == {"criterion", "quantiles"}
+  assert set(metric_df["recovery"].unique()) == {
+    "native_distribution",
+    "quantile_inversion",
+  }
   assert set(metric_df["transform"].unique()) == {"logit", "identity"}
   assert set(metric_df["quantity"].unique()) == {
     "pdf",
@@ -143,7 +168,7 @@ def test_conditional_metrics_are_fixed_x_uv_summaries(
 ) -> None:
   metric_df = coverage_study[0]
   grouped = metric_df.groupby(
-    ["tau_scenario", "method", "transform", "quantity", "normalize"],
+    ["tau_scenario", "recovery", "transform", "quantity", "normalize"],
     dropna=False,
   )
   assert grouped.size().min() == 2
@@ -191,18 +216,18 @@ def test_aggregate_study_outputs_have_paper_tables(
   assert set(outputs["selection_summary"]["metric"].unique()) == {"KL"}
 
 
-def test_model_version_axis_labels_rows_and_aggregates(
+def test_model_id_axis_labels_rows_and_aggregates(
   model_version_study: tuple[
     pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float
   ],
 ) -> None:
   metric_df, _, _, runtime_df, _ = model_version_study
-  assert "model_version" in metric_df.columns
-  assert "model_version" in runtime_df.columns
-  assert set(metric_df["model_version"].unique()) == {"v2.5", "v3"}
+  assert "model_id" in metric_df.columns
+  assert "model_id" in runtime_df.columns
+  assert set(metric_df["model_id"].unique()) == {"v2.5", "v3"}
   mc_summary, runtime_summary = aggregate_results(metric_df, runtime_df)
-  assert "model_version" in mc_summary.columns
-  assert set(runtime_summary["model_version"].unique()) == {"v2.5", "v3"}
+  assert "model_id" in mc_summary.columns
+  assert set(runtime_summary["model_id"].unique()) == {"v2.5", "v3"}
 
 
 def test_normalize_axis_applies_only_to_pdf(
@@ -213,7 +238,7 @@ def test_normalize_axis_applies_only_to_pdf(
   metric_df = projection_study[0]
   pdf = metric_df[metric_df["quantity"] == "pdf"]
   non_pdf = metric_df[metric_df["quantity"] != "pdf"]
-  assert set(pdf["normalize"].unique()) == {"none", "2"}
+  assert set(pdf["normalize"].unique()) == {"none", "100"}
   assert set(non_pdf["normalize"].unique()) == {"none"}
 
 
@@ -226,7 +251,7 @@ def test_projection_summary_pairs_pdf_accuracy_and_margin_deltas(
   projection = aggregate_study_outputs(metric_df, diagnostic_df, runtime_df)[
     "projection_summary"
   ]
-  assert set(projection["projected_normalize"].unique()) == {"2"}
+  assert set(projection["projected_normalize"].unique()) == {"100"}
   assert {
     "KL_delta",
     "IAE_delta",
@@ -239,8 +264,7 @@ def test_tau_diagnostics_can_be_disabled() -> None:
   grid = GridConfig(
     families=["clayton"],
     tau_scenarios=["linear"],
-    transforms=["logit"],
-    methods=["criterion"],
+    estimators=[_spec("native", Recovery.NATIVE_DISTRIBUTION)],
     normalize=[None],
     n=[20],
     n_rep=1,

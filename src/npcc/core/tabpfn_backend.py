@@ -1,6 +1,4 @@
-"""
-tabpfn_criterion_distribution1d.py — univariate conditional predictive
-distribution via TabPFN's native distribution head.
+"""Private TabPFN predictor adapters and native-distribution recovery.
 
 Approach
 --------
@@ -19,9 +17,8 @@ returns a dictionary with two pieces:
   evaluate the corresponding piecewise-linear PDF / CDF / quantile
   function at arbitrary points ``z``.
 
-Compared to
-:class:`npcc.tabpfn_quantile_distribution1d.TabPFNQuantileDistribution1D`
-this avoids querying a quantile grid and inverting a numerical
+Compared with quantile inversion, native recovery avoids querying a quantile
+grid and inverting a numerical
 derivative for the PDF, so it is faster and typically more accurate,
 but it is specific to TabPFN's binned output.
 
@@ -56,12 +53,12 @@ and are materially faster than calling :py:meth:`pdf` /
 
 from __future__ import annotations
 
-from typing import Any, Literal, Protocol
+import importlib
+from typing import Any, Literal, Protocol, TypedDict, cast
 
 import numpy as np
 import torch
 
-from tabpfn.constants import ModelVersion
 
 from npcc.core._common import (
   TensorLike,
@@ -69,10 +66,44 @@ from npcc.core._common import (
   _normalize_inputs,
   _wrap_output,
 )
-from npcc.core.tabpfn_distribution1d import (
-  _DEFAULT_MODEL_VERSION,
-  TabPFNDistribution1D,
+from npcc.core.conditional_distribution import (
+  _FitRegressor,
+  _RegressorDistribution,
 )
+from npcc.core.errors import InvalidProviderOutputError, NotFittedError
+from npcc.core.quantile_inversion import _QuantileInversionDistribution
+
+_DEFAULT_MODEL_VERSION: object = "v3"
+
+
+class _RegressorFactory(Protocol):
+  def __call__(self, **kwargs: object) -> _FitRegressor: ...
+
+  def create_default_for_version(
+    self, version: object, **kwargs: object
+  ) -> _FitRegressor: ...
+
+
+TabPFNRegressor: _RegressorFactory | None = None
+
+
+def _tabpfn_regressor_factory() -> _RegressorFactory:
+  global TabPFNRegressor
+  if TabPFNRegressor is None:
+    module = importlib.import_module("tabpfn")
+    TabPFNRegressor = cast(
+      _RegressorFactory, getattr(module, "TabPFNRegressor")
+    )
+  return TabPFNRegressor
+
+
+def _make_tabpfn_model(
+  model_version: object | None, model_kwargs: dict[str, Any]
+) -> _FitRegressor:
+  factory = _tabpfn_regressor_factory()
+  if model_version is None:
+    return factory(**model_kwargs)
+  return factory.create_default_for_version(model_version, **model_kwargs)
 
 
 class _CriterionLike(Protocol):
@@ -85,6 +116,11 @@ class _CriterionLike(Protocol):
   def pdf(self, logits: torch.Tensor, z: torch.Tensor) -> torch.Tensor: ...
   def cdf(self, logits: torch.Tensor, z: torch.Tensor) -> torch.Tensor: ...
   def icdf(self, logits: torch.Tensor, left_prob: float) -> torch.Tensor: ...
+
+
+class _FullPrediction(TypedDict):
+  logits: object
+  criterion: _CriterionLike
 
 
 def _coerce_logits_tensor(
@@ -105,13 +141,19 @@ def _coerce_logits_tensor(
   return torch.as_tensor(safe, dtype=torch.float32, device=device)
 
 
-class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
+class _TabPFNQuantileDistribution(_QuantileInversionDistribution):
+  """TabPFN predictor adapter for provider-neutral quantile inversion."""
+
+  def _make_model(self) -> _FitRegressor:
+    return _make_tabpfn_model(self.model_version, self.model_kwargs)
+
+
+class _NativeTabPFNDistribution(_RegressorDistribution):
   """Univariate conditional predictive distribution via TabPFN's binned head.
 
   See the module-level docstring for the algorithm.  The ``fit`` /
   ``pdf`` / ``cdf`` / ``icdf`` API mirrors
-  :class:`TabPFNQuantileDistribution1D` so the two classes are drop-in
-  interchangeable inside :class:`PFNRBicop`.
+  the provider-neutral conditional-distribution protocol.
   """
 
   # ------------------------------------------------------------------
@@ -126,7 +168,7 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     device: str | torch.device | None = None,
     batch_size: int | None = None,
     model_kwargs: dict[str, Any] | None = None,
-    model_version: ModelVersion | None = _DEFAULT_MODEL_VERSION,
+    model_version: object | None = _DEFAULT_MODEL_VERSION,
   ) -> None:
     super().__init__(
       transform=transform,
@@ -137,6 +179,9 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
       model_version=model_version,
     )
 
+  def _make_model(self) -> _FitRegressor:
+    return _make_tabpfn_model(self.model_version, self.model_kwargs)
+
   def _predict_full(
     self, w_t: torch.Tensor
   ) -> tuple[torch.Tensor, _CriterionLike]:
@@ -146,11 +191,20 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     TabPFN's internal device, which we coerce onto ``self._device``.
     """
     if self.model_ is None:
-      raise RuntimeError("The model is not fitted.")
-    pred = self.model_.predict(w_t.detach().cpu(), output_type="full")
-    logits = pred["logits"]
-    criterion: _CriterionLike = pred["criterion"]
-    return _coerce_logits_tensor(logits, device=self._device), criterion
+      raise NotFittedError("The conditional distribution is not fitted.")
+    try:
+      pred = cast(
+        _FullPrediction,
+        self.model_.predict(w_t.detach().cpu(), output_type="full"),
+      )
+      logits = pred["logits"]
+      criterion: _CriterionLike = pred["criterion"]
+    except (KeyError, TypeError) as exc:
+      raise InvalidProviderOutputError(
+        "TabPFN native output must contain logits and criterion data."
+      ) from exc
+    logits_t = _coerce_logits_tensor(logits, device=self._device)
+    return logits_t, criterion
 
   def _criterion_pdf_z(
     self,
@@ -199,7 +253,7 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     inverse-Jacobian is applied at the end.
     """
     if self.model_ is None:
-      raise RuntimeError("The model is not fitted.")
+      raise NotFittedError("The conditional distribution is not fitted.")
     effective_batch_size = self._resolve_batch_size(batch_size)
 
     return_as_torch, (w_in, y_in) = _normalize_inputs(w, y, device=self._device)
@@ -237,7 +291,7 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     fast path for grid plots and copula visualisations.
     """
     if self.model_ is None:
-      raise RuntimeError("The model is not fitted.")
+      raise NotFittedError("The conditional distribution is not fitted.")
     effective_batch_size = self._resolve_batch_size(batch_size)
 
     return_as_torch, (w_in, y_in) = _normalize_inputs(
@@ -299,7 +353,7 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     overrides the instance default for this call.
     """
     if self.model_ is None:
-      raise RuntimeError("The model is not fitted.")
+      raise NotFittedError("The conditional distribution is not fitted.")
     effective_batch_size = self._resolve_batch_size(batch_size)
 
     return_as_torch, (w_in, y_in) = _normalize_inputs(w, y, device=self._device)
@@ -326,14 +380,14 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
 
     For each row ``i``, returns ``y`` such that
     ``F(y | w_i) = alphas_i``.  Used by the Rosenblatt simulation
-    recipe behind :py:meth:`PFNRBicop.tau`.
+    recipe behind :meth:`FoundationModelBicop.tau`.
 
     The criterion's ``icdf`` is scalar-α, so we loop over rows after a
     single batched ``predict(output_type="full")`` forward pass — the
     forward pass dominates the cost.
     """
     if self.model_ is None:
-      raise RuntimeError("The model is not fitted.")
+      raise NotFittedError("The conditional distribution is not fitted.")
 
     return_as_torch, (w_in, a_in) = _normalize_inputs(
       w, alphas, device=self._device
@@ -367,7 +421,7 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     integration of the joint copula CDF.
     """
     if self.model_ is None:
-      raise RuntimeError("The model is not fitted.")
+      raise NotFittedError("The conditional distribution is not fitted.")
 
     return_as_torch, (w_in, y_in) = _normalize_inputs(
       w, y_grid, device=self._device

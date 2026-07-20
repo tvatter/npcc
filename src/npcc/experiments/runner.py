@@ -14,15 +14,13 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import perf_counter
-from typing import Literal, cast
 
 import numpy as np
 import pandas as pd
 import torch
+from typing import Literal, cast
 
-from tabpfn.constants import ModelVersion
-
-from npcc.core.pfnr_bicop import PFNRBicop
+from npcc.core.foundation_model_bicop import FoundationModelBicop
 from npcc.experiments import metrics, scenarios
 from npcc.experiments.config import Cell, EstimatorSpec, GridConfig, RunConfig
 from npcc.experiments.scenarios import EvalGrid
@@ -68,9 +66,12 @@ def _base_row(cell: Cell, est: EstimatorSpec, seed: int) -> dict[str, object]:
     "n": cell.n,
     "rep": cell.rep,
     "seed": seed,
-    "transform": est.transform,
-    "method": est.method,
-    "model_version": est.model_version,
+    "estimator_id": est.estimator_id,
+    "label": est.label,
+    "provider": est.provider,
+    "transform": est.transform.value,
+    "recovery": est.recovery.value,
+    "model_id": est.model_id,
   }
 
 
@@ -225,7 +226,7 @@ def _diagnostic_rows(
   cell: Cell,
   est: EstimatorSpec,
   seed: int,
-  model: PFNRBicop,
+  model: FoundationModelBicop,
   pdf_by_norm: dict[str, np.ndarray],
   grid: EvalGrid,
   *,
@@ -346,12 +347,16 @@ def summarize_one_cell(
 
   for est in estimator_specs:
     t0 = perf_counter()
-    model = PFNRBicop(
-      method=cast(Literal["criterion", "quantiles"], est.method),
-      transform=cast(Literal["identity", "logit", "probit"], est.transform),
+    estimator_seed = seed ^ int(est.estimator_id[:8], 16)
+    model = FoundationModelBicop(
+      provider=cast(Literal["tabpfn", "tabicl"], est.provider),
+      recovery=est.recovery,
+      provider_config=est.provider_config,
+      quantile_inversion=est.quantile_inversion,
+      transform=est.transform,
       device=device,
       projection_grid_size=projection_grid_size,
-      model_version=ModelVersion(est.model_version),
+      random_state=estimator_seed,
     )
     model.fit(u, v, x)
     fit_time = perf_counter() - t0
@@ -513,9 +518,12 @@ def summarize_one_cell(
         "n": cell.n,
         "rep": cell.rep,
         "seed": seed,
-        "transform": est.transform,
-        "method": est.method,
-        "model_version": est.model_version,
+        "estimator_id": est.estimator_id,
+        "label": est.label,
+        "provider": est.provider,
+        "transform": est.transform.value,
+        "recovery": est.recovery.value,
+        "model_id": model.provider.model_id,
         "fit_time": fit_time,
         "pdf_time": pdf_time,
         "cdf_time": timings["cdf"],
@@ -594,9 +602,12 @@ def run_study(
   sort_axes = [
     "family",
     "tau_scenario",
-    "method",
+    "estimator_id",
+    "label",
+    "provider",
+    "recovery",
     "transform",
-    "model_version",
+    "model_id",
     "n",
     "rep",
   ]
@@ -634,9 +645,12 @@ _ESTIMATOR_AXES: tuple[str, ...] = (
   "family",
   "tau_scenario",
   "n",
+  "estimator_id",
+  "label",
+  "provider",
   "transform",
-  "method",
-  "model_version",
+  "recovery",
+  "model_id",
 )
 
 
@@ -682,7 +696,7 @@ def _summary_over_x(metric_df: pd.DataFrame) -> pd.DataFrame:
 
 def _runtime_summary(runtime_df: pd.DataFrame) -> pd.DataFrame:
   rt_group = list(_ESTIMATOR_AXES)
-  return runtime_df.groupby(rt_group, as_index=False).agg(
+  return runtime_df.groupby(rt_group, as_index=False, dropna=False).agg(
     fit_time_mean=("fit_time", "mean"),
     fit_time_std=("fit_time", "std"),
     pdf_time_mean=("pdf_time", "mean"),

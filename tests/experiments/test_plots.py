@@ -12,7 +12,7 @@ from npcc.experiments.plots import metric_boxplot_by_n
 def test_metric_boxplot_by_n_groups_repetitions_by_model_and_n() -> None:
   rows = []
   for n in (100, 200):
-    for method in ("criterion", "quantiles"):
+    for recovery in ("native_distribution", "quantile_inversion"):
       for rep in (0, 1, 2):
         for x in (0.25, 0.75):
           rows.append(
@@ -21,8 +21,10 @@ def test_metric_boxplot_by_n_groups_repetitions_by_model_and_n() -> None:
               "tau_scenario": "linear",
               "quantity": "pdf",
               "n": n,
-              "method": method,
-              "model_version": "v3",
+              "label": recovery,
+              "provider": "tabpfn",
+              "recovery": recovery,
+              "model_id": "v3",
               "transform": "logit",
               "normalize": "none",
               "rep": rep,
@@ -51,8 +53,10 @@ def test_metric_boxplot_by_n_groups_repetitions_by_model_and_n() -> None:
   )
   assert legend_anchor.x0 == pytest.approx(1.02)
   assert [text.get_text() for text in legend.get_texts()] == [
-    "method=criterion, model_version=v3, transform=logit, normalize=none",
-    "method=quantiles, model_version=v3, transform=logit, normalize=none",
+    "label=native_distribution, provider=tabpfn, "
+    "recovery=native_distribution, model_id=v3, transform=logit, normalize=none",
+    "label=quantile_inversion, provider=tabpfn, "
+    "recovery=quantile_inversion, model_id=v3, transform=logit, normalize=none",
   ]
 
 
@@ -63,8 +67,10 @@ def test_metric_boxplot_by_n_ignores_missing_metric_values() -> None:
       "tau_scenario": ["constant", "constant"],
       "quantity": ["cdf", "cdf"],
       "n": [100, 100],
-      "method": ["criterion", "criterion"],
-      "model_version": ["v3", "v3"],
+      "label": ["native", "native"],
+      "provider": ["tabpfn", "tabpfn"],
+      "recovery": ["native_distribution", "native_distribution"],
+      "model_id": ["v3", "v3"],
       "transform": ["logit", "logit"],
       "normalize": ["none", "none"],
       "rep": [0, 1],
@@ -92,14 +98,16 @@ def test_metric_boxplot_by_n_filters_each_model_attribute() -> None:
         "tau_scenario": "constant",
         "quantity": "pdf",
         "n": 100,
-        "method": method,
-        "model_version": version,
+        "label": f"{recovery}-{version}",
+        "provider": "tabpfn",
+        "recovery": recovery,
+        "model_id": version,
         "transform": transform,
         "normalize": normalize,
         "rep": 0,
         "ISE": 0.1,
       }
-      for method in ("criterion", "quantiles")
+      for recovery in ("native_distribution", "quantile_inversion")
       for version in ("v2.5", "v3")
       for transform in ("identity", "logit")
       for normalize in ("none", "5")
@@ -112,8 +120,8 @@ def test_metric_boxplot_by_n_filters_each_model_attribute() -> None:
     tau_scenario="constant",
     quantity="pdf",
     metric="ISE",
-    method="criterion",
-    model_version=["v2.5", "v3"],
+    recovery="native_distribution",
+    model_id=["v2.5", "v3"],
     transform=("logit",),
     normalize="5",
   )
@@ -122,6 +130,8 @@ def test_metric_boxplot_by_n_filters_each_model_attribute() -> None:
   legend = ax.get_legend()
   assert legend is not None
   assert [text.get_text() for text in legend.get_texts()] == [
-    "method=criterion, model_version=v2.5, transform=logit, normalize=5",
-    "method=criterion, model_version=v3, transform=logit, normalize=5",
+    "label=native_distribution-v2.5, provider=tabpfn, "
+    "recovery=native_distribution, model_id=v2.5, transform=logit, normalize=5",
+    "label=native_distribution-v3, provider=tabpfn, "
+    "recovery=native_distribution, model_id=v3, transform=logit, normalize=5",
   ]

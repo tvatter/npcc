@@ -1,10 +1,8 @@
-"""
-tabpfn_quantile_distribution1d.py — univariate conditional predictive
-distribution via numerical inversion of TabPFN conditional quantiles.
+"""Provider-neutral distribution recovery by numerical quantile inversion.
 
 Approach
 --------
-Given a TabPFN regressor trained to predict ``Y`` given features ``W``,
+Given a quantile regressor trained to predict ``Y`` given features ``W``,
 ask the regressor for the conditional quantile function on a fine grid
 of cumulative probabilities
 
@@ -35,12 +33,8 @@ table:
   at the requested ``alpha``.  Then map back to the y-scale via the
   inverse support transform.
 
-This recovery is purely numerical and works with any quantile
-regressor; it does not require access to TabPFN's internal distribution
-head.  The counterpart in
-:mod:`npcc.tabpfn_criterion_distribution1d` calls TabPFN's native
-``criterion.{pdf,cdf,icdf}`` directly, which is faster and avoids the
-slope inversion, but is specific to TabPFN's "full" output.
+This recovery is purely numerical and works with any quantile regressor; it
+does not require access to a provider's internal predictive distribution.
 
 Support transforms
 ------------------
@@ -65,11 +59,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, Self, cast
 
 import numpy as np
 import torch
-from tabpfn.constants import ModelVersion
 
 from npcc.core._common import (
   TensorLike,
@@ -80,16 +73,19 @@ from npcc.core._common import (
   _torch_interp_batched_xp,
   _wrap_output,
 )
-from npcc.core.tabpfn_distribution1d import (
-  _DEFAULT_MODEL_VERSION,
-  TabPFNDistribution1D,
+from npcc.core.conditional_distribution import (
+  _FitRegressor,
+  _RegressorDistribution,
+  ConditionalDistribution,
+  SupportTransform,
 )
+from npcc.core.errors import InvalidProviderOutputError, NotFittedError
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class QuantileGridConfig:
+@dataclass(frozen=True)
+class QuantileInversionConfig:
   """Grid configuration for quantile-based conditional density.
 
   Attributes
@@ -114,7 +110,14 @@ class QuantileGridConfig:
   alpha_min: float = 1e-3
   alpha_max: float = 1.0 - 1e-3
   min_qprime: float = 1e-6
-  eps: float = 1e-6
+
+  def __post_init__(self) -> None:
+    if not (0.0 < self.alpha_min < self.alpha_max < 1.0):
+      raise ValueError("Require 0 < alpha_min < alpha_max < 1.")
+    if self.n_quantiles < 5:
+      raise ValueError("n_quantiles must be at least 5.")
+    if not np.isfinite(self.min_qprime) or self.min_qprime <= 0.0:
+      raise ValueError("min_qprime must be finite and positive.")
 
   def alphas(self) -> np.ndarray:
     """Return the validated ``alpha`` grid as a NumPy array.
@@ -122,20 +125,15 @@ class QuantileGridConfig:
     NumPy here is convenient for forwarding to TabPFN's
     ``predict(quantiles=...)`` API, which expects a Python list.
     """
-    if not (0.0 < self.alpha_min < self.alpha_max < 1.0):
-      raise ValueError("Require 0 < alpha_min < alpha_max < 1.")
-    if self.n_quantiles < 5:
-      raise ValueError("n_quantiles must be at least 5.")
     return np.linspace(self.alpha_min, self.alpha_max, self.n_quantiles)
 
 
-class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
+class _QuantileInversionDistribution(_RegressorDistribution):
   """Univariate conditional predictive distribution via TabPFN quantiles.
 
   See the module-level docstring for the algorithm.  The ``fit`` /
   ``pdf`` / ``cdf`` / ``icdf`` API mirrors
-  :class:`TabPFNCriterionDistribution1D` so the two classes are drop-in
-  interchangeable inside :class:`PFNRBicop`.
+  provider adapters through the shared conditional-distribution protocol.
 
   Parameters
   ----------
@@ -143,8 +141,7 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
       Forwarded to the base class.
   config
       Quantile-grid configuration.  Defaults to
-      :class:`QuantileGridConfig`.  Its ``eps`` controls the boundary
-      clipping used by the support transforms.
+      :class:`QuantileInversionConfig` controlling the probability grid.
   device
       Forwarded to the base class.
   model_kwargs
@@ -152,22 +149,23 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
       :py:meth:`TabPFNRegressor.create_default_for_version`.
   """
 
-  config: QuantileGridConfig
+  config: QuantileInversionConfig
 
   def __init__(
     self,
     *,
     transform: Literal["identity", "logit", "probit"] = "logit",
-    config: QuantileGridConfig | None = None,
+    config: QuantileInversionConfig | None = None,
+    support_epsilon: float = 1e-6,
     device: str | torch.device | None = None,
     batch_size: int | None = None,
     model_kwargs: dict[str, Any] | None = None,
-    model_version: ModelVersion | None = _DEFAULT_MODEL_VERSION,
+    model_version: object | None = None,
   ) -> None:
-    cfg = config or QuantileGridConfig()
+    cfg = config or QuantileInversionConfig()
     super().__init__(
       transform=transform,
-      eps=cfg.eps,
+      eps=support_epsilon,
       device=device,
       batch_size=batch_size,
       model_kwargs=model_kwargs,
@@ -191,7 +189,7 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
     orientation.
     """
     if self.model_ is None:
-      raise RuntimeError("The model is not fitted.")
+      raise NotFittedError("The conditional distribution is not fitted.")
     effective_batch_size = self._resolve_batch_size(batch_size)
 
     alphas_np = self.config.alphas()
@@ -222,10 +220,14 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
         )
         q = q.T
       else:
-        raise RuntimeError(
+        raise InvalidProviderOutputError(
           "Unexpected quantile output shape. "
           f"Got {q.shape}, expected {(n_chunk, n_alphas)} "
           f"or {(n_alphas, n_chunk)}."
+        )
+      if not np.isfinite(q).all():
+        raise InvalidProviderOutputError(
+          "Provider quantile predictions contain non-finite values."
         )
       parts.append(torch.as_tensor(q, dtype=torch.float64, device=self._device))
 
@@ -290,8 +292,8 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
     The quantile table is predicted **once per ``w`` row** (chunked by
     ``batch_size``); the same table is then evaluated against every
     ``y`` value by interpolation.  This mirrors
-    :py:meth:`TabPFNCriterionDistribution1D.pdf_grid` and is the fast
-    path for grid-based Sinkhorn projection — it avoids the explicit
+    optimized provider grid paths and is the fast path for grid-based
+    Sinkhorn projection—it avoids the explicit
     ``n_w * n_y`` tile that would predict one table per grid cell.
 
     Numerically identical to calling :py:meth:`pdf` on the explicit
@@ -299,7 +301,7 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
     Jacobian match exactly.
     """
     if self.model_ is None:
-      raise RuntimeError("The model is not fitted.")
+      raise NotFittedError("The conditional distribution is not fitted.")
     effective_batch_size = self._resolve_batch_size(batch_size)
 
     return_as_torch, (w_in, y_in) = _normalize_inputs(
@@ -394,7 +396,7 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
     For each row ``i``, returns ``y`` such that
     ``F(y | w_i) = alphas_i``.  Implemented as linear interpolation in
     the predicted quantile table: ``Q(alphas_i | w_i)``.  Used by the
-    Rosenblatt simulation recipe behind :py:meth:`PFNRBicop.tau`.
+    Rosenblatt simulation recipe behind :meth:`FoundationModelBicop.tau`.
     ``batch_size`` chunks the underlying quantile forward pass to bound
     GPU memory.
     """
@@ -416,3 +418,96 @@ class TabPFNQuantileDistribution1D(TabPFNDistribution1D):
     return _wrap_output(
       self._inverse_transform(z_out), return_as_torch=return_as_torch
     )
+
+
+class QuantilePredictor(Protocol):
+  """Torch-only predictor interface reusable by custom providers."""
+
+  def fit(self, features: torch.Tensor, target: torch.Tensor) -> Self: ...
+
+  def predict_quantiles(
+    self, features: torch.Tensor, probabilities: torch.Tensor
+  ) -> torch.Tensor: ...
+
+
+class _PredictorAdapter:
+  def __init__(self, predictor: QuantilePredictor) -> None:
+    self._predictor = predictor
+
+  def fit(self, x: object, y: object) -> object:
+    self._predictor.fit(
+      torch.as_tensor(x, dtype=torch.float64),
+      torch.as_tensor(y, dtype=torch.float64),
+    )
+    return self
+
+  def predict(
+    self,
+    x: object,
+    *,
+    output_type: str = "mean",
+    quantiles: list[float] | None = None,
+  ) -> object:
+    if output_type != "quantiles" or quantiles is None:
+      raise InvalidProviderOutputError(
+        "Quantile predictor received a non-quantile prediction request."
+      )
+    result = self._predictor.predict_quantiles(
+      torch.as_tensor(x, dtype=torch.float64),
+      torch.tensor(quantiles, dtype=torch.float64),
+    )
+    if not isinstance(result, torch.Tensor):
+      raise InvalidProviderOutputError(
+        "QuantilePredictor.predict_quantiles must return a torch.Tensor."
+      )
+    return result.detach().cpu().numpy()
+
+
+class _CustomQuantileInversionDistribution(_QuantileInversionDistribution):
+  def __init__(
+    self,
+    predictor: QuantilePredictor,
+    *,
+    config: QuantileInversionConfig | None,
+    transform: Literal["identity", "logit", "probit"],
+    support_epsilon: float,
+    device: str | torch.device | None,
+    batch_size: int,
+  ) -> None:
+    self._predictor_adapter = _PredictorAdapter(predictor)
+    super().__init__(
+      config=config,
+      transform=transform,
+      support_epsilon=support_epsilon,
+      device=device,
+      batch_size=batch_size,
+      model_version=None,
+    )
+
+  def _make_model(self) -> _FitRegressor:
+    return cast(_FitRegressor, self._predictor_adapter)
+
+
+def create_quantile_inversion_distribution(
+  predictor: QuantilePredictor,
+  *,
+  config: QuantileInversionConfig | None = None,
+  transform: SupportTransform = SupportTransform.LOGIT,
+  support_epsilon: float = 1e-6,
+  device: str | torch.device | None = None,
+  inference_chunk_size: int = 400,
+) -> ConditionalDistribution:
+  """Wrap a quantile predictor as a complete conditional distribution."""
+  if support_epsilon <= 0.0 or support_epsilon >= 0.5:
+    raise ValueError("support_epsilon must lie in (0, 0.5).")
+  return cast(
+    ConditionalDistribution,
+    _CustomQuantileInversionDistribution(
+      predictor,
+      config=config,
+      transform=transform.value,
+      support_epsilon=support_epsilon,
+      device=device,
+      batch_size=inference_chunk_size,
+    ),
+  )

@@ -27,9 +27,8 @@ import torch
 
 pytest.importorskip("tabpfn")
 
-# The shared ``fit`` lives on the base class, so we only need to patch
-# the ``TabPFNRegressor`` symbol there.
-_TABPFN_REGRESSOR_TARGETS = ("npcc.core.tabpfn_distribution1d.TabPFNRegressor",)
+# Patch the lazy TabPFN factory at its provider boundary.
+_TABPFN_REGRESSOR_TARGETS = ("npcc.core.tabpfn_backend.TabPFNRegressor",)
 
 
 class _UniformCriterion:

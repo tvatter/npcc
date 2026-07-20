@@ -13,11 +13,16 @@ _TOML = """
 [grid]
 families = ["clayton"]
 tau_scenarios = ["linear"]
-transforms = ["logit"]
-methods = ["criterion"]
-normalize = ["none", 2]
+normalize = ["none", 100]
 n = [30]
 n_rep = 1
+
+[[grid.estimators]]
+label = "tabpfn-v3-native"
+provider = "tabpfn"
+recovery = "native_distribution"
+transform = "logit"
+provider_config = { model_version = "v3" }
 """
 
 

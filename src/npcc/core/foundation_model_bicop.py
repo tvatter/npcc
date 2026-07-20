@@ -1,5 +1,4 @@
-"""
-pfnr_bicop.py — TabPFN-Rosenblatt conditional bivariate copula.
+"""Provider-neutral foundation-model conditional bivariate copula.
 
 Approach
 --------
@@ -9,9 +8,8 @@ uniform-margin property of the copula scale ``U``::
 
     c(u, v | x) = f_{V | U, X}(v | u, x).
 
-So estimating a *conditional bivariate copula density* reduces to
-estimating a *univariate conditional density*, which is exactly what
-:class:`TabPFNCriterionDistribution1D` and :class:`TabPFNQuantileDistribution1D` provide.
+Estimating the copula therefore reduces to fitting a provider-backed
+univariate conditional distribution in each direction.
 The features fed to the inner regressor are::
 
     W = [u, x]    (when predicting V | U, X)
@@ -32,28 +30,23 @@ estimator always fits both directions and averages::
 
 This does not impose exact uniform copula margins. If exact margins are
 required, enable the optional Sinkhorn
-projection via ``sinkhorn_iters``. For ``method="criterion"``, the
-projection grid is a uniform grid of ``projection_grid_size`` points on
-the copula scale ``(0, 1)``; for ``method="quantiles"``, it is given by
-the predefined quantile alpha grid. For :py:meth:`pdf_grid`, the
+projection via ``sinkhorn_iters``. Native recovery uses a uniform grid of
+``projection_grid_size`` points; quantile inversion uses its probability
+grid. For :py:meth:`pdf_grid`, the
 projection is applied directly on the evaluated grid; for pointwise
 :py:meth:`pdf`, the correction is computed on the internal projection
 grid and interpolated back to the queried points.
 
 
-Density-recovery method
------------------------
-``method="criterion"`` (default) uses :class:`TabPFNCriterionDistribution1D`, which
-evaluates the conditional density directly via TabPFN's binned
-distribution head.  ``method="quantiles"`` uses
-:class:`TabPFNQuantileDistribution1D`, which queries a conditional quantile
-grid and inverts the slope.  The two methods are interchangeable and
-share the same outer ``fit`` / ``density`` API, but only the criterion
-method exposes the ``pdf_grid`` Cartesian-product fast path.
+Recovery
+--------
+TabPFN supports its native predictive distribution and numerical quantile
+inversion. TabICL supports quantile inversion only. Selection is explicit via
+:class:`~npcc.core.providers.Recovery`.
 
 Plotting
 --------
-:class:`PFNRBicop` doubles as a duck-typed bivariate copula via
+:class:`FoundationModelBicop` doubles as a duck-typed bivariate copula via
 :py:meth:`as_bicop`, which returns an object exposing
 ``var_types = ["c", "c"]`` and ``pdf(uv)`` — exactly what
 ``pyvinecopulib`` plotting helpers expect.  The convenience
@@ -73,12 +66,10 @@ pulled from HuggingFace on first use into the platform cache directory.
 
 from __future__ import annotations
 
-from typing import Any, Literal, Self
+from typing import Literal, Self
 
 import numpy as np
 import torch
-
-from tabpfn.constants import ModelVersion
 
 from npcc.core._common import (
   TensorLike,
@@ -88,18 +79,34 @@ from npcc.core._common import (
   _resolve_device,
   _to_tensor,
   _torch_interp,
-  _wrap_output,
 )
-from npcc.core.tabpfn_criterion_distribution1d import (
-  TabPFNCriterionDistribution1D,
+from npcc.core.conditional_distribution import (
+  ConditionalDistribution,
+  SupportTransform,
+  SupportsCDFGrid,
+  SupportsPDFGrid,
 )
-from npcc.core.tabpfn_distribution1d import _DEFAULT_MODEL_VERSION
-from npcc.core.tabpfn_quantile_distribution1d import (
-  QuantileGridConfig,
-  TabPFNQuantileDistribution1D,
+from npcc.core.errors import (
+  NotFittedError,
+  ProviderConfigurationError,
+  SinkhornConvergenceError,
+  UnsupportedRecoveryError,
 )
+from npcc.core.providers import (
+  FoundationModelProvider,
+  Recovery,
+  TabICLConfig,
+  TabPFNConfig,
+  resolve_provider,
+)
+from npcc.core.quantile_inversion import QuantileInversionConfig
 
-_Distribution1D = TabPFNQuantileDistribution1D | TabPFNCriterionDistribution1D
+
+def _public_output(out: torch.Tensor, *inputs: TensorLike | None) -> TensorLike:
+  query_tensors = [value for value in inputs if isinstance(value, torch.Tensor)]
+  if not query_tensors:
+    return out.detach().cpu().numpy()
+  return out.to(device=query_tensors[0].device, dtype=torch.float64)
 
 
 def _sinkhorn_project(
@@ -172,20 +179,22 @@ def _sinkhorn_project(
   return r, s
 
 
-class PFNRBicop:
-  """TabPFN-based Rosenblatt conditional bivariate copula estimator.
+class FoundationModelBicop:
+  """Foundation-model Rosenblatt conditional bivariate copula estimator.
 
   Parameters
   ----------
-  method
-      ``"criterion"`` (default) → :class:`TabPFNCriterionDistribution1D`
-      (direct PDF via TabPFN's binned head).  ``"quantiles"`` →
-      :class:`TabPFNQuantileDistribution1D` (numerical inversion of
-      the conditional quantile slope).
-  quantile_config
-      :class:`QuantileGridConfig` instance.  Only its ``eps`` field is
-      used by the criterion method (for clipping).  The quantile
-      method additionally uses the alpha-grid fields.
+  provider
+      Built-in provider name (``"tabpfn"`` or ``"tabicl"``) or a custom
+      :class:`FoundationModelProvider`.
+  recovery
+      Explicit distribution-recovery strategy.
+  provider_config
+      Typed configuration matching the selected built-in provider.
+  quantile_inversion
+      Numerical inversion settings, valid only for quantile recovery.
+  support_epsilon
+      Provider-neutral clipping distance from the open support boundary.
   transform
       Support transform used by the inner TabPFN distribution models.
       ``"logit"`` (default) maps copula values in ``(0, 1)`` to
@@ -196,14 +205,10 @@ class PFNRBicop:
       (default) auto-selects ``cuda`` if available, else ``cpu``.
       Forwarded into the inner distributions and into TabPFN via
       ``model_kwargs["device"]``.
-  batch_size
-      Default chunk size used by criterion-based inner ``pdf`` / ``cdf``
+  inference_chunk_size
+      Default row chunk size used by inner ``pdf`` / ``cdf``
       calls.  If ``None`` (default), uses 400 on CPU and 2000 on CUDA.
       A positive value overrides this device-based default.
-  model_kwargs
-      Forwarded into the inner ``TabPFNRegressor`` (via
-      :py:meth:`TabPFNRegressor.create_default_for_version`).  Useful
-      for ``n_estimators=...``, etc.
   sinkhorn_iters
       Default number of Sinkhorn / iterative-proportional-fitting
       iterations used to project the estimated density onto the space of
@@ -214,13 +219,11 @@ class PFNRBicop:
 
       The projection is carried out on a 2-D grid derived from the fitted
       inner univariate conditional density models. For
-      ``method="criterion"``, the grid of size ``projection_grid_size``
-      per axis is used. For ``method="quantiles"``, the projection grid is
-      given by the predefined quantile alpha grid.
+      Native recovery uses ``projection_grid_size`` points per axis;
+      quantile recovery uses its configured probability grid.
   projection_grid_size
       Number of points per axis in the uniform copula-scale grid used for
-      the optional Sinkhorn projection in ``method="criterion"``; the
-      default is 101.
+      the optional Sinkhorn projection under native recovery; default 101.
 
   Notes
   -----
@@ -234,71 +237,96 @@ class PFNRBicop:
   def __init__(
     self,
     *,
-    method: Literal["criterion", "quantiles"] = "criterion",
-    quantile_config: QuantileGridConfig | None = None,
-    transform: Literal["identity", "logit", "probit"] = "logit",
+    provider: Literal["tabpfn", "tabicl"] | FoundationModelProvider,
+    recovery: Recovery,
+    provider_config: TabPFNConfig | TabICLConfig | None = None,
+    quantile_inversion: QuantileInversionConfig | None = None,
+    transform: SupportTransform = SupportTransform.LOGIT,
+    support_epsilon: float = 1e-6,
     device: str | torch.device | None = None,
-    batch_size: int | None = None,
-    model_kwargs: dict[str, Any] | None = None,
-    model_version: ModelVersion | None = _DEFAULT_MODEL_VERSION,
+    inference_chunk_size: int | None = None,
     sinkhorn_iters: int | None = None,
+    sinkhorn_tolerance: float = 1e-6,
     projection_grid_size: int = 101,
+    random_state: int = 317,
   ) -> None:
     if sinkhorn_iters is not None and sinkhorn_iters <= 0:
       raise ValueError("sinkhorn_iters must be None or a positive integer.")
 
-    self.method = method
-    self.quantile_config = quantile_config or QuantileGridConfig()
-    self.transform = transform
-    self._device = _resolve_device(device)
-    if batch_size is None:
-      self.batch_size = 2000 if self._device.type == "cuda" else 400
+    if sinkhorn_tolerance <= 0.0:
+      raise ValueError("sinkhorn_tolerance must be positive.")
+    if not 0.0 < support_epsilon < 0.5:
+      raise ValueError("support_epsilon must lie in (0, 0.5).")
+    self.provider = resolve_provider(provider, provider_config)
+    self.recovery = Recovery(recovery)
+    if self.recovery not in self.provider.supported_recoveries:
+      raise UnsupportedRecoveryError(
+        f"Provider {self.provider.name!r} does not support recovery "
+        f"{self.recovery.value!r}. Supported recoveries: "
+        f"{sorted(item.value for item in self.provider.supported_recoveries)}."
+      )
+    if self.recovery is Recovery.NATIVE_DISTRIBUTION:
+      if quantile_inversion is not None:
+        raise ProviderConfigurationError(
+          "quantile_inversion is only valid for quantile recovery."
+        )
+      self.quantile_inversion = None
     else:
-      if batch_size <= 0:
-        raise ValueError("batch_size must be positive.")
-      self.batch_size = batch_size
-    self.model_kwargs = dict(model_kwargs or {})
-    self.model_version = model_version
+      self.quantile_inversion = quantile_inversion or QuantileInversionConfig()
+    self.transform = SupportTransform(transform)
+    self.support_epsilon = support_epsilon
+    self._device = _resolve_device(device)
+    if inference_chunk_size is None:
+      self.inference_chunk_size = 2000 if self._device.type == "cuda" else 400
+    else:
+      if inference_chunk_size <= 0:
+        raise ValueError("inference_chunk_size must be positive.")
+      self.inference_chunk_size = inference_chunk_size
     self.sinkhorn_iters = sinkhorn_iters
+    self.sinkhorn_tolerance = sinkhorn_tolerance
     if projection_grid_size < 2:
       raise ValueError("projections_grid_size must be at least 2.")
     self.projection_grid_size = projection_grid_size
+    self.random_state = random_state
 
-    self.v_given_ux_: _Distribution1D = self._make_distribution()
-    self.u_given_vx_: _Distribution1D = self._make_distribution()
+    self._v_given_ux: ConditionalDistribution | None = None
+    self._u_given_vx: ConditionalDistribution | None = None
 
     # Grid borders (cached after fit)
     self._v_grid_borders_: torch.Tensor | None = None
     self._u_grid_borders_: torch.Tensor | None = None
 
-  def _make_distribution(self) -> _Distribution1D:
-    if self.method == "quantiles":
-      return TabPFNQuantileDistribution1D(
-        transform=self.transform,
-        config=self.quantile_config,
-        device=self._device,
-        batch_size=self.batch_size,
-        model_kwargs=self.model_kwargs,
-        model_version=self.model_version,
-      )
-    return TabPFNCriterionDistribution1D(
+  @property
+  def is_fitted(self) -> bool:
+    """Whether both directional distributions were fitted successfully."""
+    return self._v_given_ux is not None and self._u_given_vx is not None
+
+  def _make_distribution(self, random_state: int) -> ConditionalDistribution:
+    return self.provider.create_distribution(
+      recovery=self.recovery,
       transform=self.transform,
-      eps=self.quantile_config.eps,
+      quantile_inversion=self.quantile_inversion,
+      support_epsilon=self.support_epsilon,
       device=self._device,
-      batch_size=self.batch_size,
-      model_kwargs=self.model_kwargs,
-      model_version=self.model_version,
+      inference_chunk_size=self.inference_chunk_size,
+      random_state=random_state,
     )
+
+  def _require_fitted(
+    self,
+  ) -> tuple[ConditionalDistribution, ConditionalDistribution]:
+    if self._v_given_ux is None or self._u_given_vx is None:
+      raise NotFittedError("FoundationModelBicop is not fitted.")
+    return self._v_given_ux, self._u_given_vx
 
   def _get_grid_borders(self) -> None:
     """Cache the 1-D projection grids used for Sinkhorn projection.
 
-    For ``method="criterion"``, the Sinkhorn correction uses a separate
-    uniform projection grid on the copula scale.
-    For ``method="quantiles"``, use the alpha grid.
+    Native recovery uses a uniform projection grid on the copula scale.
+    Quantile inversion uses its probability grid.
     """
-    if self.method == "criterion":
-      eps = self.quantile_config.eps
+    if self.recovery is Recovery.NATIVE_DISTRIBUTION:
+      eps = self.support_epsilon
       borders = torch.linspace(
         eps,
         1 - eps,
@@ -311,8 +339,9 @@ class PFNRBicop:
       self._u_grid_borders_ = borders
       return
 
+    assert self.quantile_inversion is not None
     alphas = torch.as_tensor(
-      self.quantile_config.alphas(),
+      self.quantile_inversion.alphas(),
       dtype=torch.float64,
       device=self._device,
     )
@@ -320,7 +349,7 @@ class PFNRBicop:
     self._u_grid_borders_ = alphas
 
   def _resolve_batch_size(self, batch_size: int | None) -> int:
-    effective = self.batch_size if batch_size is None else batch_size
+    effective = self.inference_chunk_size if batch_size is None else batch_size
     if effective <= 0:
       raise ValueError("batch_size must be positive.")
     return effective
@@ -346,7 +375,14 @@ class PFNRBicop:
   def _prepare_joint_inputs(
     self, u: TensorLike, v: TensorLike, x: TensorLike | None
   ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
+    kinds = {
+      isinstance(value, torch.Tensor)
+      for value in (u, v, x)
+      if value is not None
+    }
+    if len(kinds) > 1:
+      raise TypeError("Do not mix NumPy arrays and torch tensors.")
+    u_t, v_t = _check_uv(u, v, self.support_epsilon, device=self._device)
     x_t = (
       self._default_x(u_t.shape[0])
       if x is None
@@ -361,6 +397,13 @@ class PFNRBicop:
   def _prepare_grid_inputs(
     self, u_grid: TensorLike, v_grid: TensorLike, x_row: TensorLike | None
   ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    kinds = {
+      isinstance(value, torch.Tensor)
+      for value in (u_grid, v_grid, x_row)
+      if value is not None
+    }
+    if len(kinds) > 1:
+      raise TypeError("Do not mix NumPy arrays and torch tensors.")
     _, (u_in, v_in, x_in) = _normalize_inputs(
       u_grid, v_grid, x_row, device=self._device
     )
@@ -375,7 +418,7 @@ class PFNRBicop:
     ):
       raise ValueError("u_grid and v_grid must lie strictly inside (0, 1).")
 
-    eps = self.quantile_config.eps
+    eps = self.support_epsilon
     u_t = torch.clamp(u_t, eps, 1.0 - eps)
     v_t = torch.clamp(v_t, eps, 1.0 - eps)
 
@@ -427,14 +470,17 @@ class PFNRBicop:
     -----
     When ``self.sinkhorn_iters`` is not ``None``, the 1-D grids used for the
     optional Sinkhorn projection are initialized and cached during fit. For
-    ``method="criterion"`` they are a uniform grid of ``projection_grid_size``
-    points on the copula scale ``(0, 1)``; for ``method="quantiles"`` they are
-    the configured quantile alpha grid.
+    Native recovery uses a uniform grid of ``projection_grid_size`` points;
+    quantile inversion uses the configured probability grid.
     """
     u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
-
-    self.v_given_ux_.fit(self._features(u_t, x_t), v_t)
-    self.u_given_vx_.fit(self._features(v_t, x_t), u_t)
+    self.provider.warn_if_outside_documented_range(u_t.shape[0])
+    v_given_ux = self._make_distribution(self.random_state)
+    u_given_vx = self._make_distribution(self.random_state + 1)
+    v_given_ux.fit(self._features(u_t, x_t), v_t)
+    u_given_vx.fit(self._features(v_t, x_t), u_t)
+    self._v_given_ux = v_given_ux
+    self._u_given_vx = u_given_vx
 
     # Cache grid borders for Sinkhorn projection (if enabled)
     if self.sinkhorn_iters is not None:
@@ -454,7 +500,7 @@ class PFNRBicop:
     """Return the conditional copula density ``c(u_i, v_i | x_i)``.
 
     ``batch_size`` overrides the model-level default chunk size for
-    this call when using ``method="criterion"``.
+    this call when using native-distribution recovery.
     sinkhorn_iters
         Overrides the model-level default Sinkhorn / iterative-proportional-
         fitting iteration count for this call. ``None`` means “use
@@ -464,7 +510,6 @@ class PFNRBicop:
         with approximately uniform margins using a grid-based Sinkhorn
         correction.
     """
-    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
     with torch.inference_mode():
       out = self._pdf_torch(
         u,
@@ -473,7 +518,7 @@ class PFNRBicop:
         batch_size=self._resolve_batch_size(batch_size),
         sinkhorn_iters=self._resolve_sinkhorn_iters(sinkhorn_iters),
       )
-    return _wrap_output(out, return_as_torch=return_as_torch)
+    return _public_output(out, u, v, x)
 
   def _pdf_torch(
     self,
@@ -537,6 +582,15 @@ class PFNRBicop:
 
       # Sinkhorn IPF stays per-x (cheap, no forward pass).
       r, s = _sinkhorn_project(density_all[:, x_idx, :], wu, wv, sinkhorn_iters)
+      projected = r[:, None] * density_all[:, x_idx, :] * s[None, :]
+      row_error = torch.max(torch.abs(projected @ wv - 1.0))
+      col_error = torch.max(torch.abs(projected.T @ wu - 1.0))
+      error = float(torch.maximum(row_error, col_error).item())
+      if not np.isfinite(error) or error > self.sinkhorn_tolerance:
+        raise SinkhornConvergenceError(
+          "Sinkhorn projection did not converge: maximum marginal error "
+          f"{error:.3e} exceeds tolerance {self.sinkhorn_tolerance:.3e}."
+        )
 
       r_interp = _torch_interp(u[mask], u_grid, r)
       s_interp = _torch_interp(v[mask], v_grid, s)
@@ -556,7 +610,16 @@ class PFNRBicop:
     wu = self._trapezoidal_weights(u_grid)
     wv = self._trapezoidal_weights(v_grid)
     r, s = _sinkhorn_project(c_grid_raw, wu, wv, sinkhorn_iters)
-    return r[:, None] * c_grid_raw * s[None, :]
+    projected = r[:, None] * c_grid_raw * s[None, :]
+    row_error = torch.max(torch.abs(projected @ wv - 1.0))
+    col_error = torch.max(torch.abs(projected.T @ wu - 1.0))
+    error = float(torch.maximum(row_error, col_error).item())
+    if not np.isfinite(error) or error > self.sinkhorn_tolerance:
+      raise SinkhornConvergenceError(
+        "Sinkhorn projection did not converge: maximum marginal error "
+        f"{error:.3e} exceeds tolerance {self.sinkhorn_tolerance:.3e}."
+      )
+    return projected
 
   def _raw_pdf_torch(
     self,
@@ -567,12 +630,9 @@ class PFNRBicop:
     batch_size: int,
   ) -> torch.Tensor:
 
-    c_v_given_u = self.v_given_ux_.pdf(
-      self._features(u, x), v, batch_size=batch_size
-    )
-    c_u_given_v = self.u_given_vx_.pdf(
-      self._features(v, x), u, batch_size=batch_size
-    )
+    v_given_ux, u_given_vx = self._require_fitted()
+    c_v_given_u = v_given_ux.pdf(self._features(u, x), v, batch_size=batch_size)
+    c_u_given_v = u_given_vx.pdf(self._features(v, x), u, batch_size=batch_size)
     assert isinstance(c_v_given_u, torch.Tensor)
     assert isinstance(c_u_given_v, torch.Tensor)
     return 0.5 * (c_v_given_u + c_u_given_v)
@@ -621,8 +681,12 @@ class PFNRBicop:
     # flat result reshapes to [u, x, v].
     first_vu = u_grid.repeat_interleave(n_x)
     x_vu = x_unique.repeat(n_u, 1)
-    grid_vu = self.v_given_ux_.pdf_grid(
-      self._features(first_vu, x_vu), v_grid, batch_size=batch_size
+    v_given_ux, u_given_vx = self._require_fitted()
+    grid_vu = self._distribution_pdf_grid(
+      v_given_ux,
+      self._features(first_vu, x_vu),
+      v_grid,
+      batch_size=batch_size,
     )
     assert isinstance(grid_vu, torch.Tensor)
     grid_vu = grid_vu.reshape(n_u, n_x, n_v)
@@ -631,13 +695,40 @@ class PFNRBicop:
     # so both directions index [u, x, v] before averaging.
     first_uv = v_grid.repeat_interleave(n_x)
     x_uv = x_unique.repeat(n_v, 1)
-    grid_uv = self.u_given_vx_.pdf_grid(
-      self._features(first_uv, x_uv), u_grid, batch_size=batch_size
+    grid_uv = self._distribution_pdf_grid(
+      u_given_vx,
+      self._features(first_uv, x_uv),
+      u_grid,
+      batch_size=batch_size,
     )
     assert isinstance(grid_uv, torch.Tensor)
     grid_uv = grid_uv.reshape(n_v, n_x, n_u).permute(2, 1, 0)
 
     return 0.5 * (grid_vu + grid_uv)
+
+  def _distribution_pdf_grid(
+    self,
+    distribution: ConditionalDistribution,
+    features: torch.Tensor,
+    target_grid: torch.Tensor,
+    *,
+    batch_size: int,
+  ) -> torch.Tensor:
+    if isinstance(distribution, SupportsPDFGrid):
+      return distribution.pdf_grid(features, target_grid, batch_size=batch_size)
+    rows: list[torch.Tensor] = []
+    for row in features:
+      parts: list[torch.Tensor] = []
+      for start in range(0, target_grid.shape[0], batch_size):
+        targets = target_grid[start : start + batch_size]
+        repeated = row.unsqueeze(0).expand(targets.shape[0], -1)
+        parts.append(distribution.pdf(repeated, targets, batch_size=batch_size))
+      rows.append(torch.cat(parts))
+    if not rows:
+      return torch.empty(
+        (0, target_grid.shape[0]), dtype=torch.float64, device=self._device
+      )
+    return torch.stack(rows)
 
   def log_pdf(
     self,
@@ -651,7 +742,7 @@ class PFNRBicop:
     """Log of the optionally projected :py:meth:`pdf`, floored at the smallest positive float.
 
     ``batch_size`` matches :py:meth:`pdf` and is forwarded to the same
-    underlying criterion calls when ``method="criterion"``.
+    underlying native-distribution calls.
     sinkhorn_iters
         Overrides the model-level default Sinkhorn / iterative-proportional-
         fitting iteration count for this call. ``None`` means “use
@@ -661,7 +752,6 @@ class PFNRBicop:
         with approximately uniform margins using a grid-based Sinkhorn
         correction.
     """
-    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
     with torch.inference_mode():
       c = self._pdf_torch(
         u,
@@ -671,7 +761,7 @@ class PFNRBicop:
         sinkhorn_iters=self._resolve_sinkhorn_iters(sinkhorn_iters),
       )
     out = torch.log(torch.clamp(c, min=torch.finfo(c.dtype).tiny))
-    return _wrap_output(out, return_as_torch=return_as_torch)
+    return _public_output(out, u, v, x)
 
   def pdf_grid(
     self,
@@ -684,10 +774,9 @@ class PFNRBicop:
   ) -> TensorLike:
     """Density on the Cartesian product ``out[i, j] = c(u_grid[i], v_grid[j] | x)``.
 
-    Requires ``method="criterion"`` because it relies on
-    :py:meth:`TabPFNCriterionDistribution1D.pdf_grid`.  ``x_row`` is a single
-    covariate row reused on both axes; when ``None`` a constant
-    one-column row is used.
+    Uses a provider's optimized grid capability when available and otherwise
+    evaluates a bounded, chunked pointwise fallback. ``x_row`` is one
+    covariate row reused on both axes; ``None`` uses a constant column.
 
     Both Rosenblatt directions are evaluated on the same Cartesian
     product (transposing the reverse one) and averaged.
@@ -705,14 +794,6 @@ class PFNRBicop:
         with approximately uniform margins using a grid-based Sinkhorn
         correction.
     """
-    if self.method != "criterion" or not isinstance(
-      self.v_given_ux_, TabPFNCriterionDistribution1D
-    ):
-      raise RuntimeError("pdf_grid is only available when method='criterion'.")
-
-    return_as_torch, _ = _normalize_inputs(
-      u_grid, v_grid, x_row, device=self._device
-    )
     with torch.inference_mode():
       out = self._pdf_grid_torch(
         u_grid,
@@ -721,7 +802,7 @@ class PFNRBicop:
         batch_size=self._resolve_batch_size(batch_size),
         sinkhorn_iters=self._resolve_sinkhorn_iters(sinkhorn_iters),
       )
-    return _wrap_output(out, return_as_torch=return_as_torch)
+    return _public_output(out, u_grid, v_grid, x_row)
 
   def _pdf_grid_torch(
     self,
@@ -779,12 +860,12 @@ class PFNRBicop:
     Convention matches :py:meth:`pyvinecopulib.Bicop.hfunc1`:
     ``hfunc1`` conditions on the first argument.
     """
-    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
     u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
 
-    out = self.v_given_ux_.cdf(self._features(u_t, x_t), v_t)
+    v_given_ux, _ = self._require_fitted()
+    out = v_given_ux.cdf(self._features(u_t, x_t), v_t)
     assert isinstance(out, torch.Tensor)
-    return _wrap_output(out, return_as_torch=return_as_torch)
+    return _public_output(out, u, v, x)
 
   def hfunc2(
     self,
@@ -799,12 +880,12 @@ class PFNRBicop:
     Convention matches :py:meth:`pyvinecopulib.Bicop.hfunc2`:
     ``hfunc2`` conditions on the second argument.
     """
-    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
     u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
 
-    out = self.u_given_vx_.cdf(self._features(v_t, x_t), u_t)
+    _, u_given_vx = self._require_fitted()
+    out = u_given_vx.cdf(self._features(v_t, x_t), u_t)
     assert isinstance(out, torch.Tensor)
-    return _wrap_output(out, return_as_torch=return_as_torch)
+    return _public_output(out, u, v, x)
 
   # -------------------------------------------------------------------
   # Joint CDF
@@ -839,14 +920,13 @@ class PFNRBicop:
       raise ValueError("n_int must be at least 2.")
     effective_batch_size = self._resolve_batch_size(batch_size)
 
-    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
     u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
 
     cdf_v_dir = self._integrate_one_direction(
       upper=u_t,
       conditioned=v_t,
       x=x_t,
-      module=self.v_given_ux_,
+      module=self._require_fitted()[0],
       n_int=n_int,
       batch_size=effective_batch_size,
     )
@@ -854,13 +934,11 @@ class PFNRBicop:
       upper=v_t,
       conditioned=u_t,
       x=x_t,
-      module=self.u_given_vx_,
+      module=self._require_fitted()[1],
       n_int=n_int,
       batch_size=effective_batch_size,
     )
-    return _wrap_output(
-      0.5 * (cdf_v_dir + cdf_u_dir), return_as_torch=return_as_torch
-    )
+    return _public_output(0.5 * (cdf_v_dir + cdf_u_dir), u, v, x)
 
   def _integrate_one_direction(
     self,
@@ -868,12 +946,12 @@ class PFNRBicop:
     upper: torch.Tensor,
     conditioned: torch.Tensor,
     x: torch.Tensor,
-    module: _Distribution1D,
+    module: ConditionalDistribution,
     n_int: int,
     batch_size: int,
   ) -> torch.Tensor:
     """Compute ∫_eps^{upper_i} F(conditioned_i | s, x_i) ds for each row."""
-    eps = self.quantile_config.eps
+    eps = self.support_epsilon
     n = upper.shape[0]
     upper_safe = torch.clamp(upper, min=eps + 1e-12)
 
@@ -905,44 +983,36 @@ class PFNRBicop:
   ) -> TensorLike:
     """Cartesian-grid joint CDF ``out[i, j] = C(u_grid[i], v_grid[j] | x_row)``.
 
-    Requires ``method="criterion"`` (uses the inner ``cdf_grid`` fast
-    path).  Builds a single shared fine ``s``-grid covering
+    Uses an optimized inner ``cdf_grid`` capability when available and a
+    chunked fallback otherwise. Builds a shared fine ``s``-grid covering
     ``[eps, max(u_grid)]``, evaluates the inner CDF on the
     Cartesian product ``(s_fine × v_grid)`` in one TabPFN forward
     pass per row of ``s_fine``, then for each ``u_grid[i]`` reads off
     the cumulative trapezoidal integral up to ``u_grid[i]`` via
     interpolation, then averages the analogous ``v``-axis integral.
     """
-    if self.method != "criterion" or not isinstance(
-      self.v_given_ux_, TabPFNCriterionDistribution1D
-    ):
-      raise RuntimeError("cdf_grid is only available when method='criterion'.")
     if n_int < 2:
       raise ValueError("n_int must be at least 2.")
 
-    return_as_torch, _ = _normalize_inputs(
-      u_grid, v_grid, x_row, device=self._device
-    )
     u_t, v_t, x_row_t = self._prepare_grid_inputs(u_grid, v_grid, x_row)
 
     cdf_v_dir = self._integrate_grid_one_direction(
       upper_grid=u_t,
       conditioned_grid=v_t,
       x_row=x_row_t,
-      module=self.v_given_ux_,
+      module=self._require_fitted()[0],
       n_int=n_int,
     )
 
-    assert isinstance(self.u_given_vx_, TabPFNCriterionDistribution1D)
     cdf_u_dir = self._integrate_grid_one_direction(
       upper_grid=v_t,
       conditioned_grid=u_t,
       x_row=x_row_t,
-      module=self.u_given_vx_,
+      module=self._require_fitted()[1],
       n_int=n_int,
     )
-    return _wrap_output(
-      0.5 * (cdf_v_dir + cdf_u_dir.T), return_as_torch=return_as_torch
+    return _public_output(
+      0.5 * (cdf_v_dir + cdf_u_dir.T), u_grid, v_grid, x_row
     )
 
   def _integrate_grid_one_direction(
@@ -951,14 +1021,14 @@ class PFNRBicop:
     upper_grid: torch.Tensor,
     conditioned_grid: torch.Tensor,
     x_row: torch.Tensor,
-    module: TabPFNCriterionDistribution1D,
+    module: ConditionalDistribution,
     n_int: int,
   ) -> torch.Tensor:
     """Compute ∫_0^{upper_grid[i]} F(conditioned_grid[j] | s, x_row) ds.
 
     Returns shape ``(len(upper_grid), len(conditioned_grid))``.
     """
-    eps = self.quantile_config.eps
+    eps = self.support_epsilon
     n_u, n_v = upper_grid.shape[0], conditioned_grid.shape[0]
 
     # Shared fine s-grid covering [eps, max(upper_grid)].
@@ -969,8 +1039,30 @@ class PFNRBicop:
 
     x_for_s = x_row.repeat_interleave(s_fine.shape[0], dim=0)
     feats = self._features(s_fine, x_for_s)
-    F_table = module.cdf_grid(feats, conditioned_grid)
-    assert isinstance(F_table, torch.Tensor)
+    if isinstance(module, SupportsCDFGrid):
+      F_table = module.cdf_grid(
+        feats,
+        conditioned_grid,
+        batch_size=self.inference_chunk_size,
+      )
+    else:
+      rows: list[torch.Tensor] = []
+      for row in feats:
+        parts: list[torch.Tensor] = []
+        for start in range(
+          0, conditioned_grid.shape[0], self.inference_chunk_size
+        ):
+          targets = conditioned_grid[start : start + self.inference_chunk_size]
+          repeated = row.unsqueeze(0).expand(targets.shape[0], -1)
+          parts.append(
+            module.cdf(
+              repeated,
+              targets,
+              batch_size=self.inference_chunk_size,
+            )
+          )
+        rows.append(torch.cat(parts))
+      F_table = torch.stack(rows)
 
     # Cumulative trapezoid along axis=0.
     ds = torch.diff(s_fine)
@@ -1034,7 +1126,7 @@ class PFNRBicop:
     from pyvinecopulib import ghalton, wdm
 
     quasi = np.asarray(ghalton(n, 2, seeds_list), dtype=float)
-    eps = self.quantile_config.eps
+    eps = self.support_epsilon
     u_np = np.clip(quasi[:, 0], eps, 1.0 - eps)
     alpha_np = np.clip(quasi[:, 1], eps, 1.0 - eps)
     u_t = torch.as_tensor(u_np, dtype=torch.float64, device=self._device)
@@ -1051,7 +1143,8 @@ class PFNRBicop:
       x_t = x_row_t.repeat_interleave(n, dim=0)
 
     # Inverse Rosenblatt: v = F_{V | U, X}^{-1}(alpha | u, x).
-    v_t = self.v_given_ux_.icdf(self._features(u_t, x_t), alpha_t)
+    v_given_ux, _ = self._require_fitted()
+    v_t = v_given_ux.icdf(self._features(u_t, x_t), alpha_t)
     assert isinstance(v_t, torch.Tensor)
 
     return float(wdm(u_np, v_t.detach().cpu().numpy(), "tau"))
@@ -1118,19 +1211,19 @@ class PFNRBicop:
 
 
 class _BicopAdapter:
-  """pyvinecopulib-compatible adapter around a fitted :class:`PFNRBicop`.
+  """pyvinecopulib adapter around a fitted :class:`FoundationModelBicop`.
 
   pyvinecopulib's plotting helpers call ``cop.pdf(uv)`` on a flattened
   Cartesian grid and inspect ``cop.var_types``.  This class exposes
   those, while delegating density evaluation to the wrapped
-  :class:`PFNRBicop`.  An optional bound covariate row ``x_row`` is
+  :class:`FoundationModelBicop`. An optional bound covariate row ``x_row`` is
   reused across all queried points, which is what makes a fixed
   conditional copula plottable as if it were unconditional.
 
-  When the underlying model uses ``method="criterion"`` and the
+  When the underlying model uses native-distribution recovery and the
   queried ``(u, v)`` pairs span a Cartesian product (``len(unique_u) *
   len(unique_v) == len(uv)``), :py:meth:`pdf` takes the much faster
-  :py:meth:`PFNRBicop.pdf_grid` path under the hood.  This is
+  :py:meth:`FoundationModelBicop.pdf_grid` path under the hood. This is
   always the case for the regular grids built by pyvinecopulib's
   plotter.
 
@@ -1140,7 +1233,9 @@ class _BicopAdapter:
 
   var_types: list[str] = ["c", "c"]
 
-  def __init__(self, model: PFNRBicop, x_row: TensorLike | None = None) -> None:
+  def __init__(
+    self, model: FoundationModelBicop, x_row: TensorLike | None = None
+  ) -> None:
     self._model = model
     if x_row is None:
       self._x_row: torch.Tensor | None = None
@@ -1154,16 +1249,16 @@ class _BicopAdapter:
     """Evaluate ``c(u_i, v_i | x_row)`` for each row of ``uv``.
 
     ``uv`` must have shape ``(n, 2)``.  When the underlying model uses
-    the ``criterion`` method and ``uv`` happens to span a Cartesian
+    native recovery and ``uv`` happens to span a Cartesian
     product (the typical plotting case), the call is rerouted through
-    :py:meth:`PFNRBicop.pdf_grid` for speed.
+    :py:meth:`FoundationModelBicop.pdf_grid` for speed.
     """
     uv_t = _to_tensor(uv, device=self._model._device)
     if uv_t.ndim != 2 or uv_t.shape[1] != 2:
       raise ValueError("uv must have shape (n, 2).")
     n = uv_t.shape[0]
 
-    if self._model.method == "criterion":
+    if self._model.recovery is Recovery.NATIVE_DISTRIBUTION:
       unique_u, inv_u = torch.unique(uv_t[:, 0], return_inverse=True)
       unique_v, inv_v = torch.unique(uv_t[:, 1], return_inverse=True)
       if unique_u.shape[0] * unique_v.shape[0] == n:

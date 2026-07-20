@@ -137,7 +137,7 @@ predictive distribution is read from TabPFN.
 
 \subsection{Criterion Method}
 
-The default method uses TabPFN's native distribution head. For a query
+The native-distribution recovery uses TabPFN's predictive head. For a query
 feature matrix $W$, TabPFN returns logits $\ell(W)$ over a binned
 predictive distribution and a criterion object that evaluates the
 corresponding conditional density, distribution function, and quantile
@@ -164,7 +164,7 @@ through the monotone transform without a Jacobian correction.
 
 \subsection{Quantile Method}
 
-The alternative method queries TabPFN for a conditional quantile table
+Quantile-inversion recovery queries the provider for a conditional quantile table
 \[
   \widehat Q_Z(\alpha_k \given w),
   \qquad
@@ -336,7 +336,7 @@ fixed Kendall's tau values $0.25$, $0.50$, and $0.75$.
     Mathematical object & Implementation \\
     \midrule
     Symmetric estimator in Equation~\eqref{eq:symmetric-density}
-      & \texttt{PFNRBicop} \\
+      & \texttt{FoundationModelBicop} \\
     Criterion predictive distribution
       & \texttt{TabPFNCriterionDistribution1D} \\
     Quantile predictive distribution
