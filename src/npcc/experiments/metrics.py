@@ -76,12 +76,19 @@ def marginal_diagnostics(
 ) -> dict[str, float]:
   """Absolute deviation of a density grid's margins from the constraint = 1.
 
-  ``c`` has shape ``(len(u_grid), len(v_grid))``.  Returns the mean/max
-  absolute error of the row integrals ``int c(u, .) dv`` and column integrals
-  ``int c(., v) du`` from 1.
+  ``u_grid`` and ``v_grid`` are midpoint grids covering the unit interval, and
+  ``c`` has shape ``(len(u_grid), len(v_grid))``. Midpoint quadrature avoids
+  evaluating potentially unstable copula densities at zero or one while still
+  integrating over the full unit interval.
   """
-  int_over_v = np.trapezoid(c, x=v_grid, axis=1)
-  int_over_u = np.trapezoid(c, x=u_grid, axis=0)
+  c = np.asarray(c, dtype=np.float64)
+  if c.shape != (u_grid.size, v_grid.size):
+    raise ValueError(
+      "c must have shape (len(u_grid), len(v_grid)); "
+      f"got {c.shape} for ({u_grid.size}, {v_grid.size})."
+    )
+  int_over_v = np.mean(c, axis=1)
+  int_over_u = np.mean(c, axis=0)
   err_rows = np.abs(int_over_v - 1.0)
   err_cols = np.abs(int_over_u - 1.0)
   return {

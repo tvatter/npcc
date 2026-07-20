@@ -1,8 +1,8 @@
 """Command-line entry point: ``npcc-simstudy --config study.toml --out results/``.
 
 Loads the experiment grid from a TOML file, runs the study, and writes the
-result tables (``metrics``, ``runtime``, ``summary``, ``runtime_summary``) plus
-an echo of the resolved config to the output directory.
+raw result tables, paper-facing summaries, and an echo of the resolved
+config to the output directory.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from pathlib import Path
 import pandas as pd
 
 from npcc.experiments.config import GridConfig, RunConfig, load_grid
-from npcc.experiments.runner import aggregate_results, run_study
+from npcc.experiments.runner import aggregate_study_outputs, run_study
 
 logger = logging.getLogger("npcc.experiments")
 
@@ -57,7 +57,7 @@ def _build_parser() -> argparse.ArgumentParser:
   p.add_argument(
     "--format",
     dest="fmt",
-    default="csv",
+    default="parquet",
     choices=["csv", "parquet"],
     help="Output table format (parquet needs pyarrow).",
   )
@@ -83,6 +83,12 @@ def _config_echo(grid: GridConfig, run: RunConfig, wall: float) -> dict:
       "n_rep": grid.n_rep,
       "model_versions": grid.model_versions,
       "projection_grid_size": grid.projection_grid_size,
+      "conditional_uv_grid_n": grid.conditional_uv_grid_n,
+      "conditional_x_grid_n": grid.conditional_x_grid_n,
+      "surface_tau_levels": grid.surface_tau_levels,
+      "surface_families": grid.surface_families,
+      "enable_tau_diagnostics": grid.enable_tau_diagnostics,
+      "tau_diagnostic_n": grid.tau_diagnostic_n,
     },
     "run": {
       "device": run.device,
@@ -112,18 +118,20 @@ def main(argv: list[str] | None = None) -> int:
   )
   run.out.mkdir(parents=True, exist_ok=True)
 
-  metrics_df, runtime_df, wall = run_study(grid, run)
-  mc_summary, runtime_summary = aggregate_results(metrics_df, runtime_df)
+  metric_df, quantity_df, diagnostic_df, runtime_df, wall = run_study(grid, run)
+  outputs = aggregate_study_outputs(metric_df, diagnostic_df, runtime_df)
 
-  _write(metrics_df, run.out / "metrics", run.fmt)
+  _write(outputs["summary_by_x"], run.out / "summary", run.fmt)
+  for name, df in outputs.items():
+    _write(df, run.out / name, run.fmt)
+  _write(diagnostic_df, run.out / "diagnostics", run.fmt)
+  _write(quantity_df, run.out / "quantities", run.fmt)
   _write(runtime_df, run.out / "runtime", run.fmt)
-  _write(mc_summary, run.out / "summary", run.fmt)
-  _write(runtime_summary, run.out / "runtime_summary", run.fmt)
   (run.out / "config.json").write_text(
     json.dumps(_config_echo(grid, run, wall), indent=2)
   )
 
-  logger.info("Wrote %d result tables to %s", 4, run.out)
+  logger.info("Wrote simulation-study result tables to %s", run.out)
   return 0
 
 

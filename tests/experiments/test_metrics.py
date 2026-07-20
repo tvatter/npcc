@@ -35,11 +35,15 @@ def test_grid_metrics_means() -> None:
   assert out["ISE"] == np.float64(4.0 / 3.0)
 
 
-def test_marginal_diagnostics_uniform_density_is_near_one() -> None:
+def test_marginal_diagnostics_uniform_density_is_exact() -> None:
   # c(u,v) == 1 has both margins integrating to 1 exactly.
-  u = np.linspace(0.0, 1.0, 21)
-  v = np.linspace(0.0, 1.0, 21)
+  u = (np.arange(20, dtype=np.float64) + 0.5) / 20
+  v = (np.arange(20, dtype=np.float64) + 0.5) / 20
   c = np.ones((u.size, v.size))
   out = metrics.marginal_diagnostics(c, u, v)
-  assert out["row_mean_abs_err"] < 1e-12
-  assert out["col_max_abs_err"] < 1e-12
+  assert out == {
+    "row_mean_abs_err": 0.0,
+    "row_max_abs_err": 0.0,
+    "col_mean_abs_err": 0.0,
+    "col_max_abs_err": 0.0,
+  }

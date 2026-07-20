@@ -88,6 +88,14 @@ class GridConfig:
     default_factory=lambda: [DEFAULT_MODEL_VERSION]
   )
   projection_grid_size: int = 30
+  conditional_uv_grid_n: int = 20
+  conditional_x_grid_n: int = 10
+  surface_tau_levels: list[float] = field(
+    default_factory=lambda: [0.1, 0.5, 0.9]
+  )
+  surface_families: list[str] = field(default_factory=lambda: ["clayton"])
+  enable_tau_diagnostics: bool = True
+  tau_diagnostic_n: int = 1000
 
   def __post_init__(self) -> None:
     _check_subset("families", self.families, FAMILIES)
@@ -111,6 +119,19 @@ class GridConfig:
       raise ValueError("n_rep must be a positive int.")
     if self.projection_grid_size < 2:
       raise ValueError("projection_grid_size must be >= 2.")
+    if self.conditional_uv_grid_n < 2:
+      raise ValueError("conditional_uv_grid_n must be >= 2.")
+    if self.conditional_x_grid_n < 1:
+      raise ValueError("conditional_x_grid_n must be >= 1.")
+    if not self.surface_tau_levels:
+      raise ValueError("surface_tau_levels must be non-empty.")
+    for tau in self.surface_tau_levels:
+      if tau <= 0.0 or tau >= 1.0:
+        raise ValueError("surface_tau_levels entries must be in (0, 1).")
+    if self.surface_families:
+      _check_subset("surface_families", self.surface_families, FAMILIES)
+    if self.tau_diagnostic_n < 10:
+      raise ValueError("tau_diagnostic_n must be >= 10.")
 
   def estimator_specs(self) -> list[EstimatorSpec]:
     return [
@@ -139,7 +160,7 @@ class RunConfig:
   workers: int = 1
   base_seed: int = 317
   log_level: str = "INFO"
-  fmt: str = "csv"
+  fmt: str = "parquet"
 
   def __post_init__(self) -> None:
     if self.workers < 1:
@@ -166,6 +187,16 @@ def load_grid(path: str | Path) -> GridConfig:
         str(v) for v in grid.get("model_versions", [DEFAULT_MODEL_VERSION])
       ],
       projection_grid_size=int(grid.get("projection_grid_size", 30)),
+      conditional_uv_grid_n=int(grid.get("conditional_uv_grid_n", 20)),
+      conditional_x_grid_n=int(grid.get("conditional_x_grid_n", 10)),
+      surface_tau_levels=[
+        float(v) for v in grid.get("surface_tau_levels", [0.1, 0.5, 0.9])
+      ],
+      surface_families=[
+        str(v) for v in grid.get("surface_families", ["clayton"])
+      ],
+      enable_tau_diagnostics=bool(grid.get("enable_tau_diagnostics", True)),
+      tau_diagnostic_n=int(grid.get("tau_diagnostic_n", 1000)),
     )
   except KeyError as exc:
     raise ValueError(f"Missing required [grid] key: {exc}.") from exc
