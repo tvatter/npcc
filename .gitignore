@@ -211,3 +211,6 @@ __marimo__/
 
 .coverage
 uv.lock
+
+# CatBoost training logs
+catboost_info/

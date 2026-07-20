@@ -17,7 +17,7 @@ _TOML = """
 families = ["clayton", "gumbel"]
 tau_scenarios = ["linear", "uncond50"]
 transforms = ["logit", "identity"]
-methods = ["criterion", "quantiles"]
+backends = ["tabpfn-criterion", "tabpfn-quantiles"]
 normalize = ["none", 5]
 n = [50, 100]
 n_rep = 3
@@ -53,29 +53,33 @@ def test_cells_and_estimator_specs_are_cartesian(tmp_path: Path) -> None:
   grid = load_grid(_write(tmp_path, _TOML))
   # 2 families x 2 scenarios x 2 n x 3 rep
   assert len(grid.cells()) == 2 * 2 * 2 * 3
-  # 2 transforms x 2 methods x 1 (default) model version
+  # 2 transforms x 2 backends
   assert len(grid.estimator_specs()) == 4
 
 
-def test_model_versions_default_to_v3(tmp_path: Path) -> None:
-  grid = load_grid(_write(tmp_path, _TOML))
-  assert grid.model_versions == ["v3"]
-  assert all(s.model_version == "v3" for s in grid.estimator_specs())
-
-
-def test_model_versions_multiply_estimator_specs(tmp_path: Path) -> None:
-  text = _TOML + '\nmodel_versions = ["v2.5", "v3"]\n'
+def test_backends_multiply_estimator_specs(tmp_path: Path) -> None:
+  text = _TOML.replace(
+    'backends = ["tabpfn-criterion", "tabpfn-quantiles"]',
+    'backends = ["tabpfn-criterion", "tabpfn-quantiles", "ngboost"]',
+  )
   grid = load_grid(_write(tmp_path, text))
-  assert grid.model_versions == ["v2.5", "v3"]
-  # 2 transforms x 2 methods x 2 model versions
+  assert grid.backends == ["tabpfn-criterion", "tabpfn-quantiles", "ngboost"]
+  # 2 transforms x 3 backends
   specs = grid.estimator_specs()
-  assert len(specs) == 8
-  assert {s.model_version for s in specs} == {"v2.5", "v3"}
+  assert len(specs) == 6
+  assert {s.backend for s in specs} == {
+    "tabpfn-criterion",
+    "tabpfn-quantiles",
+    "ngboost",
+  }
 
 
-def test_unknown_model_version_rejected(tmp_path: Path) -> None:
-  text = _TOML + '\nmodel_versions = ["v2.5", "v99"]\n'
-  with pytest.raises(ValueError, match="Unknown model_versions"):
+def test_unknown_backend_rejected(tmp_path: Path) -> None:
+  text = _TOML.replace(
+    'backends = ["tabpfn-criterion", "tabpfn-quantiles"]',
+    'backends = ["tabpfn-criterion", "not-a-backend"]',
+  )
+  with pytest.raises(ValueError, match="Unknown backends"):
     load_grid(_write(tmp_path, text))
 
 
@@ -91,7 +95,7 @@ def test_normalize_zero_and_off_become_none(tmp_path: Path) -> None:
     ("families", '["clayton", "nope"]'),
     ("tau_scenarios", '["linear", "nope"]'),
     ("transforms", '["logit", "nope"]'),
-    ("methods", '["criterion", "nope"]'),
+    ("backends", '["tabpfn-criterion", "nope"]'),
   ],
 )
 def test_unknown_axis_value_rejected(
@@ -135,11 +139,14 @@ def test_shipped_study_config_loads() -> None:
   assert grid.n == [200, 500, 1000]
   assert grid.n_rep == 20
   assert grid.transforms == ["logit", "identity", "probit"]
-  assert grid.methods == ["criterion", "quantiles"]
-  assert grid.model_versions == ["v2.5", "v3"]
+  assert grid.backends == [
+    "tabpfn-criterion-v2.5",
+    "tabpfn-criterion-v3",
+    "tabpfn-quantiles-v3",
+  ]
   assert grid.normalize == [None, 3]
   assert len(grid.cells()) == 5 * 3 * 3 * 20
-  assert len(grid.estimator_specs()) == 3 * 2 * 2
+  assert len(grid.estimator_specs()) == 3 * 3
 
 
 def test_runconfig_validates_workers_and_fmt(tmp_path: Path) -> None:
@@ -156,7 +163,7 @@ def test_gridconfig_rejects_empty_axis() -> None:
       families=[],
       tau_scenarios=["linear"],
       transforms=["logit"],
-      methods=["criterion"],
+      backends=["tabpfn-criterion"],
       normalize=[None],
       n=[100],
       n_rep=1,

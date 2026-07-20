@@ -41,7 +41,7 @@ def coverage_study() -> tuple[
     families=["clayton"],
     tau_scenarios=["linear", "quadratic"],
     transforms=["logit", "identity"],
-    methods=["criterion", "quantiles"],
+    backends=["tabpfn-criterion", "tabpfn-quantiles"],
     normalize=[None],
     n=[20],
     n_rep=1,
@@ -54,19 +54,18 @@ def coverage_study() -> tuple[
 
 
 @pytest.fixture(scope="module")
-def model_version_study() -> tuple[
+def backend_study() -> tuple[
   pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float
 ]:
-  """Two model versions on the same conditional data cell."""
+  """Two backends on the same conditional data cell."""
   grid = GridConfig(
     families=["clayton"],
     tau_scenarios=["linear"],
     transforms=["logit"],
-    methods=["criterion"],
+    backends=["tabpfn-criterion", "tabpfn-quantiles"],
     normalize=[None],
     n=[20],
     n_rep=1,
-    model_versions=["v2.5", "v3"],
     projection_grid_size=8,
     conditional_uv_grid_n=3,
     conditional_x_grid_n=2,
@@ -83,7 +82,7 @@ def projection_study() -> tuple[
     families=["clayton"],
     tau_scenarios=["linear"],
     transforms=["logit"],
-    methods=["criterion"],
+    backends=["tabpfn-criterion"],
     normalize=[None, 2],
     n=[20],
     n_rep=1,
@@ -109,7 +108,7 @@ def test_run_study_covers_conditional_axes(
     "rep",
     "seed",
     "transform",
-    "method",
+    "backend",
     "normalize",
     "quantity",
     "x",
@@ -124,7 +123,10 @@ def test_run_study_covers_conditional_axes(
     diagnostic_df.columns
   )
   assert "tau_time" in runtime_df.columns
-  assert set(metric_df["method"].unique()) == {"criterion", "quantiles"}
+  assert set(metric_df["backend"].unique()) == {
+    "tabpfn-criterion",
+    "tabpfn-quantiles",
+  }
   assert set(metric_df["transform"].unique()) == {"logit", "identity"}
   assert set(metric_df["quantity"].unique()) == {
     "pdf",
@@ -143,7 +145,7 @@ def test_conditional_metrics_are_fixed_x_uv_summaries(
 ) -> None:
   metric_df = coverage_study[0]
   grouped = metric_df.groupby(
-    ["tau_scenario", "method", "transform", "quantity", "normalize"],
+    ["tau_scenario", "backend", "transform", "quantity", "normalize"],
     dropna=False,
   )
   assert grouped.size().min() == 2
@@ -191,18 +193,24 @@ def test_aggregate_study_outputs_have_paper_tables(
   assert set(outputs["selection_summary"]["metric"].unique()) == {"KL"}
 
 
-def test_model_version_axis_labels_rows_and_aggregates(
-  model_version_study: tuple[
+def test_backend_axis_labels_rows_and_aggregates(
+  backend_study: tuple[
     pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float
   ],
 ) -> None:
-  metric_df, _, _, runtime_df, _ = model_version_study
-  assert "model_version" in metric_df.columns
-  assert "model_version" in runtime_df.columns
-  assert set(metric_df["model_version"].unique()) == {"v2.5", "v3"}
+  metric_df, _, _, runtime_df, _ = backend_study
+  assert "backend" in metric_df.columns
+  assert "backend" in runtime_df.columns
+  assert set(metric_df["backend"].unique()) == {
+    "tabpfn-criterion",
+    "tabpfn-quantiles",
+  }
   mc_summary, runtime_summary = aggregate_results(metric_df, runtime_df)
-  assert "model_version" in mc_summary.columns
-  assert set(runtime_summary["model_version"].unique()) == {"v2.5", "v3"}
+  assert "backend" in mc_summary.columns
+  assert set(runtime_summary["backend"].unique()) == {
+    "tabpfn-criterion",
+    "tabpfn-quantiles",
+  }
 
 
 def test_normalize_axis_applies_only_to_pdf(
@@ -240,7 +248,7 @@ def test_tau_diagnostics_can_be_disabled() -> None:
     families=["clayton"],
     tau_scenarios=["linear"],
     transforms=["logit"],
-    methods=["criterion"],
+    backends=["tabpfn-criterion"],
     normalize=[None],
     n=[20],
     n_rep=1,

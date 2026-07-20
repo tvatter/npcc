@@ -20,8 +20,6 @@ import numpy as np
 import pandas as pd
 import torch
 
-from tabpfn.constants import ModelVersion
-
 from npcc.core.bicop import RosenblattBicop
 from npcc.experiments import metrics, scenarios
 from npcc.experiments.config import Cell, EstimatorSpec, GridConfig, RunConfig
@@ -69,8 +67,7 @@ def _base_row(cell: Cell, est: EstimatorSpec, seed: int) -> dict[str, object]:
     "rep": cell.rep,
     "seed": seed,
     "transform": est.transform,
-    "method": est.method,
-    "model_version": est.model_version,
+    "backend": est.backend,
   }
 
 
@@ -347,11 +344,10 @@ def summarize_one_cell(
   for est in estimator_specs:
     t0 = perf_counter()
     model = RosenblattBicop(
-      backend=f"tabpfn-{est.method}",
+      backend=est.backend,
       transform=cast(Literal["identity", "logit", "probit"], est.transform),
       device=device,
       projection_grid_size=projection_grid_size,
-      backend_kwargs={"model_version": ModelVersion(est.model_version)},
     )
     model.fit(u, v, x)
     fit_time = perf_counter() - t0
@@ -514,8 +510,7 @@ def summarize_one_cell(
         "rep": cell.rep,
         "seed": seed,
         "transform": est.transform,
-        "method": est.method,
-        "model_version": est.model_version,
+        "backend": est.backend,
         "fit_time": fit_time,
         "pdf_time": pdf_time,
         "cdf_time": timings["cdf"],
@@ -594,9 +589,8 @@ def run_study(
   sort_axes = [
     "family",
     "tau_scenario",
-    "method",
+    "backend",
     "transform",
-    "model_version",
     "n",
     "rep",
   ]
@@ -635,8 +629,7 @@ _ESTIMATOR_AXES: tuple[str, ...] = (
   "tau_scenario",
   "n",
   "transform",
-  "method",
-  "model_version",
+  "backend",
 )
 
 

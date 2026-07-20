@@ -172,8 +172,226 @@ def _tabicl_factory(
   )
 
 
+def _catboost_factory(
+  *,
+  transform: _Transform,
+  config: QuantileGridConfig,
+  device: str | torch.device | None,
+  batch_size: int | None,
+  **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
+) -> ConditionalDistribution1D:
+  try:
+    from npcc.core.backends.catboost import CatBoostBackend
+  except ImportError as exc:
+    raise _missing_extra("catboost", "catboost") from exc
+
+  return CatBoostBackend(
+    transform=transform,
+    config=config,
+    device=device,
+    batch_size=batch_size,
+    **kw,
+  )
+
+
+def _xgb_quantile_factory(
+  *,
+  transform: _Transform,
+  config: QuantileGridConfig,
+  device: str | torch.device | None,
+  batch_size: int | None,
+  **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
+) -> ConditionalDistribution1D:
+  try:
+    from npcc.core.backends.xgboost_quantile import XGBQuantileBackend
+  except ImportError as exc:
+    raise _missing_extra("xgb-quantile", "xgboost") from exc
+
+  return XGBQuantileBackend(
+    transform=transform,
+    config=config,
+    device=device,
+    batch_size=batch_size,
+    **kw,
+  )
+
+
+def _pytabkit_realmlp_factory(
+  *,
+  transform: _Transform,
+  config: QuantileGridConfig,
+  device: str | torch.device | None,
+  batch_size: int | None,
+  **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
+) -> ConditionalDistribution1D:
+  try:
+    from npcc.core.backends.pytabkit import PyTabKitRealMLPBackend
+  except ImportError as exc:
+    raise _missing_extra("pytabkit-realmlp", "pytabkit") from exc
+
+  return PyTabKitRealMLPBackend(
+    transform=transform,
+    config=config,
+    device=device,
+    batch_size=batch_size,
+    **kw,
+  )
+
+
+def _pytabkit_tabm_factory(
+  *,
+  transform: _Transform,
+  config: QuantileGridConfig,
+  device: str | torch.device | None,
+  batch_size: int | None,
+  **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
+) -> ConditionalDistribution1D:
+  try:
+    from npcc.core.backends.pytabkit import PyTabKitTabMBackend
+  except ImportError as exc:
+    raise _missing_extra("pytabkit-tabm", "pytabkit") from exc
+
+  return PyTabKitTabMBackend(
+    transform=transform,
+    config=config,
+    device=device,
+    batch_size=batch_size,
+    **kw,
+  )
+
+
+def _tabpfn_finetune_factory(
+  *,
+  transform: _Transform,
+  config: QuantileGridConfig,
+  device: str | torch.device | None,
+  batch_size: int | None,
+  **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
+) -> ConditionalDistribution1D:
+  # Fine-tuning is native to the core `tabpfn` package (no extra).
+  from npcc.core.backends.tabpfn_finetune import (
+    FinetunedTabPFNCriterionBackend,
+  )
+
+  return FinetunedTabPFNCriterionBackend(
+    transform=transform,
+    eps=config.eps,
+    device=device,
+    batch_size=batch_size,
+    **kw,
+  )
+
+
+def _tabicl_finetune_factory(
+  *,
+  transform: _Transform,
+  config: QuantileGridConfig,
+  device: str | torch.device | None,
+  batch_size: int | None,
+  **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
+) -> ConditionalDistribution1D:
+  try:
+    from npcc.core.backends.tabicl_finetune import FinetunedTabICLBackend
+  except ImportError as exc:
+    raise _missing_extra("tabicl-finetune", "tabicl") from exc
+
+  return FinetunedTabICLBackend(
+    transform=transform,
+    config=config,
+    device=device,
+    batch_size=batch_size,
+    **kw,
+  )
+
+
+def _nori_factory(
+  *,
+  transform: _Transform,
+  config: QuantileGridConfig,
+  device: str | torch.device | None,
+  batch_size: int | None,
+  **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
+) -> ConditionalDistribution1D:
+  try:
+    from npcc.core.backends.nori import NoriBackend
+  except ImportError as exc:
+    raise ImportError(
+      "The 'nori' backend requires synthefy-nori. Until the torch-uncapping "
+      "fix reaches PyPI, install the fork into a cu128 env:\n"
+      '  uv pip install "synthefy-nori @ '
+      'git+https://github.com/tvatter/synthefy-nori.git@allow-newer-torch-cuda"'
+    ) from exc
+
+  return NoriBackend(
+    transform=transform,
+    config=config,
+    device=device,
+    batch_size=batch_size,
+    **kw,
+  )
+
+
+def _tabpfn_version_factory(method: str, version: str) -> BackendFactory:
+  """Build a version-pinned TabPFN factory (criterion or quantiles)."""
+
+  def factory(
+    *,
+    transform: _Transform,
+    config: QuantileGridConfig,
+    device: str | torch.device | None,
+    batch_size: int | None,
+    **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
+  ) -> ConditionalDistribution1D:
+    from npcc.core.backends.tabpfn_common import ModelVersion
+
+    model_version = ModelVersion(version)
+    if method == "criterion":
+      from npcc.core.backends.tabpfn_criterion import TabPFNCriterionBackend
+
+      return TabPFNCriterionBackend(
+        transform=transform,
+        eps=config.eps,
+        device=device,
+        batch_size=batch_size,
+        model_version=model_version,
+        **kw,
+      )
+    from npcc.core.backends.tabpfn_quantile import TabPFNQuantileBackend
+
+    return TabPFNQuantileBackend(
+      transform=transform,
+      config=config,
+      device=device,
+      batch_size=batch_size,
+      model_version=model_version,
+      **kw,
+    )
+
+  return factory
+
+
 register_backend("tabpfn-criterion", _tabpfn_criterion_factory)
 register_backend("tabpfn-quantiles", _tabpfn_quantiles_factory)
+register_backend("tabpfn-finetune", _tabpfn_finetune_factory)
+# Version-pinned TabPFN presets (selectable by name in the study grid).
+register_backend(
+  "tabpfn-criterion-v3", _tabpfn_version_factory("criterion", "v3")
+)
+register_backend(
+  "tabpfn-criterion-v2.5", _tabpfn_version_factory("criterion", "v2.5")
+)
+register_backend(
+  "tabpfn-quantiles-v3", _tabpfn_version_factory("quantiles", "v3")
+)
+register_backend(
+  "tabpfn-quantiles-v2.5", _tabpfn_version_factory("quantiles", "v2.5")
+)
 register_backend("ngboost", _ngboost_factory)
 register_backend("gbm", _quantile_gbm_factory)
+register_backend("catboost", _catboost_factory)
+register_backend("xgb-quantile", _xgb_quantile_factory)
+register_backend("pytabkit-realmlp", _pytabkit_realmlp_factory)
+register_backend("pytabkit-tabm", _pytabkit_tabm_factory)
+register_backend("nori", _nori_factory)
 register_backend("tabicl", _tabicl_factory)
+register_backend("tabicl-finetune", _tabicl_finetune_factory)

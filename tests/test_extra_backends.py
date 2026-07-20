@@ -9,6 +9,8 @@ failures (skipped, like the real-TabPFN smoke).
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pytest
 
@@ -68,6 +70,74 @@ def test_ngboost_backend_smoke() -> None:
     backend_kwargs={"n_estimators": 40},
   ).fit(u, v)
   _check_fitted_model(m)
+
+
+def test_catboost_backend_smoke() -> None:
+  pytest.importorskip("catboost")
+  u, v = _gaussian_copula_sample(80, rho=0.6, seed=3)
+  m = RosenblattBicop(
+    backend="catboost",
+    backend_kwargs={"iterations": 100},
+    quantile_config=QuantileGridConfig(n_quantiles=21),
+  ).fit(u, v)
+  _check_fitted_model(m)
+
+
+def test_xgb_quantile_backend_smoke() -> None:
+  pytest.importorskip("xgboost")
+  u, v = _gaussian_copula_sample(80, rho=0.6, seed=4)
+  m = RosenblattBicop(
+    backend="xgb-quantile",
+    backend_kwargs={"n_estimators": 100},
+    quantile_config=QuantileGridConfig(n_quantiles=21),
+  ).fit(u, v)
+  _check_fitted_model(m)
+
+
+def test_pytabkit_realmlp_backend_smoke() -> None:
+  pytest.importorskip("pytabkit")
+  u, v = _gaussian_copula_sample(80, rho=0.6, seed=5)
+  m = RosenblattBicop(
+    backend="pytabkit-realmlp",
+    backend_kwargs={"n_epochs": 8},
+    quantile_config=QuantileGridConfig(n_quantiles=21),
+  ).fit(u, v)
+  _check_fitted_model(m)
+
+
+def test_nori_backend_smoke() -> None:
+  pytest.importorskip("synthefy_nori")
+  u, v = _gaussian_copula_sample(80, rho=0.6, seed=7)
+  try:
+    m = RosenblattBicop(
+      backend="nori",
+      quantile_config=QuantileGridConfig(n_quantiles=41),
+    ).fit(u, v)
+  except Exception as exc:  # noqa: BLE001 - weight download / runtime issues
+    pytest.skip(f"Nori unavailable at runtime: {exc}")
+  _check_fitted_model(m)
+
+
+def test_tabpfn_finetune_backend_smoke() -> None:
+  # Opt-in: fine-tuning is a GPU training loop (minutes), too slow for the
+  # default suite. Enable with NPCC_RUN_FINETUNE=1.
+  if not os.environ.get("NPCC_RUN_FINETUNE"):
+    pytest.skip("set NPCC_RUN_FINETUNE=1 to run the fine-tune smoke")
+  torch = pytest.importorskip("torch")
+  if not torch.cuda.is_available():
+    pytest.skip("fine-tuning needs a GPU")
+  if not os.environ.get("TABPFN_TOKEN"):
+    pytest.skip("no TABPFN_TOKEN")
+  u, v = _gaussian_copula_sample(120, rho=0.6, seed=6)
+  try:
+    m = RosenblattBicop(
+      backend="tabpfn-finetune",
+      backend_kwargs={"epochs": 1, "early_stopping": False},
+    ).fit(u, v)
+    pdf = np.asarray(m.pdf(np.array([0.5]), np.array([0.5])))
+  except Exception as exc:  # noqa: BLE001 - license/download/runtime issues
+    pytest.skip(f"TabPFN fine-tune unavailable at runtime: {exc}")
+  assert np.all(np.isfinite(pdf)) and np.all(pdf >= 0.0)
 
 
 def test_tabicl_backend_smoke() -> None:

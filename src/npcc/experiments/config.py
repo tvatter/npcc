@@ -15,14 +15,11 @@ from itertools import product
 from pathlib import Path
 from typing import Any
 
-from tabpfn.constants import ModelVersion
-
+from npcc.core.registry import available_backends
 from npcc.experiments.scenarios import FAMILIES, TAU_SCENARIOS
 
 TRANSFORMS: tuple[str, ...] = ("identity", "logit", "probit")
-METHODS: tuple[str, ...] = ("criterion", "quantiles")
-MODEL_VERSIONS: tuple[str, ...] = tuple(v.value for v in ModelVersion)
-DEFAULT_MODEL_VERSION: str = ModelVersion.V3.value
+DEFAULT_BACKENDS: tuple[str, ...] = ("tabpfn-criterion", "tabpfn-quantiles")
 
 
 @dataclass(frozen=True)
@@ -30,8 +27,7 @@ class EstimatorSpec:
   """An estimator configuration fitted once per data cell."""
 
   transform: str
-  method: str
-  model_version: str = DEFAULT_MODEL_VERSION
+  backend: str
 
 
 @dataclass(frozen=True)
@@ -80,13 +76,10 @@ class GridConfig:
   families: list[str]
   tau_scenarios: list[str]
   transforms: list[str]
-  methods: list[str]
+  backends: list[str]
   normalize: list[int | None]
   n: list[int]
   n_rep: int
-  model_versions: list[str] = field(
-    default_factory=lambda: [DEFAULT_MODEL_VERSION]
-  )
   projection_grid_size: int = 30
   conditional_uv_grid_n: int = 20
   conditional_x_grid_n: int = 10
@@ -101,8 +94,7 @@ class GridConfig:
     _check_subset("families", self.families, FAMILIES)
     _check_subset("tau_scenarios", self.tau_scenarios, TAU_SCENARIOS)
     _check_subset("transforms", self.transforms, TRANSFORMS)
-    _check_subset("methods", self.methods, METHODS)
-    _check_subset("model_versions", self.model_versions, MODEL_VERSIONS)
+    _check_subset("backends", self.backends, available_backends())
     if not self.normalize:
       raise ValueError("normalize must be non-empty (e.g. [None]).")
     for entry in self.normalize:
@@ -135,10 +127,8 @@ class GridConfig:
 
   def estimator_specs(self) -> list[EstimatorSpec]:
     return [
-      EstimatorSpec(transform=t, method=m, model_version=mv)
-      for t, m, mv in product(
-        self.transforms, self.methods, self.model_versions
-      )
+      EstimatorSpec(transform=t, backend=b)
+      for t, b in product(self.transforms, self.backends)
     ]
 
   def cells(self) -> list[Cell]:
@@ -179,13 +169,10 @@ def load_grid(path: str | Path) -> GridConfig:
       families=list(grid["families"]),
       tau_scenarios=list(grid["tau_scenarios"]),
       transforms=list(grid["transforms"]),
-      methods=list(grid["methods"]),
+      backends=list(grid["backends"]),
       normalize=_coerce_normalize(list(grid["normalize"])),
       n=[int(v) for v in grid["n"]],
       n_rep=int(grid["n_rep"]),
-      model_versions=[
-        str(v) for v in grid.get("model_versions", [DEFAULT_MODEL_VERSION])
-      ],
       projection_grid_size=int(grid.get("projection_grid_size", 30)),
       conditional_uv_grid_n=int(grid.get("conditional_uv_grid_n", 20)),
       conditional_x_grid_n=int(grid.get("conditional_x_grid_n", 10)),

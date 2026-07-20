@@ -4,27 +4,31 @@
 #
 # The study sweeps the cartesian product of every axis below. Each
 # (family, tau_scenario, n, rep) cell samples its own data + ground truth once;
-# the (transform, method, model_version) estimators are fitted on that shared
-# data. Metrics are aggregated over a uv grid at each fixed x, diagnostics check
-# margins and dependence, and plot-ready quantities are written only for the
-# families listed in `surface_families`.
+# the (transform, backend) estimators are fitted on that shared data. Metrics
+# are aggregated over a uv grid at each fixed x, diagnostics check margins and
+# dependence, and plot-ready quantities are written only for the families
+# listed in `surface_families`.
 
 [grid]
 # Copula families (one-parameter): clayton, gumbel, frank, gaussian, joe.
-families = ["clayton", "gumbel", "frank", "gaussian", "joe"]
+families = ["clayton", "gumbel", "frank", "gaussian"]
 
 # Conditional tau(x) regimes: monotone, symmetric, and nonmonotone.
 tau_scenarios = ["linear", "quadratic", "sin"]
 
-# Support transforms used by the inner TabPFN models.
-transforms = ["logit", "identity", "probit"]
+# Support transforms used by the inner distributional-regression models.
+transforms = ["logit", "probit"]
 
-# Density-recovery methods.
-methods = ["criterion", "quantiles"]
-
-# TabPFN model versions for the inner univariate regressors.
-# Allowed: v2, v2.5, v2.6, v3.
-model_versions = ["v2.5", "v3"]
+# Inner distributional-regression backends (registry names). See
+# `npcc.available_backends()`. TabPFN version-pinned presets are e.g.
+# tabpfn-criterion-v2.5 / tabpfn-criterion-v3. Non-TabPFN backends
+# (catboost, xgb-quantile, pytabkit-realmlp/-tabm, ngboost, gbm, tabicl,
+# tabicl-finetune, tabpfn-finetune) require their optional extra installed.
+backends = [
+  "tabpfn-criterion-v2.5",
+  "tabpfn-criterion-v3",
+  "tabpfn-quantiles-v3",
+]
 
 # Sinkhorn normalization variants applied to the density. "none" = off.
 normalize = ["none", 3]
