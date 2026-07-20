@@ -1,4 +1,4 @@
-"""Tests for ``TabPFNCriterionDistribution1D`` (criterion-based density)."""
+"""Tests for ``TabPFNCriterionBackend`` (criterion-based density)."""
 
 from __future__ import annotations
 
@@ -8,9 +8,7 @@ import numpy as np
 import pytest
 import torch
 
-from npcc.core.tabpfn_criterion_distribution1d import (
-  TabPFNCriterionDistribution1D,
-)
+from npcc.core.backends.tabpfn_criterion import TabPFNCriterionBackend
 from tests.conftest import uniform_density_y
 
 
@@ -26,46 +24,46 @@ def _stdnorm_ppf(p: np.ndarray) -> np.ndarray:
   return out.detach().cpu().numpy()
 
 
-class TestTabPFNCriterionDistribution1D:
+class TestTabPFNCriterionBackend:
   def test_default_batch_size_on_cpu_is_400(self) -> None:
-    d = TabPFNCriterionDistribution1D(device="cpu")
+    d = TabPFNCriterionBackend(device="cpu")
     assert d.batch_size == 400
 
   def test_default_batch_size_on_cuda_is_2000(self) -> None:
-    d = TabPFNCriterionDistribution1D(device="cuda")
+    d = TabPFNCriterionBackend(device="cuda")
     assert d.batch_size == 2000
 
   def test_custom_batch_size_overrides_device_default(self) -> None:
-    d = TabPFNCriterionDistribution1D(device="cpu", batch_size=123)
+    d = TabPFNCriterionBackend(device="cpu", batch_size=123)
     assert d.batch_size == 123
 
   def test_nonpositive_constructor_batch_size_rejected(self) -> None:
     with pytest.raises(ValueError, match="batch_size"):
-      TabPFNCriterionDistribution1D(batch_size=0)
+      TabPFNCriterionBackend(batch_size=0)
 
   def test_pdf_before_fit_raises(self, patch_uniform: None) -> None:
-    d = TabPFNCriterionDistribution1D()
+    d = TabPFNCriterionBackend()
     with pytest.raises(RuntimeError, match="not fitted"):
       d.pdf(np.zeros((1, 1)), np.array([0.5]))
 
   def test_fit_accepts_1d_w(self, patch_uniform: None) -> None:
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20))
     assert d.model_ is not None
 
   def test_fit_accepts_2d_w(self, patch_uniform: None) -> None:
     rng = np.random.default_rng(0)
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(rng.uniform(0.1, 0.9, (20, 3)), rng.uniform(0.1, 0.9, 20))
     assert d.model_ is not None
 
   def test_fit_rejects_length_mismatch(self, patch_uniform: None) -> None:
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     with pytest.raises(ValueError, match="incompatible"):
       d.fit(np.zeros((5, 1)), np.zeros(6))
 
   def test_pdf_rejects_length_mismatch(self, patch_uniform: None) -> None:
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
     with pytest.raises(ValueError, match="incompatible"):
       d.pdf(np.zeros((5, 1)), np.full(6, 0.5))
@@ -73,7 +71,7 @@ class TestTabPFNCriterionDistribution1D:
   def test_pdf_rejects_nonpositive_batch_size(
     self, patch_uniform: None
   ) -> None:
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
     with pytest.raises(ValueError, match="batch_size"):
       d.pdf(np.zeros((2, 1)), np.array([0.3, 0.5]), batch_size=0)
@@ -81,7 +79,7 @@ class TestTabPFNCriterionDistribution1D:
   def test_pdf_logit_jacobian_matches_analytic(
     self, patch_uniform: None
   ) -> None:
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     y = np.array([0.3, 0.5, 0.7])
@@ -91,7 +89,7 @@ class TestTabPFNCriterionDistribution1D:
     np.testing.assert_allclose(actual, expected, atol=1e-6)
 
   def test_pdf_zero_outside_support(self, patch_uniform: None) -> None:
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     y = np.array([0.02, 0.98])
@@ -101,7 +99,7 @@ class TestTabPFNCriterionDistribution1D:
 
   def test_pdf_respects_batch_size(self, patch_uniform: None) -> None:
     rng = np.random.default_rng(0)
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     n = 17  # not a multiple of batch_size
@@ -115,7 +113,7 @@ class TestTabPFNCriterionDistribution1D:
     self, patch_uniform: None, monkeypatch: pytest.MonkeyPatch
   ) -> None:
     rng = np.random.default_rng(1)
-    d = TabPFNCriterionDistribution1D(transform="logit", batch_size=4)
+    d = TabPFNCriterionBackend(transform="logit", batch_size=4)
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     n = 17
@@ -138,7 +136,7 @@ class TestTabPFNCriterionDistribution1D:
     self, patch_uniform: None, monkeypatch: pytest.MonkeyPatch
   ) -> None:
     rng = np.random.default_rng(2)
-    d = TabPFNCriterionDistribution1D(transform="logit", batch_size=4)
+    d = TabPFNCriterionBackend(transform="logit", batch_size=4)
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     n = 17
@@ -158,7 +156,7 @@ class TestTabPFNCriterionDistribution1D:
     assert calls == 2
 
   def test_pdf_grid_shape(self, patch_uniform: None) -> None:
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     w = np.zeros((4, 1))
@@ -167,7 +165,7 @@ class TestTabPFNCriterionDistribution1D:
     assert out.shape == (4, 3)
 
   def test_pdf_grid_matches_pdf(self, patch_uniform: None) -> None:
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     w = np.zeros((3, 1))
@@ -180,17 +178,17 @@ class TestTabPFNCriterionDistribution1D:
     np.testing.assert_allclose(grid, tiled, atol=1e-8)
 
   def test_pdf_grid_before_fit_raises(self, patch_uniform: None) -> None:
-    d = TabPFNCriterionDistribution1D()
+    d = TabPFNCriterionBackend()
     with pytest.raises(RuntimeError, match="not fitted"):
       d.pdf_grid(np.zeros((1, 1)), np.array([0.5]))
 
   def test_cdf_before_fit_raises(self, patch_uniform: None) -> None:
-    d = TabPFNCriterionDistribution1D()
+    d = TabPFNCriterionBackend()
     with pytest.raises(RuntimeError, match="not fitted"):
       d.cdf(np.zeros((1, 1)), np.array([0.5]))
 
   def test_cdf_rejects_length_mismatch(self, patch_uniform: None) -> None:
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
     with pytest.raises(ValueError, match="incompatible"):
       d.cdf(np.zeros((5, 1)), np.full(6, 0.5))
@@ -198,14 +196,14 @@ class TestTabPFNCriterionDistribution1D:
   def test_cdf_rejects_nonpositive_batch_size(
     self, patch_uniform: None
   ) -> None:
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
     with pytest.raises(ValueError, match="batch_size"):
       d.cdf(np.zeros((2, 1)), np.array([0.3, 0.5]), batch_size=0)
 
   def test_cdf_logit_matches_analytic(self, patch_uniform: None) -> None:
     """Under the fake (Z ~ Uniform(-2, 2)), F_Y(y) = clip((logit(y)+2)/4, 0, 1)."""
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     y = np.array([0.3, 0.5, 0.7])
@@ -215,7 +213,7 @@ class TestTabPFNCriterionDistribution1D:
     np.testing.assert_allclose(actual, expected, atol=1e-6)
 
   def test_cdf_clips_outside_support(self, patch_uniform: None) -> None:
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     y = np.array([0.02, 0.98])
@@ -225,7 +223,7 @@ class TestTabPFNCriterionDistribution1D:
 
   def test_cdf_respects_batch_size(self, patch_uniform: None) -> None:
     rng = np.random.default_rng(0)
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     n = 17
@@ -236,7 +234,7 @@ class TestTabPFNCriterionDistribution1D:
     np.testing.assert_allclose(full, chunked, atol=1e-8)
 
   def test_cdf_grid_shape(self, patch_uniform: None) -> None:
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     w = np.zeros((4, 1))
@@ -245,7 +243,7 @@ class TestTabPFNCriterionDistribution1D:
     assert out.shape == (4, 3)
 
   def test_cdf_grid_matches_cdf(self, patch_uniform: None) -> None:
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     w = np.zeros((3, 1))
@@ -258,12 +256,12 @@ class TestTabPFNCriterionDistribution1D:
     np.testing.assert_allclose(grid, tiled, atol=1e-8)
 
   def test_cdf_grid_before_fit_raises(self, patch_uniform: None) -> None:
-    d = TabPFNCriterionDistribution1D()
+    d = TabPFNCriterionBackend()
     with pytest.raises(RuntimeError, match="not fitted"):
       d.cdf_grid(np.zeros((1, 1)), np.array([0.5]))
 
   def test_cdf_monotone_in_y(self, patch_uniform: None) -> None:
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     y_sorted = np.linspace(0.05, 0.95, 20)
@@ -275,7 +273,7 @@ class TestTabPFNCriterionDistribution1D:
     self, patch_uniform: None
   ) -> None:
     """Under Z ~ Uniform(-2, 2) + logit, Q(α) = sigmoid(-2 + 4α)."""
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     alphas = np.array([0.1, 0.3, 0.5, 0.7, 0.9])
@@ -286,13 +284,13 @@ class TestTabPFNCriterionDistribution1D:
     np.testing.assert_allclose(y_hat, expected, atol=1e-6)
 
   def test_icdf_rejects_alpha_outside_unit(self, patch_uniform: None) -> None:
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
     with pytest.raises(ValueError, match="strictly inside"):
       d.icdf(np.zeros((2, 1)), np.array([0.5, 1.0]))
 
   def test_icdf_rejects_length_mismatch(self, patch_uniform: None) -> None:
-    d = TabPFNCriterionDistribution1D(transform="logit")
+    d = TabPFNCriterionBackend(transform="logit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
     with pytest.raises(ValueError, match="incompatible"):
       d.icdf(np.zeros((5, 1)), np.array([0.5]))
@@ -300,7 +298,7 @@ class TestTabPFNCriterionDistribution1D:
   def test_identity_transform_returns_z_density(
     self, patch_uniform: None
   ) -> None:
-    d = TabPFNCriterionDistribution1D(transform="identity")
+    d = TabPFNCriterionBackend(transform="identity")
     d.fit(np.zeros((10, 1)), np.zeros(10))
 
     z = np.array([-1.0, 0.0, 1.0])
@@ -311,7 +309,7 @@ class TestTabPFNCriterionDistribution1D:
   def test_probit_transform_pdf_cdf_icdf_match_analytic(
     self, patch_uniform: None
   ) -> None:
-    d = TabPFNCriterionDistribution1D(transform="probit")
+    d = TabPFNCriterionBackend(transform="probit")
     d.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     y = np.array([0.2, 0.5, 0.8])
@@ -335,6 +333,6 @@ class TestTabPFNCriterionDistribution1D:
 
   def test_unknown_transform_raises(self) -> None:
     bad: Any = "exp"
-    d = TabPFNCriterionDistribution1D(transform=bad)
+    d = TabPFNCriterionBackend(transform=bad)
     with pytest.raises(ValueError, match="Unknown transform"):
       d._transform_y(torch.tensor([0.5]))

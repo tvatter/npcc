@@ -22,7 +22,7 @@ import torch
 
 from tabpfn.constants import ModelVersion
 
-from npcc.core.pfnr_bicop import PFNRBicop
+from npcc.core.bicop import RosenblattBicop
 from npcc.experiments import metrics, scenarios
 from npcc.experiments.config import Cell, EstimatorSpec, GridConfig, RunConfig
 from npcc.experiments.scenarios import EvalGrid
@@ -225,7 +225,7 @@ def _diagnostic_rows(
   cell: Cell,
   est: EstimatorSpec,
   seed: int,
-  model: PFNRBicop,
+  model: RosenblattBicop,
   pdf_by_norm: dict[str, np.ndarray],
   grid: EvalGrid,
   *,
@@ -346,12 +346,12 @@ def summarize_one_cell(
 
   for est in estimator_specs:
     t0 = perf_counter()
-    model = PFNRBicop(
-      method=cast(Literal["criterion", "quantiles"], est.method),
+    model = RosenblattBicop(
+      backend=f"tabpfn-{est.method}",
       transform=cast(Literal["identity", "logit", "probit"], est.transform),
       device=device,
       projection_grid_size=projection_grid_size,
-      model_version=ModelVersion(est.model_version),
+      backend_kwargs={"model_version": ModelVersion(est.model_version)},
     )
     model.fit(u, v, x)
     fit_time = perf_counter() - t0

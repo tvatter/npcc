@@ -1,34 +1,45 @@
 """
-tabpfn_distribution1d.py — abstract base for univariate conditional
-predictive distributions backed by TabPFN.
+conditional_distribution1d.py — backend-neutral abstract base for
+univariate conditional predictive distributions.
 
-Concrete implementations live in
-:mod:`npcc.tabpfn_criterion_distribution1d` (uses TabPFN's binned
-distribution head directly) and
-:mod:`npcc.tabpfn_quantile_distribution1d` (numerical inversion of the
-predicted quantile table).  Both share:
+A concrete instance, once :py:meth:`fit` has been called, represents the
+conditional distribution of ``Y`` given ``W`` learned by *some*
+distributional regressor.  The base class is deliberately free of any
+model dependency: it owns only
 
 - the optional support transforms (and their Jacobians / inverses),
-- the ``transform`` / ``eps`` / ``device`` / ``model_kwargs`` / ``model_``
-  fields set up at construction time,
-- the public ``fit`` / ``pdf`` / ``cdf`` / ``icdf`` interface,
-- accept ``np.ndarray`` or ``torch.Tensor`` inputs and return the same
-  type the caller passed in.
+- the ``transform`` / ``eps`` / ``device`` / ``batch_size`` fields set up
+  at construction time,
+- the ``fit`` skeleton, which transforms ``Y -> Z = T(Y)`` and delegates
+  the actual model training to the abstract :py:meth:`_fit_model`,
+- the public ``pdf`` / ``cdf`` / ``icdf`` / ``pdf_grid`` / ``cdf_grid``
+  interface (all abstract),
 
-The base class is :class:`abc.ABC` so the abstract methods are enforced
-at instantiation time; the per-class fast paths (``pdf_grid`` /
-``cdf_grid`` on the criterion subclass) stay subclass-specific.
+and accepts ``np.ndarray`` or ``torch.Tensor`` inputs, returning the same
+type the caller passed in.
+
+Concrete backends live in :mod:`npcc.core.backends`.  The two TabPFN
+read-outs (``TabPFNCriterionBackend`` — native binned head, the default;
+``TabPFNQuantileBackend`` — numerical inversion of the quantile table)
+implement this interface, as do the optional non-TabPFN backends.
+
+The grid methods (:py:meth:`pdf_grid` / :py:meth:`cdf_grid`) are
+**abstract on purpose**.  There is no slow tiling fallback: every backend
+must evaluate a Cartesian ``w x y_grid`` by predicting **at most once per
+conditioning row** and reusing that prediction across all ``y`` values.
+This "predict-once-per-row" contract is the core speed invariant of the
+whole library (see :mod:`npcc.core.quantile_table_distribution1d`, which
+satisfies it for every quantile-based backend, and the native backends,
+which override the grids directly).
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import math
-from typing import Any, Literal, Self
+from typing import Literal, Self
 
 import torch
-from tabpfn import TabPFNRegressor
-from tabpfn.constants import ModelVersion
 
 from npcc.core._common import (
   TensorLike,
@@ -38,59 +49,36 @@ from npcc.core._common import (
   _to_tensor,
 )
 
-_DEFAULT_MODEL_VERSION = ModelVersion.V3
-"""Default TabPFN model version shared by every npcc distribution/copula class.
 
-Centralized here so a version bump is a one-line change rather than four
-scattered defaults (the two inner distributions and
-:class:`~npcc.pfnr_bicop.PFNRBicop` all reference this single value).
-"""
-
-
-class TabPFNDistribution1D(ABC):
+class ConditionalDistribution1D(ABC):
   """Abstract base class for univariate conditional predictive distributions.
-
-  A concrete instance, once :py:meth:`fit` has been called, represents
-  the conditional distribution of ``Y`` given ``W`` learned by a
-  TabPFN regressor.  Subclasses differ only in *how* that distribution
-  is read off the regressor's output.
 
   Parameters
   ----------
   transform
-      ``"identity"`` fits TabPFN directly on ``Y``.  ``"logit"`` fits
-      on ``Z = logit(Y)`` and applies the inverse Jacobian when
-      evaluating densities; this is the only sensible choice when
-      ``Y`` is bounded in ``(0, 1)``, which is always the case for
-      copula scores. ``"probit"`` uses ``Z = Phi^{-1}(Y)`` with the
-      standard-normal Jacobian.
+      ``"identity"`` fits directly on ``Y``.  ``"logit"`` fits on
+      ``Z = logit(Y)`` and applies the inverse Jacobian when evaluating
+      densities; this is the only sensible choice when ``Y`` is bounded
+      in ``(0, 1)``, which is always the case for copula scores.
+      ``"probit"`` uses ``Z = Phi^{-1}(Y)`` with the standard-normal
+      Jacobian.
   eps
-      Clip distance from the boundary of ``(0, 1)`` used by support
+      Clip distance from the boundary of ``(0, 1)`` used by the support
       transforms.
   device
-      Device for internal tensors and TabPFN inference.  ``None``
-      auto-selects ``cuda`` if available, else ``cpu``.  Forwarded into
-      ``model_kwargs["device"]`` (without overriding an explicit user
-      setting).
+      Device for internal tensors and inference.  ``None`` auto-selects
+      ``cuda`` if available, else ``cpu``.
   batch_size
       Default chunk size for batched inference.  ``None`` (default) uses
-      400 on CPU and 2000 on CUDA.  Subclasses that read the predictive
-      distribution in one forward pass (e.g. the quantile method) ignore
-      it; it is honoured by the criterion method's chunked ``pdf`` /
-      ``cdf``.
-  model_kwargs
-      Forwarded to
-      :py:meth:`TabPFNRegressor.create_default_for_version` by
-      subclasses.
+      400 on CPU and 2000 on CUDA.  Backends that read the predictive
+      distribution in one forward pass may ignore it.
   """
 
   transform: Literal["identity", "logit", "probit"]
   eps: float
   batch_size: int
-  model_kwargs: dict[str, Any]
-  model_version: ModelVersion | None
-  model_: TabPFNRegressor | None
   _device: torch.device
+  _fitted: bool
 
   def __init__(
     self,
@@ -99,8 +87,6 @@ class TabPFNDistribution1D(ABC):
     eps: float = 1e-6,
     device: str | torch.device | None = None,
     batch_size: int | None = None,
-    model_kwargs: dict[str, Any] | None = None,
-    model_version: ModelVersion | None = _DEFAULT_MODEL_VERSION,
   ) -> None:
     self.transform = transform
     self.eps = eps
@@ -111,10 +97,7 @@ class TabPFNDistribution1D(ABC):
       if batch_size <= 0:
         raise ValueError("batch_size must be positive.")
       self.batch_size = batch_size
-    self.model_kwargs = dict(model_kwargs or {})
-    self.model_kwargs.setdefault("device", str(self._device))
-    self.model_version = model_version
-    self.model_ = None
+    self._fitted = False
 
   def _resolve_batch_size(self, batch_size: int | None) -> int:
     """Per-call override of :attr:`batch_size`, validated positive."""
@@ -123,17 +106,13 @@ class TabPFNDistribution1D(ABC):
       raise ValueError("batch_size must be positive.")
     return effective
 
-  def _make_model(self) -> TabPFNRegressor:
-    if self.model_version is None:
-      return TabPFNRegressor(**self.model_kwargs)
-
-    return TabPFNRegressor.create_default_for_version(
-      self.model_version,
-      **self.model_kwargs,
-    )
+  def _check_fitted(self) -> None:
+    """Raise if :py:meth:`fit` has not been called yet."""
+    if not self._fitted:
+      raise RuntimeError("The model is not fitted.")
 
   # ------------------------------------------------------------------
-  # Shared concrete helpers (support transform machinery).
+  # Shared concrete helpers (support-transform machinery).
   # ------------------------------------------------------------------
 
   def _transform_y(self, y: torch.Tensor) -> torch.Tensor:
@@ -171,16 +150,16 @@ class TabPFNDistribution1D(ABC):
     raise ValueError(f"Unknown transform: {self.transform}")
 
   # ------------------------------------------------------------------
-  # Shared fit (TabPFN-v3 regressor on (w, transform(y))).
+  # Shared fit skeleton (Y -> Z = T(Y), then delegate to the backend).
   # ------------------------------------------------------------------
 
   def fit(self, w: TensorLike, y: TensorLike) -> Self:
-    """Fit a TabPFN regressor on ``(w, transform(y))``.
+    """Fit the backend regressor on ``(w, Z = transform(y))``.
 
-    Defaults to TabPFN-v3 (configurable via ``model_version`` /
-    ``model_kwargs``).  The fit-time tensors live on CPU: TabPFN does its
-    own GPU placement internally and would reject CUDA tensors at the
-    input boundary.
+    The fit-time tensors live on CPU: several backends (e.g. TabPFN) do
+    their own device placement internally and reject non-CPU tensors at
+    the input boundary.  Subclasses receive already-transformed,
+    CPU-resident, float64 ``(w, z)`` via :py:meth:`_fit_model`.
     """
     cpu = torch.device("cpu")
     w_t = _as_2d(w, device=cpu)
@@ -189,10 +168,13 @@ class TabPFNDistribution1D(ABC):
       raise ValueError("w and y have incompatible lengths.")
 
     z = self._transform_y(y_t)
-
-    self.model_ = self._make_model()
-    self.model_.fit(w_t, z)
+    self._fit_model(w_t, z)
+    self._fitted = True
     return self
+
+  @abstractmethod
+  def _fit_model(self, w: torch.Tensor, z: torch.Tensor) -> None:
+    """Train the backend regressor on ``(w, z)`` (CPU float64 tensors)."""
 
   # ------------------------------------------------------------------
   # Abstract public API.
@@ -211,5 +193,28 @@ class TabPFNDistribution1D(ABC):
     """Conditional CDF ``F(y_i | w_i) = P(Y <= y_i | W = w_i)`` per row."""
 
   @abstractmethod
-  def icdf(self, w: TensorLike, alphas: TensorLike) -> TensorLike:
+  def icdf(
+    self, w: TensorLike, alphas: TensorLike, *, batch_size: int | None = None
+  ) -> TensorLike:
     """Conditional quantile ``F^{-1}(alphas_i | w_i)`` per row, on the y-scale."""
+
+  @abstractmethod
+  def pdf_grid(
+    self, w: TensorLike, y_grid: TensorLike, *, batch_size: int | None = None
+  ) -> TensorLike:
+    """Density on the Cartesian product of ``w`` rows and ``y_grid``.
+
+    Returns shape ``(n_w, n_y)`` with ``out[i, j] = f(y_grid[j] | w[i])``.
+    Implementations MUST predict at most once per ``w`` row (never tile
+    over ``y_grid``) — this is the library's core speed invariant.
+    """
+
+  @abstractmethod
+  def cdf_grid(
+    self, w: TensorLike, y_grid: TensorLike, *, batch_size: int | None = None
+  ) -> TensorLike:
+    """CDF on the Cartesian product of ``w`` rows and ``y_grid``.
+
+    Returns shape ``(n_w, n_y)`` with ``out[i, j] = F(y_grid[j] | w[i])``.
+    Same predict-once-per-row contract as :py:meth:`pdf_grid`.
+    """
