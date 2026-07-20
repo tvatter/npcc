@@ -10,15 +10,19 @@ from __future__ import annotations
 
 import tomllib
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import product
 from pathlib import Path
 from typing import Any
+
+from tabpfn.constants import ModelVersion
 
 from npcc.experiments.scenarios import FAMILIES, TAU_SCENARIOS
 
 TRANSFORMS: tuple[str, ...] = ("identity", "logit", "probit")
 METHODS: tuple[str, ...] = ("criterion", "quantiles")
+MODEL_VERSIONS: tuple[str, ...] = tuple(v.value for v in ModelVersion)
+DEFAULT_MODEL_VERSION: str = ModelVersion.V3.value
 
 
 @dataclass(frozen=True)
@@ -27,6 +31,7 @@ class EstimatorSpec:
 
   transform: str
   method: str
+  model_version: str = DEFAULT_MODEL_VERSION
 
 
 @dataclass(frozen=True)
@@ -79,13 +84,25 @@ class GridConfig:
   normalize: list[int | None]
   n: list[int]
   n_rep: int
+  model_versions: list[str] = field(
+    default_factory=lambda: [DEFAULT_MODEL_VERSION]
+  )
   projection_grid_size: int = 30
+  conditional_uv_grid_n: int = 20
+  conditional_x_grid_n: int = 10
+  surface_tau_levels: list[float] = field(
+    default_factory=lambda: [0.1, 0.5, 0.9]
+  )
+  surface_families: list[str] = field(default_factory=lambda: ["clayton"])
+  enable_tau_diagnostics: bool = True
+  tau_diagnostic_n: int = 1000
 
   def __post_init__(self) -> None:
     _check_subset("families", self.families, FAMILIES)
     _check_subset("tau_scenarios", self.tau_scenarios, TAU_SCENARIOS)
     _check_subset("transforms", self.transforms, TRANSFORMS)
     _check_subset("methods", self.methods, METHODS)
+    _check_subset("model_versions", self.model_versions, MODEL_VERSIONS)
     if not self.normalize:
       raise ValueError("normalize must be non-empty (e.g. [None]).")
     for entry in self.normalize:
@@ -102,11 +119,26 @@ class GridConfig:
       raise ValueError("n_rep must be a positive int.")
     if self.projection_grid_size < 2:
       raise ValueError("projection_grid_size must be >= 2.")
+    if self.conditional_uv_grid_n < 2:
+      raise ValueError("conditional_uv_grid_n must be >= 2.")
+    if self.conditional_x_grid_n < 1:
+      raise ValueError("conditional_x_grid_n must be >= 1.")
+    if not self.surface_tau_levels:
+      raise ValueError("surface_tau_levels must be non-empty.")
+    for tau in self.surface_tau_levels:
+      if tau <= 0.0 or tau >= 1.0:
+        raise ValueError("surface_tau_levels entries must be in (0, 1).")
+    if self.surface_families:
+      _check_subset("surface_families", self.surface_families, FAMILIES)
+    if self.tau_diagnostic_n < 10:
+      raise ValueError("tau_diagnostic_n must be >= 10.")
 
   def estimator_specs(self) -> list[EstimatorSpec]:
     return [
-      EstimatorSpec(transform=t, method=m)
-      for t, m in product(self.transforms, self.methods)
+      EstimatorSpec(transform=t, method=m, model_version=mv)
+      for t, m, mv in product(
+        self.transforms, self.methods, self.model_versions
+      )
     ]
 
   def cells(self) -> list[Cell]:
@@ -128,7 +160,7 @@ class RunConfig:
   workers: int = 1
   base_seed: int = 317
   log_level: str = "INFO"
-  fmt: str = "csv"
+  fmt: str = "parquet"
 
   def __post_init__(self) -> None:
     if self.workers < 1:
@@ -151,7 +183,20 @@ def load_grid(path: str | Path) -> GridConfig:
       normalize=_coerce_normalize(list(grid["normalize"])),
       n=[int(v) for v in grid["n"]],
       n_rep=int(grid["n_rep"]),
+      model_versions=[
+        str(v) for v in grid.get("model_versions", [DEFAULT_MODEL_VERSION])
+      ],
       projection_grid_size=int(grid.get("projection_grid_size", 30)),
+      conditional_uv_grid_n=int(grid.get("conditional_uv_grid_n", 20)),
+      conditional_x_grid_n=int(grid.get("conditional_x_grid_n", 10)),
+      surface_tau_levels=[
+        float(v) for v in grid.get("surface_tau_levels", [0.1, 0.5, 0.9])
+      ],
+      surface_families=[
+        str(v) for v in grid.get("surface_families", ["clayton"])
+      ],
+      enable_tau_diagnostics=bool(grid.get("enable_tau_diagnostics", True)),
+      tau_diagnostic_n=int(grid.get("tau_diagnostic_n", 1000)),
     )
   except KeyError as exc:
     raise ValueError(f"Missing required [grid] key: {exc}.") from exc

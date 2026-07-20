@@ -1,0 +1,352 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\I}{\mathbb{I}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\dd}{\,\mathrm{d}}
+\newcommand{\given}{\,\mid\,}
+\newcommand{\npcc}{\mathrm{NPCC}}
+\newcommand{\logit}{\operatorname{logit}}
+
+\title{Mathematical Details of the Neural Pair-Copula Construction}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Setup}
+
+Let
+\[
+  (U_i,V_i,X_i)_{i=1}^n,
+  \qquad
+  U_i,V_i \in (0,1), \quad X_i \in \R^p,
+\]
+denote observations on the copula scale, possibly with covariates.
+The goal is to estimate the conditional bivariate copula density
+\[
+  c(u,v \given x),
+  \qquad (u,v) \in (0,1)^2.
+\]
+When no covariates are supplied, the implementation uses a constant
+one-dimensional covariate, so the unconditional case is represented as
+a special case of the conditional formulation.
+
+\section{Rosenblatt Factorization}
+
+On the copula scale, the conditional margins of $U$ and $V$ are uniform.
+Hence a conditional bivariate copula density may be represented through a
+Rosenblatt factorization,
+\[
+  c(u,v \given x)
+  =
+  f_{V \given U,X}(v \given u,x).
+\]
+The reverse ordering gives the analogous identity
+\[
+  c(u,v \given x)
+  =
+  f_{U \given V,X}(u \given v,x).
+\]
+Each factor is a univariate conditional density. The estimator therefore
+reduces conditional copula density estimation to two conditional
+univariate predictive-distribution problems.
+
+\section{Neural Pair-Copula Estimator}
+
+The model fits two TabPFN-backed conditional distribution estimators:
+\[
+  \widehat f_{V \given U,X}(v \given u,x),
+  \qquad
+  \widehat f_{U \given V,X}(u \given v,x).
+\]
+For the first direction, the conditioning features are
+\[
+  W^{(V)} = (U,X),
+\]
+and the response is $V$. For the reverse direction,
+\[
+  W^{(U)} = (V,X),
+\]
+and the response is $U$.
+
+The fitted Neural Pair-Copula Construction (NPCC) density is the
+symmetric average
+\[
+  \widehat c_{\npcc}(u,v \given x)
+  =
+  \frac{1}{2}\widehat f_{V \given U,X}(v \given u,x)
+  +
+  \frac{1}{2}\widehat f_{U \given V,X}(u \given v,x).
+  \label{eq:symmetric-density}
+\]
+This averaging reduces sensitivity to the Rosenblatt ordering. Without
+the optional projection in Section~\ref{sec:sinkhorn}, the average is
+not guaranteed to satisfy the two uniform marginal constraints exactly.
+
+\section{Support Transforms}
+
+The inner univariate model can fit a transformed response
+\[
+  Z = T(Y),
+  \qquad Y \in (0,1),
+\]
+where $Y$ is either $U$ or $V$. Densities are converted back to the
+copula scale by the change-of-variables formula
+\[
+  f_Y(y \given w)
+  =
+  f_Z(T(y) \given w)\,\left|T'(y)\right|.
+  \label{eq:change-of-variables}
+\]
+The implementation supports the transformations in
+Table~\ref{tab:transforms}.
+
+\begin{table}[h]
+  \centering
+  \begin{tabular}{lll}
+    \toprule
+    Name & Transform $T(y)$ & Jacobian $\left|T'(y)\right|$ \\
+    \midrule
+    identity & $y$ & $1$ \\
+    logit & $\logit(y)=\log\{y/(1-y)\}$ & $\{y(1-y)\}^{-1}$ \\
+    probit & $\Phi^{-1}(y)$ & $\phi(\Phi^{-1}(y))^{-1}$ \\
+    \bottomrule
+  \end{tabular}
+  \caption{Response transformations supported by the inner conditional
+  distribution model. Here $\Phi$ and $\phi$ are the standard normal CDF
+  and PDF.}
+  \label{tab:transforms}
+\end{table}
+
+The logit transform is the default. Inputs are clipped away from the
+boundary of $(0,1)$ by a small numerical tolerance before applying the
+transform.
+
+\section{TabPFN Predictive Distribution Recovery}
+
+Both inner estimators train a TabPFN regressor on pairs
+$(W_i,T(Y_i))$. They differ only in how the fitted conditional
+predictive distribution is read from TabPFN.
+
+\subsection{Criterion Method}
+
+The default method uses TabPFN's native distribution head. For a query
+feature matrix $W$, TabPFN returns logits $\ell(W)$ over a binned
+predictive distribution and a criterion object that evaluates the
+corresponding conditional density, distribution function, and quantile
+function. On the transformed scale,
+\[
+  \widehat f_Z(z \given w)
+  =
+  \operatorname{criterion.pdf}(\ell(w), z),
+\]
+\[
+  \widehat F_Z(z \given w)
+  =
+  \operatorname{criterion.cdf}(\ell(w), z),
+\]
+and
+\[
+  \widehat F_Z^{-1}(\alpha \given w)
+  =
+  \operatorname{criterion.icdf}(\ell(w), \alpha).
+\]
+The density on the copula scale follows from
+Equation~\eqref{eq:change-of-variables}; CDFs and quantiles are mapped
+through the monotone transform without a Jacobian correction.
+
+\subsection{Quantile Method}
+
+The alternative method queries TabPFN for a conditional quantile table
+\[
+  \widehat Q_Z(\alpha_k \given w),
+  \qquad
+  \alpha_k \in [\alpha_{\min},\alpha_{\max}],
+  \quad k=1,\dots,K.
+\]
+For each query row, the predicted quantiles are sorted to enforce
+monotonicity. The conditional CDF is recovered by interpolation in the
+quantile table:
+\[
+  \widehat F_Z(z \given w)
+  \approx
+  \alpha
+  \quad\text{such that}\quad
+  \widehat Q_Z(\alpha \given w) = z.
+\]
+The conditional density is recovered by differentiating the quantile
+function,
+\[
+  \widehat f_Z(z \given w)
+  \approx
+  \left[
+    \frac{\partial}{\partial \alpha}
+    \widehat Q_Z(\alpha \given w)
+  \right]^{-1}_{\alpha=\widehat F_Z(z \given w)}.
+  \label{eq:quantile-density}
+\]
+In the implementation, the derivative is computed by finite differences,
+floored by a positive constant for numerical stability, and then linearly
+interpolated.
+
+\section{Conditional Distribution Functions}
+
+The fitted model exposes two conditional distribution functions, also
+called $h$-functions:
+\[
+  \widehat h_1(u,v \given x)
+  =
+  \widehat F_{V \given U,X}(v \given u,x),
+  \label{eq:hfunc1}
+\]
+\[
+  \widehat h_2(u,v \given x)
+  =
+  \widehat F_{U \given V,X}(u \given v,x).
+  \label{eq:hfunc2}
+\]
+The numbering follows the pyvinecopulib convention: $h_1$ conditions on
+the first argument and $h_2$ conditions on the second argument.
+
+The joint conditional copula CDF is approximated by averaging the two
+integrated Rosenblatt directions,
+\[
+  \widehat C(u,v \given x)
+  =
+  \frac{1}{2}
+  \left[
+    \int_0^u
+    \widehat F_{V \given U,X}(v \given s,x)\dd s
+    +
+    \int_0^v
+    \widehat F_{U \given V,X}(u \given t,x)\dd t
+  \right].
+  \label{eq:joint-cdf}
+\]
+The implementation evaluates these integrals by the trapezoidal rule.
+
+\section{Optional Sinkhorn Projection}
+\label{sec:sinkhorn}
+
+The symmetric density in Equation~\eqref{eq:symmetric-density} is
+nonnegative but does not necessarily satisfy the copula marginal
+constraints exactly:
+\[
+  \int_0^1 c(u,v \given x)\dd v = 1,
+  \qquad
+  \int_0^1 c(u,v \given x)\dd u = 1.
+\]
+An optional iterative proportional fitting, or Sinkhorn, projection is
+available to enforce these constraints approximately on a grid.
+
+Let $u_1,\dots,u_m$ and $v_1,\dots,v_q$ be projection grids with
+trapezoidal weights $a_i$ and $b_j$. For a fixed covariate value $x$,
+write the raw density matrix as
+\[
+  C_{ij} = \widehat c_{\npcc}(u_i,v_j \given x).
+\]
+The projection seeks positive row and column scalings $r_i$ and $s_j$
+such that
+\[
+  \widetilde C_{ij} = r_i C_{ij} s_j
+\]
+has approximately uniform margins under the quadrature rule:
+\[
+  \sum_{j=1}^q \widetilde C_{ij} b_j \approx 1,
+  \qquad
+  \sum_{i=1}^m \widetilde C_{ij} a_i \approx 1.
+\]
+The implementation alternates the updates
+\[
+  r_i
+  \leftarrow
+  \left(\sum_{j=1}^q C_{ij}s_j b_j\right)^{-1},
+  \qquad
+  s_j
+  \leftarrow
+  \left(\sum_{i=1}^m C_{ij}r_i a_i\right)^{-1},
+\]
+computed in the log domain for numerical stability. For pointwise
+density queries, the grid scalings are linearly interpolated back to the
+requested $(u,v)$ locations.
+
+\section{Kendall's Tau}
+
+For a fixed covariate value $x$, Kendall's tau is estimated by a
+simulation recipe based on the inverse Rosenblatt transform. Draw a
+deterministic two-dimensional generalized Halton sample
+\[
+  (A_i,B_i)_{i=1}^N \subset (0,1)^2.
+\]
+Set
+\[
+  U_i^\star = A_i,
+  \qquad
+  V_i^\star =
+  \widehat F^{-1}_{V \given U,X}(B_i \given A_i,x).
+\]
+Then $(U_i^\star,V_i^\star)$ is an approximate sample from the fitted
+copula, and Kendall's tau is computed as the rank Kendall correlation of
+these pairs.
+
+\section{Simulation Study Scenarios}
+
+The simulation utilities generate data from known pyvinecopulib
+bivariate copula families. The implemented one-parameter families are
+Clayton, Gumbel, Frank, Gaussian, and Joe. Each family is parameterized
+through Kendall's tau.
+
+For conditional scenarios, a scalar covariate $x \in [0.01,0.99]$
+controls Kendall's tau through one of the following regimes:
+\[
+  \tau_{\mathrm{linear}}(x)
+  =
+  \tau_{\min}+(\tau_{\max}-\tau_{\min})x,
+\]
+\[
+  \tau_{\mathrm{constant}}(x)=0.5,
+\]
+\[
+  \tau_{\mathrm{sin}}(x)
+  =
+  \operatorname{clip}\{0.5+0.4\sin(2\pi x)\},
+\]
+\[
+  \tau_{\mathrm{quadratic}}(x)
+  =
+  \tau_{\min}+(\tau_{\max}-\tau_{\min})(2x-1)^2,
+\]
+where the implementation clips the tau values to
+$[\tau_{\min},\tau_{\max}]=[0.05,0.90]$. The unconditional scenarios use
+fixed Kendall's tau values $0.25$, $0.50$, and $0.75$.
+
+\section{Implementation Correspondence}
+
+\begin{table}[h]
+  \centering
+  \begin{tabular}{ll}
+    \toprule
+    Mathematical object & Implementation \\
+    \midrule
+    Symmetric estimator in Equation~\eqref{eq:symmetric-density}
+      & \texttt{PFNRBicop} \\
+    Criterion predictive distribution
+      & \texttt{TabPFNCriterionDistribution1D} \\
+    Quantile predictive distribution
+      & \texttt{TabPFNQuantileDistribution1D} \\
+    Shared support transforms
+      & \texttt{TabPFNDistribution1D} \\
+    Sinkhorn projection
+      & \texttt{sinkhorn\_iters} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\end{document}

@@ -1,13 +1,7 @@
-"""End-to-end runner tests using the fake TabPFN regressor (hermetic).
-
-Two small studies are each run once (module-scoped fixtures) and shared across
-assertions.  Sinkhorn is exercised only on the cheap unconditional path; the
-conditional-projection correctness is covered by the core test suite.
-"""
+"""End-to-end runner tests using the fake TabPFN regressor (hermetic)."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -15,14 +9,20 @@ import pandas as pd
 import pytest
 
 from npcc.experiments.config import GridConfig, RunConfig
-from npcc.experiments.runner import aggregate_results, run_study
+from npcc.experiments.runner import (
+  aggregate_results,
+  aggregate_study_outputs,
+  run_study,
+)
 from tests.conftest import (
   _TABPFN_REGRESSOR_TARGETS,
   _UniformQuantileRegressor,
 )
 
 
-def _run(grid: GridConfig) -> tuple[pd.DataFrame, pd.DataFrame, float]:
+def _run(
+  grid: GridConfig,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float]:
   mp = pytest.MonkeyPatch()
   for target in _TABPFN_REGRESSOR_TARGETS:
     mp.setattr(target, _UniformQuantileRegressor)
@@ -33,41 +33,74 @@ def _run(grid: GridConfig) -> tuple[pd.DataFrame, pd.DataFrame, float]:
 
 
 @pytest.fixture(scope="module")
-def coverage_study() -> tuple[pd.DataFrame, pd.DataFrame, float]:
-  """All axes except Sinkhorn (no projection → fast)."""
+def coverage_study() -> tuple[
+  pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float
+]:
+  """Conditional coverage for estimator axes except Sinkhorn."""
   grid = GridConfig(
     families=["clayton"],
-    tau_scenarios=["linear", "uncond50"],
+    tau_scenarios=["linear", "quadratic"],
     transforms=["logit", "identity"],
     methods=["criterion", "quantiles"],
     normalize=[None],
     n=[20],
     n_rep=1,
     projection_grid_size=8,
+    conditional_uv_grid_n=3,
+    conditional_x_grid_n=2,
+    surface_tau_levels=[0.5],
   )
   return _run(grid)
 
 
 @pytest.fixture(scope="module")
-def norm_study() -> Iterator[pd.DataFrame]:
-  """Sinkhorn on the unconditional path only (single grid, cheap)."""
+def model_version_study() -> tuple[
+  pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float
+]:
+  """Two model versions on the same conditional data cell."""
   grid = GridConfig(
     families=["clayton"],
-    tau_scenarios=["uncond50"],
+    tau_scenarios=["linear"],
+    transforms=["logit"],
+    methods=["criterion"],
+    normalize=[None],
+    n=[20],
+    n_rep=1,
+    model_versions=["v2.5", "v3"],
+    projection_grid_size=8,
+    conditional_uv_grid_n=3,
+    conditional_x_grid_n=2,
+  )
+  return _run(grid)
+
+
+@pytest.fixture(scope="module")
+def projection_study() -> tuple[
+  pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float
+]:
+  """Small conditional projected-vs-unprojected study."""
+  grid = GridConfig(
+    families=["clayton"],
+    tau_scenarios=["linear"],
     transforms=["logit"],
     methods=["criterion"],
     normalize=[None, 2],
     n=[20],
     n_rep=1,
     projection_grid_size=8,
+    conditional_uv_grid_n=3,
+    conditional_x_grid_n=2,
+    surface_families=[],
   )
-  yield _run(grid)[0]
+  return _run(grid)
 
 
-def test_run_study_covers_all_axes(
-  coverage_study: tuple[pd.DataFrame, pd.DataFrame, float],
+def test_run_study_covers_conditional_axes(
+  coverage_study: tuple[
+    pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float
+  ],
 ) -> None:
-  metrics_df, _, wall = coverage_study
+  metric_df, quantity_df, diagnostic_df, runtime_df, wall = coverage_study
   assert wall >= 0.0
   expected_cols = {
     "family",
@@ -79,48 +112,145 @@ def test_run_study_covers_all_axes(
     "method",
     "normalize",
     "quantity",
-    "u",
-    "v",
+    "x",
+    "tau_true",
     "IAE",
     "ISE",
     "KL",
   }
-  assert expected_cols.issubset(metrics_df.columns)
-  assert set(metrics_df["method"].unique()) == {"criterion", "quantiles"}
-  assert set(metrics_df["transform"].unique()) == {"logit", "identity"}
-  assert set(metrics_df["quantity"].unique()) == {
+  assert expected_cols.issubset(metric_df.columns)
+  assert {"target_tau", "truth", "pred"}.issubset(quantity_df.columns)
+  assert {"tau_hat", "row_mean_abs_err", "col_max_abs_err"}.issubset(
+    diagnostic_df.columns
+  )
+  assert "tau_time" in runtime_df.columns
+  assert set(metric_df["method"].unique()) == {"criterion", "quantiles"}
+  assert set(metric_df["transform"].unique()) == {"logit", "identity"}
+  assert set(metric_df["quantity"].unique()) == {
     "pdf",
     "cdf",
     "hfunc1",
     "hfunc2",
   }
-  assert set(metrics_df["tau_scenario"].unique()) == {"linear", "uncond50"}
+  assert set(metric_df["tau_scenario"].unique()) == {"linear", "quadratic"}
+  assert metric_df["x"].notna().all()
 
 
-def test_conditional_and_unconditional_rows_differ_on_uv(
-  coverage_study: tuple[pd.DataFrame, pd.DataFrame, float],
+def test_conditional_metrics_are_fixed_x_uv_summaries(
+  coverage_study: tuple[
+    pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float
+  ],
 ) -> None:
-  metrics_df = coverage_study[0]
-  cond = metrics_df[metrics_df["tau_scenario"] == "linear"]
-  uncond = metrics_df[metrics_df["tau_scenario"] == "uncond50"]
-  # Conditional rows carry per-(u,v) coordinates; unconditional aggregate over
-  # the uv grid and leave u/v as NaN.
-  assert cond["u"].notna().all()
-  assert np.isnan(uncond["u"]).all()
+  metric_df = coverage_study[0]
+  grouped = metric_df.groupby(
+    ["tau_scenario", "method", "transform", "quantity", "normalize"],
+    dropna=False,
+  )
+  assert grouped.size().min() == 2
+  assert grouped.size().max() == 2
+  non_pdf = metric_df[metric_df["quantity"] != "pdf"]
+  assert non_pdf["KL"].isna().all()
+  assert metric_df[metric_df["quantity"] == "pdf"]["KL"].notna().all()
 
 
 def test_aggregate_results_groups_over_reps(
-  coverage_study: tuple[pd.DataFrame, pd.DataFrame, float],
+  coverage_study: tuple[
+    pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float
+  ],
 ) -> None:
-  metrics_df, runtime_df, _ = coverage_study
-  mc_summary, runtime_summary = aggregate_results(metrics_df, runtime_df)
+  metric_df, _, _, runtime_df, _ = coverage_study
+  mc_summary, runtime_summary = aggregate_results(metric_df, runtime_df)
   assert set(mc_summary["metric"].unique()) == {"IAE", "ISE", "KL"}
+  assert {"x", "tau_true"}.issubset(mc_summary.columns)
   assert not runtime_summary.empty
-  assert {"fit_time_mean", "pdf_time_mean"}.issubset(runtime_summary.columns)
+  assert {"fit_time_mean", "pdf_time_mean", "tau_time_mean"}.issubset(
+    runtime_summary.columns
+  )
 
 
-def test_normalize_axis_applies_only_to_pdf(norm_study: pd.DataFrame) -> None:
-  pdf = norm_study[norm_study["quantity"] == "pdf"]
-  non_pdf = norm_study[norm_study["quantity"] != "pdf"]
+def test_aggregate_study_outputs_have_paper_tables(
+  projection_study: tuple[
+    pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float
+  ],
+) -> None:
+  metric_df, _, diagnostic_df, runtime_df, _ = projection_study
+  outputs = aggregate_study_outputs(metric_df, diagnostic_df, runtime_df)
+  assert {
+    "metrics_by_x",
+    "summary_by_x",
+    "summary_over_x",
+    "selection_summary",
+    "projection_summary",
+    "tau_summary",
+    "runtime_summary",
+  } <= set(outputs)
+  assert outputs["summary_by_x"]["x"].notna().all()
+  assert "x" not in outputs["summary_over_x"].columns
+  assert outputs["selection_summary"].iloc[0]["rank"] == 1
+  assert set(outputs["selection_summary"]["quantity"].unique()) == {"pdf"}
+  assert set(outputs["selection_summary"]["metric"].unique()) == {"KL"}
+
+
+def test_model_version_axis_labels_rows_and_aggregates(
+  model_version_study: tuple[
+    pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float
+  ],
+) -> None:
+  metric_df, _, _, runtime_df, _ = model_version_study
+  assert "model_version" in metric_df.columns
+  assert "model_version" in runtime_df.columns
+  assert set(metric_df["model_version"].unique()) == {"v2.5", "v3"}
+  mc_summary, runtime_summary = aggregate_results(metric_df, runtime_df)
+  assert "model_version" in mc_summary.columns
+  assert set(runtime_summary["model_version"].unique()) == {"v2.5", "v3"}
+
+
+def test_normalize_axis_applies_only_to_pdf(
+  projection_study: tuple[
+    pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float
+  ],
+) -> None:
+  metric_df = projection_study[0]
+  pdf = metric_df[metric_df["quantity"] == "pdf"]
+  non_pdf = metric_df[metric_df["quantity"] != "pdf"]
   assert set(pdf["normalize"].unique()) == {"none", "2"}
   assert set(non_pdf["normalize"].unique()) == {"none"}
+
+
+def test_projection_summary_pairs_pdf_accuracy_and_margin_deltas(
+  projection_study: tuple[
+    pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float
+  ],
+) -> None:
+  metric_df, _, diagnostic_df, runtime_df, _ = projection_study
+  projection = aggregate_study_outputs(metric_df, diagnostic_df, runtime_df)[
+    "projection_summary"
+  ]
+  assert set(projection["projected_normalize"].unique()) == {"2"}
+  assert {
+    "KL_delta",
+    "IAE_delta",
+    "row_mean_abs_err_delta",
+    "col_mean_abs_err_delta",
+  }.issubset(projection.columns)
+
+
+def test_tau_diagnostics_can_be_disabled() -> None:
+  grid = GridConfig(
+    families=["clayton"],
+    tau_scenarios=["linear"],
+    transforms=["logit"],
+    methods=["criterion"],
+    normalize=[None],
+    n=[20],
+    n_rep=1,
+    conditional_uv_grid_n=3,
+    conditional_x_grid_n=2,
+    surface_families=[],
+    enable_tau_diagnostics=False,
+  )
+  _, _, diagnostic_df, runtime_df, _ = _run(grid)
+  assert diagnostic_df["tau_hat"].isna().all()
+  assert diagnostic_df["tau_abs_err"].isna().all()
+  assert diagnostic_df["row_mean_abs_err"].notna().all()
+  assert runtime_df["tau_time"].eq(0.0).all()

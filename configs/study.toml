@@ -1,18 +1,20 @@
-# Example grid for the npcc simulation study.
-# Run with:  npcc-simstudy --config configs/study.toml --out results/ --workers 4
+# Example grid for the npcc conditional-copula simulation study.
+# Run with:
+#   npcc-simstudy --config configs/study.toml --out results/ --workers 4
 #
 # The study sweeps the cartesian product of every axis below. Each
 # (family, tau_scenario, n, rep) cell samples its own data + ground truth once;
-# the (transform, method) estimators are fitted on that shared data and each is
-# evaluated under every `normalize` (Sinkhorn) variant.
+# the (transform, method, model_version) estimators are fitted on that shared
+# data. Metrics are aggregated over a uv grid at each fixed x, diagnostics check
+# margins and dependence, and plot-ready quantities are written only for the
+# families listed in `surface_families`.
 
 [grid]
 # Copula families (one-parameter): clayton, gumbel, frank, gaussian, joe.
-families = ["clayton", "gumbel", "frank", "gaussian"]
+families = ["clayton", "gumbel", "frank", "gaussian", "joe"]
 
-# tau regimes. Conditional tau(x): linear, constant, sin, quadratic.
-# Unconditional fixed tau: uncond25, uncond50, uncond75.
-tau_scenarios = ["linear", "constant", "uncond50"]
+# Conditional tau(x) regimes: monotone, symmetric, and nonmonotone.
+tau_scenarios = ["linear", "quadratic", "sin"]
 
 # Support transforms used by the inner TabPFN models.
 transforms = ["logit", "identity", "probit"]
@@ -20,8 +22,12 @@ transforms = ["logit", "identity", "probit"]
 # Density-recovery methods.
 methods = ["criterion", "quantiles"]
 
+# TabPFN model versions for the inner univariate regressors.
+# Allowed: v2, v2.5, v2.6, v3.
+model_versions = ["v2.5", "v3"]
+
 # Sinkhorn normalization variants applied to the density. "none" = off.
-normalize = ["none", 5]
+normalize = ["none", 3]
 
 # Training sample sizes and Monte-Carlo repetitions.
 n = [200, 500, 1000]
@@ -31,3 +37,16 @@ n_rep = 20
 # accurate margins but markedly slower for conditional scenarios (a density
 # grid is built per unique x). Optional; defaults to 30.
 projection_grid_size = 30
+
+# Conditional metric grid: 20x20 uv points and 10 x slices.
+conditional_uv_grid_n = 20
+conditional_x_grid_n = 10
+
+# Plot-ready quantities are written only for these Kendall-tau slices and
+# families. Non-monotone tau(x) scenarios keep all matching x branches.
+surface_tau_levels = [0.1, 0.5, 0.9]
+surface_families = ["clayton"]
+
+# Kendall's tau diagnostics are sample-based and comparatively expensive.
+enable_tau_diagnostics = true
+tau_diagnostic_n = 1000

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
+
+import pytest
 
 from npcc.experiments import cli
 
@@ -12,7 +15,7 @@ families = ["clayton"]
 tau_scenarios = ["linear"]
 transforms = ["logit"]
 methods = ["criterion"]
-normalize = ["none"]
+normalize = ["none", 2]
 n = [30]
 n_rep = 1
 """
@@ -21,6 +24,8 @@ n_rep = 1
 def test_cli_end_to_end_writes_tables(
   patch_uniform: None, tmp_path: Path
 ) -> None:
+  if importlib.util.find_spec("pyarrow") is None:
+    pytest.skip("pyarrow is required for parquet output")
   config = tmp_path / "study.toml"
   config.write_text(_TOML)
   out = tmp_path / "results"
@@ -28,16 +33,67 @@ def test_cli_end_to_end_writes_tables(
   rc = cli.main(["--config", str(config), "--out", str(out), "--workers", "1"])
   assert rc == 0
 
-  for name in ("metrics", "runtime", "summary", "runtime_summary"):
+  for name in (
+    "summary",
+    "metrics_by_x",
+    "summary_by_x",
+    "summary_over_x",
+    "selection_summary",
+    "projection_summary",
+    "tau_summary",
+    "diagnostics",
+    "quantities",
+    "runtime",
+    "runtime_summary",
+  ):
+    path = out / f"{name}.parquet"
+    assert path.exists(), f"missing {name}.parquet"
+    assert path.stat().st_size > 0
+  assert (out / "config.json").exists()
+
+
+def test_cli_end_to_end_can_write_csv(
+  patch_uniform: None, tmp_path: Path
+) -> None:
+  config = tmp_path / "study.toml"
+  config.write_text(_TOML)
+  out = tmp_path / "results"
+
+  rc = cli.main(
+    [
+      "--config",
+      str(config),
+      "--out",
+      str(out),
+      "--workers",
+      "1",
+      "--format",
+      "csv",
+    ]
+  )
+  assert rc == 0
+
+  for name in (
+    "summary",
+    "metrics_by_x",
+    "summary_by_x",
+    "summary_over_x",
+    "selection_summary",
+    "projection_summary",
+    "tau_summary",
+    "diagnostics",
+    "quantities",
+    "runtime",
+    "runtime_summary",
+  ):
     path = out / f"{name}.csv"
     assert path.exists(), f"missing {name}.csv"
     assert path.stat().st_size > 0
-  assert (out / "config.json").exists()
 
 
 def test_cli_parser_requires_config_and_out() -> None:
   parser = cli._build_parser()
   ns = parser.parse_args(["--config", "g.toml", "--out", "o", "--workers", "4"])
-  assert ns.fmt == "csv"
+  assert ns.fmt == "parquet"
   assert ns.workers == 4
   assert Path(ns.config).name == "g.toml"

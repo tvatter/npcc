@@ -205,7 +205,9 @@ class TabPFNDistribution1D(ABC):
     """Conditional density ``f(y_i | w_i)`` per row."""
 
   @abstractmethod
-  def cdf(self, w: TensorLike, y: TensorLike) -> TensorLike:
+  def cdf(
+    self, w: TensorLike, y: TensorLike, *, batch_size: int | None = None
+  ) -> TensorLike:
     """Conditional CDF ``F(y_i | w_i) = P(Y <= y_i | W = w_i)`` per row."""
 
   @abstractmethod

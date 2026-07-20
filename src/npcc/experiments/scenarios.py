@@ -42,13 +42,9 @@ FAMILIES: dict[str, pv.BicopFamily] = {
 
 QUANTITIES: tuple[str, ...] = ("pdf", "cdf", "hfunc1", "hfunc2")
 
-# Evaluation grid shared with the original notebook study.
-U_LEVELS: tuple[float, ...] = (0.1, 0.3, 0.5, 0.7, 0.9)
-V_LEVELS: tuple[float, ...] = (0.1, 0.3, 0.5, 0.7, 0.9)
-UV_PAIRS: tuple[tuple[float, float], ...] = tuple(
-  (u, v) for u in U_LEVELS for v in V_LEVELS
-)
-N_X_EVAL: int = 50
+# Conditional evaluation grid defaults.
+CONDITIONAL_UV_GRID_N: int = 20
+CONDITIONAL_X_GRID_N: int = 10
 X_MIN: float = 0.01
 X_MAX: float = 0.99
 
@@ -111,6 +107,22 @@ class EvalGrid:
   shape: tuple[int, ...]
   conditional: bool
   x_axis: np.ndarray | None
+  u_axis: np.ndarray
+  v_axis: np.ndarray
+
+
+def interior_axis(n: int) -> np.ndarray:
+  """Midpoint grid on ``(0, 1)`` with boundaries excluded."""
+  if n < 2:
+    raise ValueError("n must be >= 2.")
+  return (np.arange(n, dtype=np.float64) + 0.5) / n
+
+
+def conditional_x_axis(n: int) -> np.ndarray:
+  """Conditional evaluation grid over the configured covariate support."""
+  if n < 1:
+    raise ValueError("n must be >= 1.")
+  return np.linspace(X_MIN, X_MAX, n, dtype=np.float64)
 
 
 def _bicop(family: pv.BicopFamily, tau: float) -> pv.Bicop:
@@ -124,23 +136,33 @@ def is_conditional(scenario: str) -> bool:
   return TAU_SCENARIOS[scenario].conditional
 
 
-def eval_grid(scenario: str) -> EvalGrid:
+def eval_grid(
+  scenario: str,
+  *,
+  conditional_uv_grid_n: int = CONDITIONAL_UV_GRID_N,
+  conditional_x_grid_n: int = CONDITIONAL_X_GRID_N,
+) -> EvalGrid:
   """Fixed evaluation grid for ``scenario`` (conditional or unconditional)."""
   spec = TAU_SCENARIOS[scenario]
   if spec.conditional:
-    u_pairs = np.array([p[0] for p in UV_PAIRS], dtype=np.float64)
-    v_pairs = np.array([p[1] for p in UV_PAIRS], dtype=np.float64)
-    x_axis = np.linspace(X_MIN, X_MAX, N_X_EVAL, dtype=np.float64)
-    n_pairs = len(UV_PAIRS)
+    u_axis = interior_axis(conditional_uv_grid_n)
+    v_axis = interior_axis(conditional_uv_grid_n)
+    uu, vv = np.meshgrid(u_axis, v_axis, indexing="ij")
+    u_pairs = uu.reshape(-1)
+    v_pairs = vv.reshape(-1)
+    x_axis = conditional_x_axis(conditional_x_grid_n)
+    n_pairs = u_pairs.shape[0]
     return EvalGrid(
-      u_flat=np.repeat(u_pairs, N_X_EVAL),
-      v_flat=np.repeat(v_pairs, N_X_EVAL),
+      u_flat=np.repeat(u_pairs, conditional_x_grid_n),
+      v_flat=np.repeat(v_pairs, conditional_x_grid_n),
       x_flat=np.tile(x_axis, n_pairs),
-      shape=(n_pairs, N_X_EVAL),
+      shape=(n_pairs, conditional_x_grid_n),
       conditional=True,
       x_axis=x_axis,
+      u_axis=u_axis,
+      v_axis=v_axis,
     )
-  axis = np.linspace(_EPS, 1.0 - _EPS, UV_GRID_N + 2, dtype=np.float64)[1:-1]
+  axis = interior_axis(UV_GRID_N)
   uu, vv = np.meshgrid(axis, axis, indexing="ij")
   u_flat = uu.reshape(-1)
   v_flat = vv.reshape(-1)
@@ -151,10 +173,39 @@ def eval_grid(scenario: str) -> EvalGrid:
     shape=(u_flat.shape[0],),
     conditional=False,
     x_axis=None,
+    u_axis=axis,
+    v_axis=axis,
   )
 
 
-def ground_truth(family: str, scenario: str) -> dict[str, np.ndarray]:
+def eval_grid_for_x(
+  scenario: str, x_axis: np.ndarray, *, conditional_uv_grid_n: int
+) -> EvalGrid:
+  """Conditional evaluation grid at caller-selected ``x`` values."""
+  if not TAU_SCENARIOS[scenario].conditional:
+    raise ValueError("eval_grid_for_x is only valid for conditional scenarios.")
+  x_axis = np.asarray(x_axis, dtype=np.float64)
+  u_axis = interior_axis(conditional_uv_grid_n)
+  v_axis = interior_axis(conditional_uv_grid_n)
+  uu, vv = np.meshgrid(u_axis, v_axis, indexing="ij")
+  u_pairs = uu.reshape(-1)
+  v_pairs = vv.reshape(-1)
+  n_pairs = u_pairs.shape[0]
+  return EvalGrid(
+    u_flat=np.repeat(u_pairs, x_axis.shape[0]),
+    v_flat=np.repeat(v_pairs, x_axis.shape[0]),
+    x_flat=np.tile(x_axis, n_pairs),
+    shape=(n_pairs, x_axis.shape[0]),
+    conditional=True,
+    x_axis=x_axis,
+    u_axis=u_axis,
+    v_axis=v_axis,
+  )
+
+
+def ground_truth(
+  family: str, scenario: str, grid: EvalGrid | None = None
+) -> dict[str, np.ndarray]:
   """Exact pdf/cdf/hfunc1/hfunc2 on :func:`eval_grid` for ``(family, scenario)``.
 
   Conditional: one ``Bicop`` per evaluation ``x`` (50), evaluated at the 25 uv
@@ -163,17 +214,14 @@ def ground_truth(family: str, scenario: str) -> dict[str, np.ndarray]:
   """
   fam = FAMILIES[family]
   spec = TAU_SCENARIOS[scenario]
-  grid = eval_grid(scenario)
+  grid = eval_grid(scenario) if grid is None else grid
 
   if spec.conditional:
     assert spec.tau_of_x is not None and grid.x_axis is not None
     tau_x = spec.tau_of_x(grid.x_axis)
-    uv = np.column_stack(
-      [
-        np.array([p[0] for p in UV_PAIRS], dtype=np.float64),
-        np.array([p[1] for p in UV_PAIRS], dtype=np.float64),
-      ]
-    )
+    u_grid = grid.u_flat.reshape(grid.shape)
+    v_grid = grid.v_flat.reshape(grid.shape)
+    uv = np.column_stack([u_grid[:, 0], v_grid[:, 0]])
     cols: dict[str, list[np.ndarray]] = {q: [] for q in QUANTITIES}
     for tau in tau_x:
       cop = _bicop(fam, float(tau))

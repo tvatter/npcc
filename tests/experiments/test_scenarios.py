@@ -11,12 +11,17 @@ from npcc.experiments import scenarios
 
 def test_eval_grid_conditional_shapes() -> None:
   grid = scenarios.eval_grid("linear")
-  n_pairs = len(scenarios.UV_PAIRS)
+  n_pairs = scenarios.CONDITIONAL_UV_GRID_N**2
   assert grid.conditional is True
-  assert grid.shape == (n_pairs, scenarios.N_X_EVAL)
-  assert grid.u_flat.shape == (n_pairs * scenarios.N_X_EVAL,)
+  assert grid.shape == (n_pairs, scenarios.CONDITIONAL_X_GRID_N)
+  assert grid.u_flat.shape == (n_pairs * scenarios.CONDITIONAL_X_GRID_N,)
   assert grid.x_flat is not None
   assert grid.x_axis is not None
+  assert grid.u_axis.shape == (scenarios.CONDITIONAL_UV_GRID_N,)
+  expected_axis = (
+    np.arange(scenarios.CONDITIONAL_UV_GRID_N, dtype=np.float64) + 0.5
+  ) / scenarios.CONDITIONAL_UV_GRID_N
+  np.testing.assert_allclose(grid.u_axis, expected_axis)
 
 
 def test_eval_grid_unconditional_has_no_x() -> None:
@@ -35,13 +40,15 @@ def test_ground_truth_conditional_matches_pyvinecopulib() -> None:
   spec = scenarios.TAU_SCENARIOS[scenario]
   assert spec.tau_of_x is not None
   tau_x = spec.tau_of_x(grid.x_axis)
-  uv = np.array(scenarios.UV_PAIRS, dtype=np.float64)
+  uu, vv = np.meshgrid(grid.u_axis, grid.v_axis, indexing="ij")
+  uv = np.column_stack([uu.reshape(-1), vv.reshape(-1)])
 
-  # First x-column should equal a direct Bicop pdf at that tau.
-  cop = scenarios._bicop(scenarios.FAMILIES[family], float(tau_x[0]))
-  expected_pdf_col0 = np.asarray(cop.pdf(uv))
-  np.testing.assert_allclose(truth["pdf"][:, 0], expected_pdf_col0, atol=1e-10)
-  assert truth["pdf"].shape == (len(scenarios.UV_PAIRS), scenarios.N_X_EVAL)
+  assert np.unique(uv, axis=0).shape[0] == grid.shape[0]
+  for x_idx, tau in enumerate(tau_x):
+    cop = scenarios._bicop(scenarios.FAMILIES[family], float(tau))
+    expected_pdf = np.asarray(cop.pdf(uv))
+    np.testing.assert_allclose(truth["pdf"][:, x_idx], expected_pdf, atol=1e-10)
+  assert truth["pdf"].shape == grid.shape
 
 
 def test_ground_truth_unconditional_matches_pyvinecopulib() -> None:
