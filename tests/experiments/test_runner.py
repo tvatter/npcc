@@ -130,7 +130,6 @@ def test_run_study_covers_conditional_axes(
   assert set(metric_df["transform"].unique()) == {"logit", "identity"}
   assert set(metric_df["quantity"].unique()) == {
     "pdf",
-    "cdf",
     "hfunc1",
     "hfunc2",
   }

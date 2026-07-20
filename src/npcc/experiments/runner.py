@@ -357,12 +357,6 @@ def summarize_one_cell(
       single_preds: dict[str, np.ndarray] = {}
       for q, fn in (
         (
-          "cdf",
-          lambda: model.cdf(
-            metric_grid.u_flat, metric_grid.v_flat, x=metric_grid.x_flat
-          ),
-        ),
-        (
           "hfunc1",
           lambda: model.hfunc1(
             metric_grid.u_flat, metric_grid.v_flat, x=metric_grid.x_flat
@@ -379,7 +373,7 @@ def summarize_one_cell(
         single_preds[q] = np.asarray(fn(), dtype=np.float64)
         timings[q] = perf_counter() - t0
 
-      for q in ("cdf", "hfunc1", "hfunc2"):
+      for q in ("hfunc1", "hfunc2"):
         metric_rows += _metric_rows_for_quantity(
           cell,
           est,
@@ -441,12 +435,6 @@ def summarize_one_cell(
       ):
         surface_preds: dict[str, np.ndarray] = {}
         for q, fn in (
-          (
-            "cdf",
-            lambda: model.cdf(
-              surface_grid.u_flat, surface_grid.v_flat, x=surface_grid.x_flat
-            ),
-          ),
           (
             "hfunc1",
             lambda: model.hfunc1(
@@ -513,7 +501,6 @@ def summarize_one_cell(
         "backend": est.backend,
         "fit_time": fit_time,
         "pdf_time": pdf_time,
-        "cdf_time": timings["cdf"],
         "h1_time": timings["hfunc1"],
         "h2_time": timings["hfunc2"],
         "tau_time": tau_time,
@@ -679,7 +666,6 @@ def _runtime_summary(runtime_df: pd.DataFrame) -> pd.DataFrame:
     fit_time_mean=("fit_time", "mean"),
     fit_time_std=("fit_time", "std"),
     pdf_time_mean=("pdf_time", "mean"),
-    cdf_time_mean=("cdf_time", "mean"),
     h1_time_mean=("h1_time", "mean"),
     h2_time_mean=("h2_time", "mean"),
     tau_time_mean=("tau_time", "mean"),

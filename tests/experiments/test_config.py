@@ -134,19 +134,26 @@ def test_shipped_study_config_loads() -> None:
   """The committed paper config must load and match the study design."""
   cfg_path = Path(__file__).resolve().parents[2] / "configs" / "study.toml"
   grid = load_grid(cfg_path)
-  assert grid.families == ["clayton", "gumbel", "frank", "gaussian", "joe"]
+  assert grid.families == ["clayton", "gumbel", "frank", "gaussian"]
   assert grid.tau_scenarios == ["linear", "quadratic", "sin"]
   assert grid.n == [200, 500, 1000]
-  assert grid.n_rep == 20
-  assert grid.transforms == ["logit", "identity", "probit"]
+  assert grid.n_rep == 5
+  assert grid.transforms == ["logit", "probit"]
   assert grid.backends == [
     "tabpfn-criterion-v2.5",
     "tabpfn-criterion-v3",
+    "tabpfn-quantiles-v2.5",
     "tabpfn-quantiles-v3",
+    "nori",
+    "tabicl",
+    "ngboost",
+    "xgb-quantile",
+    "pytabkit-realmlp",
+    "pytabkit-tabm",
   ]
-  assert grid.normalize == [None, 3]
-  assert len(grid.cells()) == 5 * 3 * 3 * 20
-  assert len(grid.estimator_specs()) == 3 * 3
+  assert grid.normalize == [None]
+  assert len(grid.cells()) == 4 * 3 * 3 * 5
+  assert len(grid.estimator_specs()) == 2 * 10
 
 
 def test_runconfig_validates_workers_and_fmt(tmp_path: Path) -> None:

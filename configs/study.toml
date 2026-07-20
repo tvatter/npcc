@@ -9,9 +9,15 @@
 # dependence, and plot-ready quantities are written only for the families
 # listed in `surface_families`.
 #
-# Projected wall time for one seed (n_rep = 1) of the grid below on an
-# RTX 2080 Ti, workers=1: ~5.5-6 h (measured per-backend at n=500; the joint-CDF
-# integration dominates for the foundation models, not fitting).
+# Metrics scored: pdf + hfunc1 + hfunc2 only (what matters for density
+# estimation and vines). The joint-CDF metric was dropped — its trapezoidal
+# integration over inner conditional-CDF forwards dominated runtime for the
+# foundation models without informing the density/vine question.
+#
+# Measured wall time on an RTX 2080 Ti, workers=1 (no CDF): ~2.06 h per seed
+# (one family x scenario x transform block over n=[200,500,1000], all 10
+# backends, is ~309 s; the full grid is 24 such blocks). n_rep = 5 => ~10.3 h,
+# which fits an overnight window with buffer.
 #
 # Backends intentionally EXCLUDED from this run (too slow for the full grid):
 #   - catboost   (~74 s/fit; ~1.5 h of grid) and gbm (101 sklearn models/dir) —
@@ -51,9 +57,10 @@ backends = [
 # tree/parametric densities — hardening it is a separate follow-up.
 normalize = ["none"]
 
-# Training sample sizes and Monte-Carlo repetitions (one seed).
+# Training sample sizes and Monte-Carlo repetitions. n_rep = 5 seeds fits an
+# overnight window (~2.06 h/seed measured; ~10.3 h total).
 n = [200, 500, 1000]
-n_rep = 1
+n_rep = 5
 
 # Grid resolution for the (disabled) Sinkhorn projection; unused with
 # normalize = ["none"].
