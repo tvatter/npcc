@@ -248,7 +248,7 @@ class RosenblattBicop:
       config=self.quantile_config,
       device=self._device,
       batch_size=self.batch_size,
-      **self.backend_kwargs,
+      backend_kwargs=self.backend_kwargs,
     )
 
   def _get_grid_borders(self) -> None:

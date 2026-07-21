@@ -33,7 +33,7 @@ def mean_metric_lineplot(
   tau_scenario: str,
   quantity: str,
   metric: str,
-  hue: str = "backend",
+  hue: str = "label",
   ax: Axes | None = None,
 ) -> Axes:
   """Plot the across-rep mean of ``metric`` vs ``n``, one line per ``hue`` level.
@@ -68,7 +68,7 @@ def metric_boxplot(
   quantity: str,
   metric: str,
   n: int,
-  by: str = "backend",
+  by: str = "label",
   ax: Axes | None = None,
 ) -> Axes:
   """Boxplot of the per-rep ``metric`` distribution at sample size ``n``,
@@ -92,27 +92,26 @@ def metric_boxplot_by_n(
   tau_scenario: str,
   quantity: str,
   metric: str,
-  backend: str | Sequence[str] | None = None,
-  transform: str | Sequence[str] | None = None,
+  label: str | Sequence[str] | None = None,
   normalize: str | Sequence[str] | None = None,
   ax: Axes | None = None,
 ) -> Axes:
   """Plot per-repetition metric boxplots by sample size and model identity.
 
   For conditional scenarios, metrics are averaged over conditioning values
-  within each repetition before plotting. Each model identity is the full
-  ``(backend, transform, normalize)`` combination. A selector may be ``None``
-  to include all values, a string to select one value, or a sequence of
-  strings to select multiple values.
+  within each repetition before plotting. Each model identity is the
+  ``(label, normalize)`` combination (``label`` already encodes the backend,
+  transform, and hyperparameters). A selector may be ``None`` to include all
+  values, a string to select one value, or a sequence of strings to select
+  multiple values.
   """
   ax = ax or plt.subplots(figsize=(6.0, 3.5))[1]
   sub = _slice(metrics_df, family, tau_scenario, quantity).dropna(
     subset=[metric]
   )
-  model_columns = ["backend", "transform", "normalize"]
+  model_columns = ["label", "normalize"]
   selectors = {
-    "backend": backend,
-    "transform": transform,
+    "label": label,
     "normalize": normalize,
   }
   for column, selector in selectors.items():

@@ -16,8 +16,18 @@ import pytest
 import torch
 
 from npcc.core.bicop import RosenblattBicop
+from npcc.core.errors import (
+  InvalidBackendKwargsError,
+  MissingBackendDependencyError,
+  UnknownBackendError,
+)
 from npcc.core.quantile_table_distribution1d import QuantileGridConfig
-from npcc.core.registry import available_backends, create_backend
+from npcc.core.registry import (
+  available_backends,
+  create_backend,
+  documented_n_range,
+  validate_backend_kwargs,
+)
 from tests.conftest import (
   _UniformNativeBackend,
   _UniformQuantileBackend,
@@ -42,7 +52,7 @@ class TestRegistry:
       assert expected in names
 
   def test_unknown_backend_raises(self) -> None:
-    with pytest.raises(ValueError, match="Unknown backend"):
+    with pytest.raises(UnknownBackendError, match="Unknown backend"):
       create_backend(
         "does-not-exist",
         transform="logit",
@@ -59,7 +69,9 @@ class TestRegistry:
     import sys
 
     monkeypatch.setitem(sys.modules, "npcc.core.backends.ngboost", None)
-    with pytest.raises(ImportError, match=r"pip install npcc\[ngboost\]"):
+    with pytest.raises(
+      MissingBackendDependencyError, match=r"pip install npcc\[ngboost\]"
+    ):
       create_backend(
         "ngboost",
         transform="logit",
@@ -68,18 +80,47 @@ class TestRegistry:
         batch_size=None,
       )
 
-  def test_unknown_kwarg_is_a_type_error(self) -> None:
-    # A backend-specific keyword the constructor does not accept surfaces
-    # as a TypeError from that constructor (no silent swallowing).
-    with pytest.raises(TypeError):
+  def test_unknown_backend_kwarg_is_rejected(self) -> None:
+    # An unknown backend kwarg fails fast (typed error), not deep in the
+    # backend constructor.
+    with pytest.raises(InvalidBackendKwargsError, match="unknown backend"):
       create_backend(
         "tabpfn-criterion",
         transform="logit",
         config=QuantileGridConfig(),
         device="cpu",
         batch_size=None,
-        not_a_real_kwarg=123,
+        backend_kwargs={"not_a_real_kwarg": 123},
       )
+
+
+class TestBackendSpec:
+  def test_curated_kwargs_accepted(self) -> None:
+    validate_backend_kwargs("xgb-quantile", {"max_depth": 4, "subsample": 0.8})
+
+  def test_unknown_kwarg_rejected(self) -> None:
+    with pytest.raises(InvalidBackendKwargsError, match="unknown backend"):
+      validate_backend_kwargs("xgb-quantile", {"max_dpeth": 4})
+
+  def test_mistyped_kwarg_rejected(self) -> None:
+    with pytest.raises(InvalidBackendKwargsError, match="max_depth"):
+      validate_backend_kwargs("xgb-quantile", {"max_depth": 3.5})
+
+  def test_nested_kwarg_must_be_table(self) -> None:
+    with pytest.raises(InvalidBackendKwargsError, match="model_kwargs"):
+      validate_backend_kwargs("tabpfn-criterion", {"model_kwargs": 5})
+
+  def test_unrestricted_backend_only_checks_json(self) -> None:
+    # `nori` has no allow-list; any JSON-shaped kwarg is accepted.
+    validate_backend_kwargs("nori", {"anything": [1, 2, 3]})
+
+  def test_non_json_value_rejected(self) -> None:
+    with pytest.raises(InvalidBackendKwargsError, match="JSON"):
+      validate_backend_kwargs("nori", {"bad": object()})
+
+  def test_documented_n_range(self) -> None:
+    assert documented_n_range("tabicl") == (300, 48000)
+    assert documented_n_range("xgb-quantile") is None
 
 
 # ---------------------------------------------------------------------------
