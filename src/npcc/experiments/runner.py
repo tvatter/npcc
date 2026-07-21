@@ -48,6 +48,28 @@ def _data_frame(rows: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _system_mem_mb() -> tuple[float, float]:
+  """(process RSS, system MemAvailable) in MiB from ``/proc``; (0, 0) if absent.
+
+  A headless run that wedges the whole box over SSH is usually system-RAM
+  exhaustion, not a GPU OOM — logging MemAvailable per estimator exposes a
+  creeping leak before it kills the machine.
+  """
+  rss = avail = 0.0
+  try:
+    for line in Path("/proc/self/status").read_text().splitlines():
+      if line.startswith("VmRSS:"):
+        rss = float(line.split()[1]) / 1024.0
+        break
+    for line in Path("/proc/meminfo").read_text().splitlines():
+      if line.startswith("MemAvailable:"):
+        avail = float(line.split()[1]) / 1024.0
+        break
+  except OSError:
+    pass
+  return rss, avail
+
+
 def _release_gpu() -> None:
   """Release cached CUDA memory between estimators/cells (no-op on CPU).
 
@@ -632,17 +654,21 @@ def summarize_one_cell(
     if torch.cuda.is_available():
       gpu_peak_reserved_mb = torch.cuda.max_memory_reserved() / 1024**2
       gpu_peak_alloc_mb = torch.cuda.max_memory_allocated() / 1024**2
-      # Flushed per line, so this survives a hard machine crash and names the
-      # last (culprit) estimator + its peak VRAM.
-      logger.info(
-        "estimator %s [%s/%s n=%d]: peak GPU reserved %.0f MiB (alloc %.0f MiB)",
-        est.label,
-        cell.family,
-        cell.tau_scenario,
-        cell.n,
-        gpu_peak_reserved_mb,
-        gpu_peak_alloc_mb,
-      )
+    rss_mb, mem_available_mb = _system_mem_mb()
+    # Flushed per line, so this survives a hard machine crash and names the
+    # last (culprit) estimator with its peak VRAM and the system-RAM headroom.
+    logger.info(
+      "estimator %s [%s/%s n=%d]: GPU peak %.0f MiB (alloc %.0f) | "
+      "RSS %.0f MiB | MemAvailable %.0f MiB",
+      est.label,
+      cell.family,
+      cell.tau_scenario,
+      cell.n,
+      gpu_peak_reserved_mb,
+      gpu_peak_alloc_mb,
+      rss_mb,
+      mem_available_mb,
+    )
 
     runtime_rows.append(
       {
@@ -666,6 +692,8 @@ def summarize_one_cell(
         ),
         "gpu_peak_reserved_mb": gpu_peak_reserved_mb,
         "gpu_peak_alloc_mb": gpu_peak_alloc_mb,
+        "rss_mb": rss_mb,
+        "mem_available_mb": mem_available_mb,
       }
     )
 
