@@ -195,12 +195,17 @@ class RunConfig:
   base_seed: int = 317
   log_level: str = "INFO"
   fmt: str = "parquet"
+  gpu_mem_fraction: float | None = None
 
   def __post_init__(self) -> None:
     if self.workers < 1:
       raise ValueError("workers must be >= 1.")
     if self.fmt not in {"csv", "parquet"}:
       raise ValueError("fmt must be 'csv' or 'parquet'.")
+    if self.gpu_mem_fraction is not None and not (
+      0.0 < self.gpu_mem_fraction <= 1.0
+    ):
+      raise ValueError("gpu_mem_fraction must be in (0, 1].")
 
 
 def _parse_estimator(entry: Mapping[str, object]) -> EstimatorSpec:

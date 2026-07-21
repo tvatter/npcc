@@ -245,10 +245,13 @@ def test_shipped_study_config_loads() -> None:
 
 def test_runconfig_validates_workers_and_fmt(tmp_path: Path) -> None:
   assert RunConfig(out=tmp_path).fmt == "parquet"
+  assert RunConfig(out=tmp_path).gpu_mem_fraction is None
   with pytest.raises(ValueError, match="workers"):
     RunConfig(out=tmp_path, workers=0)
   with pytest.raises(ValueError, match="fmt"):
     RunConfig(out=tmp_path, fmt="xml")
+  with pytest.raises(ValueError, match="gpu_mem_fraction"):
+    RunConfig(out=tmp_path, gpu_mem_fraction=1.5)
 
 
 def test_gridconfig_rejects_empty_axis() -> None:

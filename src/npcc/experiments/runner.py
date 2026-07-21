@@ -477,6 +477,8 @@ def summarize_one_cell(
     est_seed = _estimator_seed(seed, est.estimator_id)
     np.random.seed(est_seed)
     torch.manual_seed(est_seed)
+    if torch.cuda.is_available():
+      torch.cuda.reset_peak_memory_stats()
     model = RosenblattBicop(
       backend=est.backend,
       transform=cast(Literal["identity", "logit", "probit"], est.transform),
@@ -625,6 +627,23 @@ def summarize_one_cell(
             tau_true=surface_tau_true,
           )
 
+    gpu_peak_reserved_mb = 0.0
+    gpu_peak_alloc_mb = 0.0
+    if torch.cuda.is_available():
+      gpu_peak_reserved_mb = torch.cuda.max_memory_reserved() / 1024**2
+      gpu_peak_alloc_mb = torch.cuda.max_memory_allocated() / 1024**2
+      # Flushed per line, so this survives a hard machine crash and names the
+      # last (culprit) estimator + its peak VRAM.
+      logger.info(
+        "estimator %s [%s/%s n=%d]: peak GPU reserved %.0f MiB (alloc %.0f MiB)",
+        est.label,
+        cell.family,
+        cell.tau_scenario,
+        cell.n,
+        gpu_peak_reserved_mb,
+        gpu_peak_alloc_mb,
+      )
+
     runtime_rows.append(
       {
         "family": cell.family,
@@ -645,6 +664,8 @@ def summarize_one_cell(
         "total_estimator_time": (
           fit_time + pdf_time + tau_time + surface_time + sum(timings.values())
         ),
+        "gpu_peak_reserved_mb": gpu_peak_reserved_mb,
+        "gpu_peak_alloc_mb": gpu_peak_alloc_mb,
       }
     )
 
@@ -671,6 +692,13 @@ def run_study(
   cells_root = run.out / "cells"
   cells_root.mkdir(parents=True, exist_ok=True)
   _guard_manifest(run.out, grid, run, resume)
+
+  if run.gpu_mem_fraction is not None and torch.cuda.is_available():
+    torch.cuda.set_per_process_memory_fraction(run.gpu_mem_fraction)
+    logger.info(
+      "Capped CUDA memory to %.2f of total (headroom for the display server)",
+      run.gpu_mem_fraction,
+    )
 
   done_set = {c for c in cells if resume and _cell_done(cells_root, c)}
   pending = [c for c in cells if c not in done_set]

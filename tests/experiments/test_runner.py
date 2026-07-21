@@ -155,6 +155,9 @@ def test_run_study_covers_conditional_axes(
     diagnostic_df.columns
   )
   assert "tau_time" in runtime_df.columns
+  assert {"gpu_peak_reserved_mb", "gpu_peak_alloc_mb"}.issubset(
+    runtime_df.columns
+  )
   assert set(metric_df["backend"].unique()) == {
     "tabpfn-criterion",
     "tabpfn-quantiles",

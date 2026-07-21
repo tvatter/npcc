@@ -58,6 +58,16 @@ def _build_parser() -> argparse.ArgumentParser:
     help="Reuse completed per-cell checkpoints in --out and run only the rest.",
   )
   p.add_argument(
+    "--gpu-mem-fraction",
+    type=float,
+    default=None,
+    help=(
+      "Cap this process's CUDA memory to a fraction of total VRAM (0-1]. "
+      "Leaves headroom for a display server sharing the GPU: a peak that "
+      "would starve it raises a clean OOM instead of hanging the machine."
+    ),
+  )
+  p.add_argument(
     "--log-level",
     default="INFO",
     choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -101,6 +111,7 @@ def _config_echo(grid: GridConfig, run: RunConfig, wall: float) -> dict:
       "workers": run.workers,
       "base_seed": run.base_seed,
       "fmt": run.fmt,
+      "gpu_mem_fraction": run.gpu_mem_fraction,
     },
     "wall_seconds": wall,
   }
@@ -126,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
     base_seed=args.base_seed,
     log_level=args.log_level,
     fmt=args.fmt,
+    gpu_mem_fraction=args.gpu_mem_fraction,
   )
   run.out.mkdir(parents=True, exist_ok=True)
 
