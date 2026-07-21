@@ -10,9 +10,13 @@ conditioning values. This keeps KL as a fixed-``x`` copula-density metric.
 
 from __future__ import annotations
 
+import gc
+import hashlib
+import json
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from time import perf_counter
 from typing import Literal, cast
 
@@ -42,6 +46,123 @@ def _data_frame(rows: list[dict]) -> pd.DataFrame:
   """Build a DataFrame without pandas' optional Arrow-backed string inference."""
   with pd.option_context("future.infer_string", False):
     return pd.DataFrame(rows)
+
+
+def _release_gpu() -> None:
+  """Release cached CUDA memory between estimators/cells (no-op on CPU).
+
+  The estimator loop reassigns ``model`` each iteration; without this, freed
+  backend modules linger in the CUDA caching allocator and peak memory creeps
+  up across the 20 estimators/cell (foundation-model and fine-tune backends
+  are the heaviest). ``empty_cache`` only returns *unused* blocks to the
+  driver, so it is safe under any worker count.
+  """
+  gc.collect()
+  if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+
+
+def _write_table(df: pd.DataFrame, base: Path, fmt: str) -> None:
+  """Write ``df`` to ``base`` with the ``.parquet``/``.csv`` suffix for ``fmt``."""
+  if fmt == "parquet":
+    df.to_parquet(base.with_suffix(".parquet"), index=False)
+  else:
+    df.to_csv(base.with_suffix(".csv"), index=False)
+
+
+def _read_table(base: Path, fmt: str) -> pd.DataFrame:
+  """Read a table written by :func:`_write_table`; empty frame if absent."""
+  path = base.with_suffix(".parquet" if fmt == "parquet" else ".csv")
+  if not path.exists():
+    return _data_frame([])
+  with pd.option_context("future.infer_string", False):
+    if fmt == "parquet":
+      return pd.read_parquet(path)
+    return pd.read_csv(path)
+
+
+_SHARD_TABLES: tuple[str, ...] = (
+  "metrics",
+  "quantities",
+  "diagnostics",
+  "runtime",
+)
+_CellRows = tuple[list[dict], list[dict], list[dict], list[dict]]
+
+
+def _cell_key(cell: Cell) -> str:
+  return f"{cell.family}__{cell.tau_scenario}__n{cell.n}__rep{cell.rep}"
+
+
+def _cell_done(cells_root: Path, cell: Cell) -> bool:
+  """True once a cell's shard is fully written (the ``DONE`` marker is last)."""
+  return (cells_root / _cell_key(cell) / "DONE").exists()
+
+
+def _write_cell_shard(
+  cells_root: Path, cell: Cell, rows: _CellRows, fmt: str
+) -> None:
+  """Persist one cell's four row-lists, then a ``DONE`` marker written last.
+
+  The marker-last ordering makes the shard atomic: a crash mid-write leaves no
+  ``DONE``, so :func:`_cell_done` reports the cell as pending and it recomputes.
+  """
+  cell_dir = cells_root / _cell_key(cell)
+  cell_dir.mkdir(parents=True, exist_ok=True)
+  for name, cell_rows in zip(_SHARD_TABLES, rows, strict=True):
+    if cell_rows:
+      _write_table(_data_frame(cell_rows), cell_dir / name, fmt)
+  (cell_dir / "DONE").write_text("")
+
+
+def _read_cell_shard(cells_root: Path, cell: Cell, fmt: str) -> _CellRows:
+  """Read back a cell's four row-lists written by :func:`_write_cell_shard`."""
+  cell_dir = cells_root / _cell_key(cell)
+  tables = [
+    _read_table(cell_dir / name, fmt).to_dict("records")
+    for name in _SHARD_TABLES
+  ]
+  return tables[0], tables[1], tables[2], tables[3]
+
+
+def _grid_signature(grid: GridConfig, run: RunConfig) -> str:
+  """Stable hash of everything that changes cell outputs (resume guard)."""
+  payload = {
+    "families": sorted(grid.families),
+    "tau_scenarios": sorted(grid.tau_scenarios),
+    "n": sorted(grid.n),
+    "n_rep": grid.n_rep,
+    "normalize": sorted(_norm_label(x) for x in grid.normalize),
+    "projection_grid_size": grid.projection_grid_size,
+    "conditional_uv_grid_n": grid.conditional_uv_grid_n,
+    "conditional_x_grid_n": grid.conditional_x_grid_n,
+    "surface_tau_levels": sorted(grid.surface_tau_levels),
+    "surface_families": sorted(grid.surface_families),
+    "enable_tau_diagnostics": grid.enable_tau_diagnostics,
+    "tau_diagnostic_n": grid.tau_diagnostic_n,
+    "base_seed": run.base_seed,
+    "estimators": sorted(
+      f"{s.backend}|{s.transform}" for s in grid.estimator_specs()
+    ),
+  }
+  encoded = json.dumps(payload, sort_keys=True).encode()
+  return hashlib.sha256(encoded).hexdigest()
+
+
+def _guard_manifest(
+  out: Path, grid: GridConfig, run: RunConfig, resume: bool
+) -> None:
+  """Write (or, on resume, verify) the grid-signature manifest."""
+  path = out / "manifest.json"
+  signature = _grid_signature(grid, run)
+  if resume and path.exists():
+    previous = json.loads(path.read_text()).get("signature")
+    if previous != signature:
+      raise ValueError(
+        "Grid signature changed since the checkpoint in this output "
+        "directory; use a fresh --out or drop --resume."
+      )
+  path.write_text(json.dumps({"signature": signature}, indent=2))
 
 
 def _nan_quantile(s: pd.Series, q: float) -> float:
@@ -358,13 +479,13 @@ def summarize_one_cell(
       for q, fn in (
         (
           "hfunc1",
-          lambda: model.hfunc1(
+          lambda m=model: m.hfunc1(
             metric_grid.u_flat, metric_grid.v_flat, x=metric_grid.x_flat
           ),
         ),
         (
           "hfunc2",
-          lambda: model.hfunc2(
+          lambda m=model: m.hfunc2(
             metric_grid.u_flat, metric_grid.v_flat, x=metric_grid.x_flat
           ),
         ),
@@ -437,13 +558,13 @@ def summarize_one_cell(
         for q, fn in (
           (
             "hfunc1",
-            lambda: model.hfunc1(
+            lambda m=model: m.hfunc1(
               surface_grid.u_flat, surface_grid.v_flat, x=surface_grid.x_flat
             ),
           ),
           (
             "hfunc2",
-            lambda: model.hfunc2(
+            lambda m=model: m.hfunc2(
               surface_grid.u_flat, surface_grid.v_flat, x=surface_grid.x_flat
             ),
           ),
@@ -511,18 +632,37 @@ def summarize_one_cell(
       }
     )
 
+    # Drop the fitted model (and its GPU tensors) before the next estimator.
+    del model
+    _release_gpu()
+
+  _release_gpu()
   return metric_rows, quantity_rows, diagnostic_rows, runtime_rows
 
 
 def run_study(
-  grid: GridConfig, run: RunConfig
+  grid: GridConfig, run: RunConfig, *, resume: bool = False
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float]:
-  """Sweep the full grid; return metric, quantity, diagnostic, runtime tables."""
+  """Sweep the full grid; return metric, quantity, diagnostic, runtime tables.
+
+  Each cell's rows are checkpointed to ``run.out/cells/<key>/`` as they finish,
+  so an interruption loses at most the in-flight cell. With ``resume=True``,
+  cells already marked done are read back from their shards and skipped; the
+  grid signature is checked first so a changed grid cannot silently reuse them.
+  """
   cells = grid.cells()
   specs = grid.estimator_specs()
+  cells_root = run.out / "cells"
+  cells_root.mkdir(parents=True, exist_ok=True)
+  _guard_manifest(run.out, grid, run, resume)
+
+  done_set = {c for c in cells if resume and _cell_done(cells_root, c)}
+  pending = [c for c in cells if c not in done_set]
   logger.info(
-    "Study: %d cells x %d estimators x %d normalize variants",
+    "Study: %d cells (%d pending, %d resumed) x %d estimators x %d normalize",
     len(cells),
+    len(pending),
+    len(done_set),
     len(specs),
     len(grid.normalize),
   )
@@ -531,9 +671,20 @@ def run_study(
   quantity_rows: list[dict] = []
   diagnostic_rows: list[dict] = []
   runtime_rows: list[dict] = []
+
+  def _accumulate(rows: _CellRows) -> None:
+    metric_rows.extend(rows[0])
+    quantity_rows.extend(rows[1])
+    diagnostic_rows.extend(rows[2])
+    runtime_rows.extend(rows[3])
+
+  for cell in cells:
+    if cell in done_set:
+      _accumulate(_read_cell_shard(cells_root, cell, run.fmt))
+
   t0_wall = perf_counter()
 
-  def _do(cell: Cell) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+  def _do(cell: Cell) -> _CellRows:
     logger.debug("cell start: %s", cell)
     out = summarize_one_cell(
       cell,
@@ -549,26 +700,19 @@ def run_study(
       enable_tau_diagnostics=grid.enable_tau_diagnostics,
       tau_diagnostic_n=grid.tau_diagnostic_n,
     )
+    _write_cell_shard(cells_root, cell, out, run.fmt)
     logger.info("cell done: %s", cell)
     return out
 
   if run.workers <= 1:
-    for cell in cells:
-      m, q, d, r = _do(cell)
-      metric_rows += m
-      quantity_rows += q
-      diagnostic_rows += d
-      runtime_rows += r
-  else:
-    max_workers = min(run.workers, len(cells), os.cpu_count() or 1)
+    for cell in pending:
+      _accumulate(_do(cell))
+  elif pending:
+    max_workers = min(run.workers, len(pending), os.cpu_count() or 1)
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-      futures = [pool.submit(_do, cell) for cell in cells]
+      futures = [pool.submit(_do, cell) for cell in pending]
       for fut in as_completed(futures):
-        m, q, d, r = fut.result()
-        metric_rows += m
-        quantity_rows += q
-        diagnostic_rows += d
-        runtime_rows += r
+        _accumulate(fut.result())
 
   wall = perf_counter() - t0_wall
   logger.info("Study finished in %.1fs", wall)

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import tempfile
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
-import numpy as np
 import pandas as pd
 import pytest
+import torch
 
+from npcc.experiments import runner as runner_mod
 from npcc.experiments.config import GridConfig, RunConfig
 from npcc.experiments.runner import (
   aggregate_results,
@@ -26,8 +30,9 @@ def _run(
   mp = pytest.MonkeyPatch()
   for target in _TABPFN_REGRESSOR_TARGETS:
     mp.setattr(target, _UniformQuantileRegressor)
+  out = Path(tempfile.mkdtemp(prefix="npcc_run_"))
   try:
-    return run_study(grid, RunConfig(out=Path("unused"), workers=1))
+    return run_study(grid, RunConfig(out=out, workers=1))
   finally:
     mp.undo()
 
@@ -261,3 +266,84 @@ def test_tau_diagnostics_can_be_disabled() -> None:
   assert diagnostic_df["tau_abs_err"].isna().all()
   assert diagnostic_df["row_mean_abs_err"].notna().all()
   assert runtime_df["tau_time"].eq(0.0).all()
+
+
+def _small_grid(n_rep: int = 2) -> GridConfig:
+  return GridConfig(
+    families=["clayton"],
+    tau_scenarios=["linear"],
+    transforms=["logit"],
+    backends=["tabpfn-criterion"],
+    normalize=[None],
+    n=[20],
+    n_rep=n_rep,
+    projection_grid_size=8,
+    conditional_uv_grid_n=3,
+    conditional_x_grid_n=2,
+    surface_families=[],
+  )
+
+
+def _fake_mp() -> pytest.MonkeyPatch:
+  mp = pytest.MonkeyPatch()
+  for target in _TABPFN_REGRESSOR_TARGETS:
+    mp.setattr(target, _UniformQuantileRegressor)
+  return mp
+
+
+def test_release_gpu_no_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+  monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+  # Must be a harmless no-op when CUDA is unavailable.
+  runner_mod._release_gpu()
+
+
+def test_release_gpu_calls_empty_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+  calls: list[int] = []
+  monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+  monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append(1))
+  runner_mod._release_gpu()
+  assert calls == [1]
+
+
+def test_resume_skips_completed_cells(
+  tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  grid = _small_grid(n_rep=2)
+  run = RunConfig(out=tmp_path, workers=1)
+  mp = _fake_mp()
+  try:
+    metric1 = run_study(grid, run)[0]
+    cells = grid.cells()
+    assert len(cells) == 2
+    for cell in cells:
+      done = tmp_path / "cells" / runner_mod._cell_key(cell) / "DONE"
+      assert done.exists()
+
+    # Force the first cell to recompute by removing only its marker.
+    (tmp_path / "cells" / runner_mod._cell_key(cells[0]) / "DONE").unlink()
+
+    seen: list[object] = []
+    orig = cast(Callable[..., object], runner_mod.summarize_one_cell)
+
+    def _spy(*args: object, **kwargs: object) -> object:
+      seen.append(args[0])
+      return orig(*args, **kwargs)
+
+    monkeypatch.setattr(runner_mod, "summarize_one_cell", _spy)
+    metric2 = run_study(grid, run, resume=True)[0]
+  finally:
+    mp.undo()
+
+  assert seen == [cells[0]]
+  assert len(metric2) == len(metric1)
+
+
+def test_resume_grid_signature_mismatch_raises(tmp_path: Path) -> None:
+  run = RunConfig(out=tmp_path, workers=1)
+  mp = _fake_mp()
+  try:
+    run_study(_small_grid(n_rep=1), run)
+    with pytest.raises(ValueError, match="signature"):
+      run_study(_small_grid(n_rep=3), run, resume=True)
+  finally:
+    mp.undo()
