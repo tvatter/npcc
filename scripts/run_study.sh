@@ -33,8 +33,10 @@ command -v uv >/dev/null 2>&1 || {
   exit 1
 }
 
-echo ">> syncing deps: --extra ${CUDA_EXTRA} --extra backends --extra experiments"
-uv sync --extra "${CUDA_EXTRA}" --extra backends --extra experiments
+# --frozen: install the committed uv.lock exactly, never re-resolve. Without it
+# a fresh box can drift to an ancient numba/llvmlite that won't build on 3.12+.
+echo ">> syncing deps (frozen): --extra ${CUDA_EXTRA} --extra backends --extra experiments"
+uv sync --frozen --extra "${CUDA_EXTRA}" --extra backends --extra experiments
 
 echo ">> GPU:"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader || true
