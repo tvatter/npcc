@@ -77,8 +77,14 @@ def _config_echo(grid: GridConfig, run: RunConfig, wall: float) -> dict:
     "grid": {
       "families": grid.families,
       "tau_scenarios": grid.tau_scenarios,
-      "transforms": grid.transforms,
-      "backends": grid.backends,
+      "estimators": [
+        {
+          "label": e.label,
+          "estimator_id": e.estimator_id,
+          **e.canonical_dict(),
+        }
+        for e in grid.estimators
+      ],
       "normalize": grid.normalize,
       "n": grid.n,
       "n_rep": grid.n_rep,

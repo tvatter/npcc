@@ -8,26 +8,71 @@ run-level options come from the CLI.  TOML has no ``null`` literal, so the
 
 from __future__ import annotations
 
+import hashlib
+import json
 import tomllib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
-from itertools import product
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
-from npcc.core.registry import available_backends
+from npcc.core.errors import (
+  EstimatorConfigError,
+  InvalidBackendKwargsError,
+  UnknownBackendError,
+)
+from npcc.core.registry import available_backends, validate_backend_kwargs
 from npcc.experiments.scenarios import FAMILIES, TAU_SCENARIOS
 
 TRANSFORMS: tuple[str, ...] = ("identity", "logit", "probit")
-DEFAULT_BACKENDS: tuple[str, ...] = ("tabpfn-criterion", "tabpfn-quantiles")
 
 
 @dataclass(frozen=True)
 class EstimatorSpec:
-  """An estimator configuration fitted once per data cell."""
+  """One estimator: a registry backend + transform + its own hyperparameters.
 
-  transform: str
+  ``backend_kwargs`` are validated against the backend's allow-list at
+  construction; ``estimator_id`` is a stable content hash of the *effective*
+  config (``backend``/``transform``/``backend_kwargs``, not the display
+  ``label``), used to seed per-estimator RNG and join result rows.
+  """
+
+  label: str
   backend: str
+  transform: str
+  backend_kwargs: Mapping[str, object] = field(default_factory=dict)
+
+  def __post_init__(self) -> None:
+    if not self.label:
+      raise EstimatorConfigError("Estimator label must be non-empty.")
+    if self.backend not in available_backends():
+      raise UnknownBackendError(
+        f"Unknown backend {self.backend!r}. Available: {available_backends()}."
+      )
+    if self.transform not in TRANSFORMS:
+      raise EstimatorConfigError(
+        f"Unknown transform {self.transform!r}. Allowed: {list(TRANSFORMS)}."
+      )
+    frozen = MappingProxyType(deepcopy(dict(self.backend_kwargs)))
+    validate_backend_kwargs(self.backend, frozen)
+    object.__setattr__(self, "backend_kwargs", frozen)
+
+  def canonical_dict(self) -> dict[str, object]:
+    """The effective config, exactly as forwarded at runtime (for hashing)."""
+    return {
+      "backend": self.backend,
+      "transform": self.transform,
+      "backend_kwargs": dict(self.backend_kwargs),
+    }
+
+  @property
+  def estimator_id(self) -> str:
+    encoded = json.dumps(
+      self.canonical_dict(), sort_keys=True, separators=(",", ":")
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -75,8 +120,7 @@ class GridConfig:
 
   families: list[str]
   tau_scenarios: list[str]
-  transforms: list[str]
-  backends: list[str]
+  estimators: list[EstimatorSpec]
   normalize: list[int | None]
   n: list[int]
   n_rep: int
@@ -93,8 +137,11 @@ class GridConfig:
   def __post_init__(self) -> None:
     _check_subset("families", self.families, FAMILIES)
     _check_subset("tau_scenarios", self.tau_scenarios, TAU_SCENARIOS)
-    _check_subset("transforms", self.transforms, TRANSFORMS)
-    _check_subset("backends", self.backends, available_backends())
+    if not self.estimators:
+      raise ValueError("estimators must be non-empty.")
+    labels = [e.label for e in self.estimators]
+    if len(labels) != len(set(labels)):
+      raise EstimatorConfigError("Estimator labels must be unique.")
     if not self.normalize:
       raise ValueError("normalize must be non-empty (e.g. [None]).")
     for entry in self.normalize:
@@ -126,10 +173,7 @@ class GridConfig:
       raise ValueError("tau_diagnostic_n must be >= 10.")
 
   def estimator_specs(self) -> list[EstimatorSpec]:
-    return [
-      EstimatorSpec(transform=t, backend=b)
-      for t, b in product(self.transforms, self.backends)
-    ]
+    return list(self.estimators)
 
   def cells(self) -> list[Cell]:
     return [
@@ -159,17 +203,42 @@ class RunConfig:
       raise ValueError("fmt must be 'csv' or 'parquet'.")
 
 
+def _parse_estimator(entry: Mapping[str, object]) -> EstimatorSpec:
+  """Build an :class:`EstimatorSpec` from one ``[[grid.estimators]]`` table."""
+  try:
+    label = str(entry["label"])
+    backend = str(entry["backend"])
+    transform = str(entry["transform"])
+  except KeyError as exc:
+    raise EstimatorConfigError(
+      f"Estimator entry is missing required key: {exc}."
+    ) from exc
+  raw = entry.get("backend_kwargs", {})
+  if not isinstance(raw, dict):
+    raise InvalidBackendKwargsError("backend_kwargs must be a TOML table.")
+  return EstimatorSpec(
+    label=label,
+    backend=backend,
+    transform=transform,
+    backend_kwargs={str(k): v for k, v in raw.items()},
+  )
+
+
 def load_grid(path: str | Path) -> GridConfig:
   """Load a :class:`GridConfig` from the ``[grid]`` table of a TOML file."""
   with Path(path).open("rb") as fh:
     data = tomllib.load(fh)
   grid = data.get("grid", data)
+  raw_estimators = grid.get("estimators")
+  if not isinstance(raw_estimators, list) or not raw_estimators:
+    raise EstimatorConfigError(
+      "Config must define a non-empty [[grid.estimators]] array."
+    )
   try:
     return GridConfig(
       families=list(grid["families"]),
       tau_scenarios=list(grid["tau_scenarios"]),
-      transforms=list(grid["transforms"]),
-      backends=list(grid["backends"]),
+      estimators=[_parse_estimator(e) for e in raw_estimators],
       normalize=_coerce_normalize(list(grid["normalize"])),
       n=[int(v) for v in grid["n"]],
       n_rep=int(grid["n_rep"]),

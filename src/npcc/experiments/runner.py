@@ -141,9 +141,7 @@ def _grid_signature(grid: GridConfig, run: RunConfig) -> str:
     "enable_tau_diagnostics": grid.enable_tau_diagnostics,
     "tau_diagnostic_n": grid.tau_diagnostic_n,
     "base_seed": run.base_seed,
-    "estimators": sorted(
-      f"{s.backend}|{s.transform}" for s in grid.estimator_specs()
-    ),
+    "estimators": sorted(s.estimator_id for s in grid.estimator_specs()),
   }
   encoded = json.dumps(payload, sort_keys=True).encode()
   return hashlib.sha256(encoded).hexdigest()
@@ -187,9 +185,21 @@ def _base_row(cell: Cell, est: EstimatorSpec, seed: int) -> dict[str, object]:
     "n": cell.n,
     "rep": cell.rep,
     "seed": seed,
+    "label": est.label,
+    "estimator_id": est.estimator_id,
     "transform": est.transform,
     "backend": est.backend,
   }
+
+
+def _estimator_seed(cell_seed: int, estimator_id: str) -> int:
+  """Deterministic per-estimator seed mixing the cell seed and estimator id.
+
+  Decorrelates stochastic fits across estimators without feeding back into
+  ``estimator_id`` (which must stay a pure function of the config).
+  """
+  digest = hashlib.sha256(f"{cell_seed}:{estimator_id}".encode()).digest()
+  return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
 
 
 def _tau_values(scenario: str, x_axis: np.ndarray | None) -> np.ndarray:
@@ -464,11 +474,15 @@ def summarize_one_cell(
 
   for est in estimator_specs:
     t0 = perf_counter()
+    est_seed = _estimator_seed(seed, est.estimator_id)
+    np.random.seed(est_seed)
+    torch.manual_seed(est_seed)
     model = RosenblattBicop(
       backend=est.backend,
       transform=cast(Literal["identity", "logit", "probit"], est.transform),
       device=device,
       projection_grid_size=projection_grid_size,
+      backend_kwargs=dict(est.backend_kwargs),
     )
     model.fit(u, v, x)
     fit_time = perf_counter() - t0
@@ -618,6 +632,8 @@ def summarize_one_cell(
         "n": cell.n,
         "rep": cell.rep,
         "seed": seed,
+        "label": est.label,
+        "estimator_id": est.estimator_id,
         "transform": est.transform,
         "backend": est.backend,
         "fit_time": fit_time,
@@ -722,6 +738,7 @@ def run_study(
     "tau_scenario",
     "backend",
     "transform",
+    "label",
     "n",
     "rep",
   ]
@@ -761,6 +778,8 @@ _ESTIMATOR_AXES: tuple[str, ...] = (
   "n",
   "transform",
   "backend",
+  "label",
+  "estimator_id",
 )
 
 
