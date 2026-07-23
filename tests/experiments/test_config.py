@@ -78,25 +78,25 @@ def test_cells_and_estimator_specs_are_explicit(tmp_path: Path) -> None:
 
 def test_estimator_backend_kwargs_flow_through(tmp_path: Path) -> None:
   text = _TOML + (
-    '\n[[grid.estimators]]\nlabel = "xgb-deep"\nbackend = "xgb-quantile"\n'
+    '\n[[grid.estimators]]\nlabel = "gbm-deep"\nbackend = "gbm"\n'
     'transform = "logit"\nbackend_kwargs = { max_depth = 8 }\n'
   )
   grid = load_grid(_write(tmp_path, text))
-  xgb = grid.estimators[-1]
-  assert xgb.backend == "xgb-quantile"
-  assert dict(xgb.backend_kwargs) == {"max_depth": 8}
+  est = grid.estimators[-1]
+  assert est.backend == "gbm"
+  assert dict(est.backend_kwargs) == {"max_depth": 8}
 
 
 def test_same_backend_different_kwargs_distinct_ids(tmp_path: Path) -> None:
   text = _TOML + (
-    '\n[[grid.estimators]]\nlabel = "xgb-shallow"\nbackend = "xgb-quantile"\n'
+    '\n[[grid.estimators]]\nlabel = "gbm-shallow"\nbackend = "gbm"\n'
     'transform = "logit"\nbackend_kwargs = { max_depth = 3 }\n'
-    '\n[[grid.estimators]]\nlabel = "xgb-deep"\nbackend = "xgb-quantile"\n'
+    '\n[[grid.estimators]]\nlabel = "gbm-deep"\nbackend = "gbm"\n'
     'transform = "logit"\nbackend_kwargs = { max_depth = 9 }\n'
   )
   grid = load_grid(_write(tmp_path, text))
   shallow, deep = grid.estimators[-2], grid.estimators[-1]
-  assert shallow.backend == deep.backend == "xgb-quantile"
+  assert shallow.backend == deep.backend == "gbm"
   assert shallow.estimator_id != deep.estimator_id
 
 
@@ -114,7 +114,7 @@ def test_unknown_transform_rejected(tmp_path: Path) -> None:
 
 def test_bad_backend_kwargs_rejected(tmp_path: Path) -> None:
   text = _TOML + (
-    '\n[[grid.estimators]]\nlabel = "xgb-typo"\nbackend = "xgb-quantile"\n'
+    '\n[[grid.estimators]]\nlabel = "gbm-typo"\nbackend = "gbm"\n'
     'transform = "logit"\nbackend_kwargs = { max_dpeth = 3 }\n'
   )
   with pytest.raises(InvalidBackendKwargsError, match="unknown backend_kwargs"):
@@ -123,7 +123,7 @@ def test_bad_backend_kwargs_rejected(tmp_path: Path) -> None:
 
 def test_mistyped_backend_kwarg_rejected(tmp_path: Path) -> None:
   text = _TOML + (
-    '\n[[grid.estimators]]\nlabel = "xgb-bad"\nbackend = "xgb-quantile"\n'
+    '\n[[grid.estimators]]\nlabel = "gbm-bad"\nbackend = "gbm"\n'
     'transform = "logit"\nbackend_kwargs = { max_depth = 3.5 }\n'
   )
   with pytest.raises(InvalidBackendKwargsError, match="max_depth"):
@@ -218,18 +218,18 @@ def test_shipped_study_config_loads() -> None:
   assert grid.n == [200, 500, 1000]
   assert grid.n_rep == 5
   assert grid.normalize == [None]
-  assert len(grid.estimators) == 20
+  assert len(grid.estimators) == 18
   labels = [e.label for e in grid.estimators]
   assert len(labels) == len(set(labels))
   ids = [e.estimator_id for e in grid.estimators]
   assert len(ids) == len(set(ids))
+  # xgb-quantile is intentionally excluded (tree tail collapse; see registry.py).
   assert {e.backend for e in grid.estimators} == {
     "tabpfn-criterion",
     "tabpfn-quantiles",
     "nori",
     "tabicl",
     "ngboost",
-    "xgb-quantile",
     "pytabkit-realmlp",
     "pytabkit-tabm",
   }

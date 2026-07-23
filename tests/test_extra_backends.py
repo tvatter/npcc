@@ -83,17 +83,6 @@ def test_catboost_backend_smoke() -> None:
   _check_fitted_model(m)
 
 
-def test_xgb_quantile_backend_smoke() -> None:
-  pytest.importorskip("xgboost")
-  u, v = _gaussian_copula_sample(80, rho=0.6, seed=4)
-  m = RosenblattBicop(
-    backend="xgb-quantile",
-    backend_kwargs={"n_estimators": 100},
-    quantile_config=QuantileGridConfig(n_quantiles=21),
-  ).fit(u, v)
-  _check_fitted_model(m)
-
-
 def test_pytabkit_realmlp_backend_smoke() -> None:
   pytest.importorskip("pytabkit")
   u, v = _gaussian_copula_sample(80, rho=0.6, seed=5)

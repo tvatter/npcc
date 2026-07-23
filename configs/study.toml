@@ -21,9 +21,12 @@
 # backends, is ~309 s; the full grid is 24 such blocks). n_rep = 5 => ~10.3 h,
 # which fits an overnight window with buffer.
 #
-# Backends intentionally EXCLUDED from this run (too slow for the full grid):
-#   - catboost   (~74 s/fit; ~1.5 h of grid) and gbm (101 sklearn models/dir) —
-#     redundant slow GBM-quantile variants; xgb-quantile is the representative.
+# Backends intentionally EXCLUDED from this run:
+#   - xgb-quantile / catboost / gbm — tree quantile regressors cannot
+#     extrapolate, so their predicted conditional support collapses and the
+#     quantile->density inversion returns 0 in the tails, making pdf-KL blow up
+#     (tail collapse; xgb-quantile is unregistered, see registry.py). Needs a
+#     tail-robust inversion before tree backends are comparable.
 #   - tabpfn-finetune / tabicl-finetune — GPU training loops (minutes x 2
 #     directions x 72 fits = many hours); run those in a separate small study.
 
@@ -143,16 +146,6 @@ transform = "logit"
 [[grid.estimators]]
 label = "ngboost-probit"
 backend = "ngboost"
-transform = "probit"
-
-[[grid.estimators]]
-label = "xgb-quantile-logit"
-backend = "xgb-quantile"
-transform = "logit"
-
-[[grid.estimators]]
-label = "xgb-quantile-probit"
-backend = "xgb-quantile"
 transform = "probit"
 
 [[grid.estimators]]

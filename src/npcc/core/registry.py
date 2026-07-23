@@ -564,32 +564,32 @@ register_backend(
   ),
   kwarg_types={"iterations": int, "depth": int, "learning_rate": float},
 )
-register_backend(
-  "xgb-quantile",
-  _xgb_quantile_factory,
-  allowed_kwargs=frozenset(
-    {
-      "n_estimators",
-      "tree_method",
-      "max_depth",
-      "learning_rate",
-      "subsample",
-      "colsample_bytree",
-      "min_child_weight",
-      "reg_alpha",
-      "reg_lambda",
-      "gamma",
-      "n_jobs",
-      "random_state",
-    }
-  ),
-  kwarg_types={
-    "n_estimators": int,
-    "max_depth": int,
-    "learning_rate": float,
-    "subsample": float,
-  },
-)
+# xgb-quantile is intentionally NOT registered (the backend + `_xgb_quantile_
+# factory` are kept; uncomment to re-enable). XGBoost quantile trees cannot
+# extrapolate, so the predicted conditional support collapses to roughly the
+# inner [0.24, 0.96] of (0, 1); the quantile->density inversion then returns
+# density exactly 0 outside that range. On the study grid this zeroes ~44% of
+# evaluation points holding ~16% of the true mass, so KL = E_true[log(truth/0)]
+# blows up (pdf-KL ~8 vs ~0.1-0.4 for the other backends). Restricted to
+# in-support cells its KL is a normal ~0.5, i.e. this is *tail collapse* — not
+# quantile crossing (rows are monotone-sorted) and not a metric artifact. A
+# tail-robust inversion (extrapolate the quantile tails / floor the density)
+# would be the prerequisite to re-including it.
+# register_backend(
+#   "xgb-quantile",
+#   _xgb_quantile_factory,
+#   allowed_kwargs=frozenset(
+#     {
+#       "n_estimators", "tree_method", "max_depth", "learning_rate",
+#       "subsample", "colsample_bytree", "min_child_weight", "reg_alpha",
+#       "reg_lambda", "gamma", "n_jobs", "random_state",
+#     }
+#   ),
+#   kwarg_types={
+#     "n_estimators": int, "max_depth": int, "learning_rate": float,
+#     "subsample": float,
+#   },
+# )
 register_backend(
   "pytabkit-realmlp",
   _pytabkit_realmlp_factory,

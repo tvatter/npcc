@@ -96,15 +96,15 @@ class TestRegistry:
 
 class TestBackendSpec:
   def test_curated_kwargs_accepted(self) -> None:
-    validate_backend_kwargs("xgb-quantile", {"max_depth": 4, "subsample": 0.8})
+    validate_backend_kwargs("gbm", {"max_depth": 4, "subsample": 0.8})
 
   def test_unknown_kwarg_rejected(self) -> None:
     with pytest.raises(InvalidBackendKwargsError, match="unknown backend"):
-      validate_backend_kwargs("xgb-quantile", {"max_dpeth": 4})
+      validate_backend_kwargs("gbm", {"max_dpeth": 4})
 
   def test_mistyped_kwarg_rejected(self) -> None:
     with pytest.raises(InvalidBackendKwargsError, match="max_depth"):
-      validate_backend_kwargs("xgb-quantile", {"max_depth": 3.5})
+      validate_backend_kwargs("gbm", {"max_depth": 3.5})
 
   def test_nested_kwarg_must_be_table(self) -> None:
     with pytest.raises(InvalidBackendKwargsError, match="model_kwargs"):
@@ -120,7 +120,7 @@ class TestBackendSpec:
 
   def test_documented_n_range(self) -> None:
     assert documented_n_range("tabicl") == (300, 48000)
-    assert documented_n_range("xgb-quantile") is None
+    assert documented_n_range("gbm") is None
 
 
 # ---------------------------------------------------------------------------
