@@ -136,11 +136,11 @@ class TestHermeticBackendEndToEnd:
     rng = np.random.default_rng(0)
     u = rng.uniform(0.2, 0.8, 40)
     v = rng.uniform(0.2, 0.8, 40)
-    m = RosenblattBicop(backend=backend).fit(u, v)
+    m = RosenblattBicop(backend=backend).fit(np.column_stack([u, v]))
 
     # Symmetric average of two identical Uniform(-2,2)-logit densities.
     y = np.array([0.3, 0.5, 0.7])
-    out = m.pdf(y, y)
+    out = m.pdf(np.column_stack([y, y]))
     expected = uniform_density_y(y)
     np.testing.assert_allclose(out, expected, atol=1e-6)
 
@@ -150,8 +150,8 @@ class TestHermeticBackendEndToEnd:
     rng = np.random.default_rng(1)
     u = rng.uniform(0.2, 0.8, 30)
     v = rng.uniform(0.2, 0.8, 30)
-    m = RosenblattBicop(backend=backend).fit(u, v)
-    h = m.hfunc1(np.array([0.3, 0.5, 0.7]), np.array([0.4, 0.5, 0.6]))
+    m = RosenblattBicop(backend=backend).fit(np.column_stack([u, v]))
+    h = m.hfunc1(np.array([[0.3, 0.4], [0.5, 0.5], [0.7, 0.6]]))
     assert ((h >= 0.0) & (h <= 1.0)).all()
 
   def test_pdf_grid_matches_pointwise(
@@ -160,13 +160,15 @@ class TestHermeticBackendEndToEnd:
     rng = np.random.default_rng(2)
     u = rng.uniform(0.2, 0.8, 30)
     v = rng.uniform(0.2, 0.8, 30)
-    m = RosenblattBicop(backend=backend).fit(u, v)
+    m = RosenblattBicop(backend=backend).fit(np.column_stack([u, v]))
     u_g = np.linspace(0.25, 0.75, 4)
     v_g = np.linspace(0.3, 0.7, 5)
     grid = m.pdf_grid(u_g, v_g)
     u_tile = np.repeat(u_g, len(v_g))
     v_tile = np.tile(v_g, len(u_g))
-    expected = m.pdf(u_tile, v_tile).reshape(len(u_g), len(v_g))
+    expected = m.pdf(np.column_stack([u_tile, v_tile])).reshape(
+      len(u_g), len(v_g)
+    )
     np.testing.assert_allclose(grid, expected, atol=1e-9)
 
   def test_cdf_grid_available(
@@ -175,7 +177,7 @@ class TestHermeticBackendEndToEnd:
     rng = np.random.default_rng(3)
     u = rng.uniform(0.2, 0.8, 30)
     v = rng.uniform(0.2, 0.8, 30)
-    m = RosenblattBicop(backend=backend).fit(u, v)
+    m = RosenblattBicop(backend=backend).fit(np.column_stack([u, v]))
     out = m.cdf_grid(np.linspace(0.2, 0.8, 4), np.linspace(0.2, 0.8, 4))
     assert out.shape == (4, 4)
     assert ((out >= 0.0) & (out <= 1.0)).all()
@@ -188,8 +190,8 @@ class TestHermeticBackendEndToEnd:
     v = rng.uniform(0.2, 0.8, 30)
     m = RosenblattBicop(
       backend=backend, sinkhorn_iters=3, projection_grid_size=20
-    ).fit(u, v)
-    out = m.pdf(np.array([0.4, 0.6]), np.array([0.4, 0.6]))
+    ).fit(np.column_stack([u, v]))
+    out = m.pdf(np.array([[0.4, 0.4], [0.6, 0.6]]))
     assert (out > 0).all()
 
 

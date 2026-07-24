@@ -69,6 +69,7 @@ from typing import Any, Literal, Self
 
 import numpy as np
 import torch
+from pyvinecopulib.core import BicopBase
 
 from npcc.core._common import (
   TensorLike,
@@ -155,7 +156,7 @@ def _sinkhorn_project(
   return r, s
 
 
-class RosenblattBicop:
+class RosenblattBicop(BicopBase[TensorLike]):
   """Rosenblatt conditional bivariate copula estimator.
 
   Parameters
@@ -198,9 +199,9 @@ class RosenblattBicop:
   -----
   - The estimator fits both Rosenblatt directions and averages them to
     reduce directional bias (see the module docstring).
-  - Public methods accept either NumPy arrays or torch tensors.  When any
-    positional numeric input is a torch tensor, the return value is a
-    torch tensor on ``device``; otherwise it is a NumPy array.
+  - Public methods accept either NumPy arrays or torch tensors.  A NumPy
+    ``uv`` produces NumPy output; a torch ``uv`` produces torch output on
+    ``device``.  The type of an optional ``x`` does not change that routing.
   """
 
   def __init__(
@@ -295,9 +296,14 @@ class RosenblattBicop:
     return torch.ones((n, 1), dtype=torch.float64, device=self._device)
 
   def _prepare_joint_inputs(
-    self, u: TensorLike, v: TensorLike, x: TensorLike | None
+    self, uv: TensorLike, x: TensorLike | None
   ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
+    uv_t = _to_tensor(uv, device=self._device)
+    if uv_t.ndim != 2 or uv_t.shape[1] != 2:
+      raise ValueError("uv must have shape (n, 2).")
+    u_t, v_t = _check_uv(
+      uv_t[:, 0], uv_t[:, 1], self.quantile_config.eps, device=self._device
+    )
     x_t = (
       self._default_x(u_t.shape[0])
       if x is None
@@ -305,7 +311,7 @@ class RosenblattBicop:
     )
 
     if x_t.shape[0] != u_t.shape[0]:
-      raise ValueError("x, u, and v must have the same number of observations.")
+      raise ValueError("x and uv must have the same number of observations.")
 
     return u_t, v_t, x_t
 
@@ -364,8 +370,7 @@ class RosenblattBicop:
 
   def fit(
     self,
-    u: TensorLike,
-    v: TensorLike,
+    uv: TensorLike,
     x: TensorLike | None = None,
   ) -> Self:
     """Fit the inner conditional density estimators.
@@ -378,7 +383,7 @@ class RosenblattBicop:
     used for the optional Sinkhorn projection is initialized and cached
     during fit.
     """
-    u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
+    u_t, v_t, x_t = self._prepare_joint_inputs(uv, x)
 
     self.v_given_ux_.fit(self._features(u_t, x_t), v_t)
     self.u_given_vx_.fit(self._features(v_t, x_t), u_t)
@@ -392,7 +397,6 @@ class RosenblattBicop:
   def pdf(
     self,
     u: TensorLike,
-    v: TensorLike,
     x: TensorLike | None = None,
     *,
     batch_size: int | None = None,
@@ -405,11 +409,10 @@ class RosenblattBicop:
     iteration count; ``None`` means "use ``self.sinkhorn_iters``".  If the
     effective value is ``None``, no projection is applied.
     """
-    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
+    return_as_torch = isinstance(u, torch.Tensor)
     with torch.inference_mode():
       out = self._pdf_torch(
         u,
-        v,
         x,
         batch_size=self._resolve_batch_size(batch_size),
         sinkhorn_iters=self._resolve_sinkhorn_iters(sinkhorn_iters),
@@ -418,14 +421,13 @@ class RosenblattBicop:
 
   def _pdf_torch(
     self,
-    u: TensorLike,
-    v: TensorLike,
+    uv: TensorLike,
     x: TensorLike | None,
     *,
     batch_size: int,
     sinkhorn_iters: int | None,
   ) -> torch.Tensor:
-    u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
+    u_t, v_t, x_t = self._prepare_joint_inputs(uv, x)
     c_raw = self._raw_pdf_torch(u_t, v_t, x_t, batch_size=batch_size)
 
     if sinkhorn_iters is None:
@@ -581,8 +583,7 @@ class RosenblattBicop:
 
   def log_pdf(
     self,
-    u: TensorLike,
-    v: TensorLike,
+    uv: TensorLike,
     x: TensorLike | None = None,
     *,
     batch_size: int | None = None,
@@ -592,11 +593,10 @@ class RosenblattBicop:
 
     ``batch_size`` and ``sinkhorn_iters`` match :py:meth:`pdf`.
     """
-    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
+    return_as_torch = isinstance(uv, torch.Tensor)
     with torch.inference_mode():
       c = self._pdf_torch(
-        u,
-        v,
+        uv,
         x,
         batch_size=self._resolve_batch_size(batch_size),
         sinkhorn_iters=self._resolve_sinkhorn_iters(sinkhorn_iters),
@@ -679,7 +679,6 @@ class RosenblattBicop:
   def hfunc1(
     self,
     u: TensorLike,
-    v: TensorLike,
     x: TensorLike | None = None,
   ) -> TensorLike:
     """``h_1(u, v | x) = P(V <= v | U = u, X = x) = F_{V | U, X}(v | u, x)``.
@@ -691,8 +690,8 @@ class RosenblattBicop:
     Convention matches :py:meth:`pyvinecopulib.Bicop.hfunc1`: ``hfunc1``
     conditions on the first argument.
     """
-    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
-    u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
+    return_as_torch = isinstance(u, torch.Tensor)
+    u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
 
     out = self.v_given_ux_.cdf(self._features(u_t, x_t), v_t)
     assert isinstance(out, torch.Tensor)
@@ -701,7 +700,6 @@ class RosenblattBicop:
   def hfunc2(
     self,
     u: TensorLike,
-    v: TensorLike,
     x: TensorLike | None = None,
   ) -> TensorLike:
     """``h_2(u, v | x) = P(U <= u | V = v, X = x) = F_{U | V, X}(u | v, x)``.
@@ -711,12 +709,61 @@ class RosenblattBicop:
     Convention matches :py:meth:`pyvinecopulib.Bicop.hfunc2`: ``hfunc2``
     conditions on the second argument.
     """
-    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
-    u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
+    return_as_torch = isinstance(u, torch.Tensor)
+    u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
 
     out = self.u_given_vx_.cdf(self._features(v_t, x_t), u_t)
     assert isinstance(out, torch.Tensor)
     return _wrap_output(out, return_as_torch=return_as_torch)
+
+  def hinv1(
+    self,
+    u: TensorLike,
+    x: TensorLike | None = None,
+  ) -> TensorLike:
+    """Invert :meth:`hfunc1` using the V|U backend's native quantiles."""
+    return_as_torch = isinstance(u, torch.Tensor)
+    u_t, alpha_t, x_t = self._prepare_joint_inputs(u, x)
+    out = self.v_given_ux_.icdf(self._features(u_t, x_t), alpha_t)
+    assert isinstance(out, torch.Tensor)
+    return _wrap_output(out, return_as_torch=return_as_torch)
+
+  def hinv2(
+    self,
+    u: TensorLike,
+    x: TensorLike | None = None,
+  ) -> TensorLike:
+    """Invert :meth:`hfunc2` using the U|V backend's native quantiles."""
+    return_as_torch = isinstance(u, torch.Tensor)
+    alpha_t, v_t, x_t = self._prepare_joint_inputs(u, x)
+    out = self.u_given_vx_.icdf(self._features(v_t, x_t), alpha_t)
+    assert isinstance(out, torch.Tensor)
+    return _wrap_output(out, return_as_torch=return_as_torch)
+
+  def _simulate_uniform(
+    self,
+    n: int,
+    qrng: bool,
+    seeds: list[int],
+  ) -> torch.Tensor:
+    """Draw float64 base uniforms on the estimator's configured device."""
+    if qrng:
+      from pyvinecopulib import simulate_uniform
+
+      draws = simulate_uniform(n, 2, qrng=True, seeds=list(seeds))
+      return torch.as_tensor(draws, dtype=torch.float64, device=self._device)
+
+    generator = torch.Generator(device=self._device)
+    if seeds:
+      generator.manual_seed(int(seeds[0]))
+    else:
+      generator.seed()
+    return torch.rand(
+      (n, 2),
+      generator=generator,
+      dtype=torch.float64,
+      device=self._device,
+    )
 
   # -------------------------------------------------------------------
   # Joint CDF
@@ -725,7 +772,6 @@ class RosenblattBicop:
   def cdf(
     self,
     u: TensorLike,
-    v: TensorLike,
     x: TensorLike | None = None,
     *,
     n_int: int = 12,
@@ -750,8 +796,8 @@ class RosenblattBicop:
       raise ValueError("n_int must be at least 2.")
     effective_batch_size = self._resolve_batch_size(batch_size)
 
-    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
-    u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
+    return_as_torch = isinstance(u, torch.Tensor)
+    u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
 
     cdf_v_dir = self._integrate_one_direction(
       upper=u_t,
@@ -979,12 +1025,12 @@ class RosenblattBicop:
 
   def plot(
     self,
+    plot_type: str = "contour",
+    margin_type: str = "norm",
+    xylim: tuple[float, float] | None = None,
+    grid_size: int | None = None,
     *,
     x_row: TensorLike | None = None,
-    plot_type: Literal["contour", "surface"] = "contour",
-    margin_type: Literal["unif", "norm", "exp"] = "norm",
-    grid_size: int | None = None,
-    xylim: tuple[float, float] | None = None,
   ) -> None:
     """Render a copula contour or surface plot of the fitted density.
 
@@ -1070,6 +1116,6 @@ class _BicopAdapter:
       return grid[inv_u, inv_v].detach().cpu().numpy()
 
     x = None if self._x_row is None else self._x_row.repeat_interleave(n, dim=0)
-    out = self._model.pdf(uv_t[:, 0], uv_t[:, 1], x)
+    out = self._model.pdf(uv_t, x)
     assert isinstance(out, torch.Tensor)
     return out.detach().cpu().numpy()

@@ -508,7 +508,7 @@ def summarize_one_cell(
       projection_grid_size=projection_grid_size,
       backend_kwargs=dict(est.backend_kwargs),
     )
-    model.fit(u, v, x)
+    model.fit(np.column_stack([u, v]), x)
     fit_time = perf_counter() - t0
 
     with torch.inference_mode():
@@ -518,13 +518,15 @@ def summarize_one_cell(
         (
           "hfunc1",
           lambda m=model: m.hfunc1(
-            metric_grid.u_flat, metric_grid.v_flat, x=metric_grid.x_flat
+            np.column_stack([metric_grid.u_flat, metric_grid.v_flat]),
+            x=metric_grid.x_flat,
           ),
         ),
         (
           "hfunc2",
           lambda m=model: m.hfunc2(
-            metric_grid.u_flat, metric_grid.v_flat, x=metric_grid.x_flat
+            np.column_stack([metric_grid.u_flat, metric_grid.v_flat]),
+            x=metric_grid.x_flat,
           ),
         ),
       ):
@@ -552,8 +554,7 @@ def summarize_one_cell(
         t0 = perf_counter()
         pdf_hat = np.asarray(
           model.pdf(
-            metric_grid.u_flat,
-            metric_grid.v_flat,
+            np.column_stack([metric_grid.u_flat, metric_grid.v_flat]),
             x=metric_grid.x_flat,
             sinkhorn_iters=norm,
           ),
@@ -597,13 +598,15 @@ def summarize_one_cell(
           (
             "hfunc1",
             lambda m=model: m.hfunc1(
-              surface_grid.u_flat, surface_grid.v_flat, x=surface_grid.x_flat
+              np.column_stack([surface_grid.u_flat, surface_grid.v_flat]),
+              x=surface_grid.x_flat,
             ),
           ),
           (
             "hfunc2",
             lambda m=model: m.hfunc2(
-              surface_grid.u_flat, surface_grid.v_flat, x=surface_grid.x_flat
+              np.column_stack([surface_grid.u_flat, surface_grid.v_flat]),
+              x=surface_grid.x_flat,
             ),
           ),
         ):
@@ -628,8 +631,7 @@ def summarize_one_cell(
           t0 = perf_counter()
           pdf_hat = np.asarray(
             model.pdf(
-              surface_grid.u_flat,
-              surface_grid.v_flat,
+              np.column_stack([surface_grid.u_flat, surface_grid.v_flat]),
               x=surface_grid.x_flat,
               sinkhorn_iters=norm,
             ),

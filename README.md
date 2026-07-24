@@ -162,10 +162,10 @@ u = clayton.simulate(n=1000, seeds=[2, 2, 4])
 
 # Fit the Rosenblatt copula (default backend="tabpfn-criterion")
 model = RosenblattBicop()
-model.fit(u[:, 0], u[:, 1])
+model.fit(u)
 
 # Pointwise density
-print(model.pdf(np.array([0.3, 0.5]), np.array([0.4, 0.6])))
+print(model.pdf(np.array([[0.3, 0.4], [0.5, 0.6]])))
 
 # Cartesian-grid density (fast path, any backend)
 u_grid = np.linspace(0.05, 0.95, 30)
@@ -174,8 +174,13 @@ grid = model.pdf_grid(u_grid, v_grid)   # shape (30, 30)
 
 # Joint CDF and h-functions (pyvinecopulib convention: h_i conditions on i-th arg)
 C = model.cdf_grid(u_grid, v_grid)            # shape (30, 30)
-h1 = model.hfunc1(np.array([0.3, 0.5]), np.array([0.4, 0.6]))   # F_{V|U,X}
-h2 = model.hfunc2(np.array([0.3, 0.5]), np.array([0.4, 0.6]))   # F_{U|V,X}
+h1 = model.hfunc1(np.array([[0.3, 0.4], [0.5, 0.6]]))   # F_{V|U,X}
+h2 = model.hfunc2(np.array([[0.3, 0.4], [0.5, 0.6]]))   # F_{U|V,X}
+
+# BicopBase API: native inverse h-functions, simulation, and log-likelihood
+v = model.hinv1(np.array([[0.3, 0.25], [0.5, 0.75]]))
+simulated = model.simulate(100, seeds=[42])  # float64 torch tensor
+log_likelihood = model.loglik(u)
 
 # Kendall's tau via the pyvinecopulib quasi-random recipe.
 tau = model.tau()   # Clayton(theta=3) analytic: theta / (theta + 2) = 0.6
@@ -209,8 +214,8 @@ model = RosenblattBicop(
 To pass a covariate matrix:
 
 ```python
-model.fit(u, v, x=X_train)               # X_train shape (n, p)
-model.pdf(u_query, v_query, x_query)     # x_query shape (n_query, p)
+model.fit(np.column_stack([u, v]), x=X_train)               # X_train shape (n, p)
+model.pdf(np.column_stack([u_query, v_query]), x_query)     # x_query shape (n_query, p)
 ```
 
 ---
