@@ -21,21 +21,18 @@
 # backends, is ~309 s; the full grid is 24 such blocks). n_rep = 5 => ~10.3 h,
 # which fits an overnight window with buffer.
 #
-# Backends intentionally EXCLUDED from this run:
-#   - xgb-quantile / catboost / gbm — tree quantile regressors cannot
-#     extrapolate, so their predicted conditional support collapses and the
-#     quantile->density inversion returns 0 in the tails, making pdf-KL blow up
-#     (tail collapse; xgb-quantile is unregistered, see registry.py). Needs a
-#     tail-robust inversion before tree backends are comparable.
+# Backends intentionally EXCLUDED from this run (too slow for the full grid):
+#   - catboost   (~74 s/fit; ~1.5 h of grid) and gbm (101 sklearn models/dir) —
+#     redundant slow GBM-quantile variants; xgb-quantile is the representative.
 #   - tabpfn-finetune / tabicl-finetune — GPU training loops (minutes x 2
 #     directions x 72 fits = many hours); run those in a separate small study.
 
 [grid]
 # Copula families (one-parameter): clayton, gumbel, frank, gaussian, joe.
-families = ["clayton", "gumbel", "frank", "gaussian"]
+families = ["clayton", "gaussian"]
 
 # Conditional tau(x) regimes: monotone, symmetric, and nonmonotone.
-tau_scenarios = ["linear", "quadratic", "sin"]
+tau_scenarios = ["linear", "sin"]
 
 # Sinkhorn normalization variants applied to the density. "none" = off.
 # Kept at "none" only: the projection degenerates (±inf KL) for the sharper
@@ -44,8 +41,8 @@ normalize = ["none"]
 
 # Training sample sizes and Monte-Carlo repetitions. n_rep = 5 seeds fits an
 # overnight window (~2.06 h/seed measured; ~10.3 h total).
-n = [200, 500, 1000]
-n_rep = 5
+n = [200, 500, 1000, 2000]
+n_rep = 10
 
 # Grid resolution for the (disabled) Sinkhorn projection; unused with
 # normalize = ["none"].
