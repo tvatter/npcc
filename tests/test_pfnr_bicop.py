@@ -180,7 +180,7 @@ class TestPFNRDensity:
     out = m.pdf(np.column_stack([u, v]))
     assert (out >= 0).all()
 
-  def test_pdf_x_default_is_constant(
+  def test_pdf_x_default_has_no_external_features(
     self, patch_uniform: None, method: str
   ) -> None:
     rng = np.random.default_rng(2)
@@ -189,7 +189,7 @@ class TestPFNRDensity:
     m = make_pfnr(method=method).fit(np.column_stack([u, v]))
 
     out_default = m.pdf(np.column_stack([u, v]))
-    out_explicit = m.pdf(np.column_stack([u, v]), x=np.ones((len(u), 1)))
+    out_explicit = m.pdf(np.column_stack([u, v]), x=np.empty((len(u), 0)))
     np.testing.assert_allclose(out_default, out_explicit)
 
   def test_pdf_with_2d_x(self, patch_uniform: None, method: str) -> None:

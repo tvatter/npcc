@@ -292,8 +292,8 @@ class RosenblattBicop(BicopBase[TensorLike]):
     return torch.column_stack([first_coord, x])
 
   def _default_x(self, n: int) -> torch.Tensor:
-    """Constant covariate column of ones (used when ``x`` is omitted)."""
-    return torch.ones((n, 1), dtype=torch.float64, device=self._device)
+    """Empty covariate matrix used when ``x`` is omitted."""
+    return torch.empty((n, 0), dtype=torch.float64, device=self._device)
 
   def _prepare_joint_inputs(
     self, uv: TensorLike, x: TensorLike | None
@@ -337,7 +337,7 @@ class RosenblattBicop(BicopBase[TensorLike]):
     v_t = torch.clamp(v_t, eps, 1.0 - eps)
 
     if x_in is None:
-      x_row_t = torch.ones((1, 1), dtype=torch.float64, device=self._device)
+      x_row_t = self._default_x(1)
     else:
       x_row_t = _as_2d(x_in, device=self._device)
       if x_row_t.shape[0] != 1:
@@ -377,7 +377,7 @@ class RosenblattBicop(BicopBase[TensorLike]):
 
     Fits both Rosenblatt directions, ``f(V | U, X)`` and
     ``f(U | V, X)``.  ``x=None`` is shorthand for the unconditional case
-    (a constant covariate column).
+    (an empty covariate matrix).
 
     When ``self.sinkhorn_iters`` is not ``None``, the uniform 1-D grid
     used for the optional Sinkhorn projection is initialized and cached
@@ -465,7 +465,11 @@ class RosenblattBicop(BicopBase[TensorLike]):
     wu = self._trapezoidal_weights(u_grid)
     wv = self._trapezoidal_weights(v_grid)
 
-    x_unique, x_inverse = torch.unique(x, dim=0, return_inverse=True)
+    if x.shape[1] == 0:
+      x_unique = x[:1]
+      x_inverse = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+    else:
+      x_unique, x_inverse = torch.unique(x, dim=0, return_inverse=True)
 
     # All unique-x density grids in a few batched forward passes.
     density_all = self._raw_pdf_grids_by_x(
@@ -617,7 +621,7 @@ class RosenblattBicop(BicopBase[TensorLike]):
 
     Available for every backend (each backend's ``pdf_grid`` predicts once
     per conditioning row).  ``x_row`` is a single covariate row reused on
-    both axes; when ``None`` a constant one-column row is used.  Both
+    both axes; when ``None`` an empty covariate row is used.  Both
     Rosenblatt directions are evaluated on the same Cartesian product
     (transposing the reverse one) and averaged.
 
@@ -694,6 +698,11 @@ class RosenblattBicop(BicopBase[TensorLike]):
     u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
 
     out = self.v_given_ux_.cdf(self._features(u_t, x_t), v_t)
+    out = torch.clamp(
+      out,
+      self.quantile_config.eps,
+      1.0 - self.quantile_config.eps,
+    )
     assert isinstance(out, torch.Tensor)
     return _wrap_output(out, return_as_torch=return_as_torch)
 
@@ -713,6 +722,11 @@ class RosenblattBicop(BicopBase[TensorLike]):
     u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
 
     out = self.u_given_vx_.cdf(self._features(v_t, x_t), u_t)
+    out = torch.clamp(
+      out,
+      self.quantile_config.eps,
+      1.0 - self.quantile_config.eps,
+    )
     assert isinstance(out, torch.Tensor)
     return _wrap_output(out, return_as_torch=return_as_torch)
 
@@ -1018,8 +1032,8 @@ class RosenblattBicop(BicopBase[TensorLike]):
     ----------
     x_row
         Single covariate row (shape ``(1, p)``) reused on every queried
-        ``(u, v)`` pair.  ``None`` keeps the constant-one default used
-        when fitting without covariates.
+        ``(u, v)`` pair.  ``None`` keeps the empty-covariate default used
+        when fitting without external covariates.
     """
     return _BicopAdapter(self, x_row=x_row)
 
@@ -1042,8 +1056,8 @@ class RosenblattBicop(BicopBase[TensorLike]):
     ----------
     x_row
         Single covariate row to condition on.  ``None`` uses the
-        constant-one default — appropriate when the model was fit without
-        covariates.
+        empty-covariate default — appropriate when the model was fit without
+        external covariates.
     plot_type
         ``"contour"`` (default) or ``"surface"``.
     margin_type

@@ -131,8 +131,8 @@ device-aware and overridable model-wide
 | `pdf_grid(u_grid, v_grid, x_row=None, *, batch_size=None, sinkhorn_iters=None)` | Cartesian-grid density `out[i, j] = c(u_grid[i], v_grid[j] | x_row)`.  Available for every backend. |
 | `cdf(u, v, x=None, *, n_int=12, batch_size=None)` | Pointwise joint CDF, trapezoidal in $s$ and $t$. |
 | `cdf_grid(u_grid, v_grid, x_row=None, *, n_int=64)` | Cartesian-grid joint CDF.  Available for every backend. |
-| `hfunc1(u, v, x=None)` | $h_1 = \partial C / \partial u = F_{V \mid U, X}(v \mid u, x)$ (conditions on the first argument; matches `pyvinecopulib`). |
-| `hfunc2(u, v, x=None)` | $h_2 = \partial C / \partial v = F_{U \mid V, X}(u \mid v, x)$. |
+| `hfunc1(uv, x=None)` | $h_1 = \partial C / \partial u = F_{V \mid U, X}(v \mid u, x)$ (conditions on the first argument; matches `pyvinecopulib`). |
+| `hfunc2(uv, x=None)` | $h_2 = \partial C / \partial v = F_{U \mid V, X}(u \mid v, x)$. |
 | `tau(x_row=None, *, n=1000, seeds=None)` | Kendall's $\tau(x)$ via [pyvinecopulib](https://github.com/vinecopulib/pyvinecopulib)'s recipe: `ghalton(n, 2)` + inverse-Rosenblatt + `wdm`. |
 | `as_bicop(x_row=None)` | A `pyvinecopulib`-compatible adapter (`var_types = ["c", "c"]`, `pdf(uv)`). |
 | `plot(*, x_row=None, plot_type="contour", margin_type="norm", ...)` | Contour/surface plot via `pyvinecopulib`'s plotter (lazy-imports `matplotlib`). |
