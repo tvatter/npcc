@@ -1,5 +1,6 @@
-"""Core estimators: the TabPFN-Rosenblatt copula and its inner distributions.
+"""Core estimators: the Rosenblatt copula and its pluggable backends.
 
 The public API is re-exported from :mod:`npcc`; import from there
-(``from npcc import PFNRBicop``) rather than reaching into ``npcc.core``.
+(``from npcc import RosenblattBicop``) rather than reaching into
+``npcc.core``.
 """

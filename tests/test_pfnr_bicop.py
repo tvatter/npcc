@@ -1,4 +1,4 @@
-"""Tests for ``PFNRBicop`` (TabPFN-Rosenblatt conditional bicop)."""
+"""Tests for ``RosenblattBicop`` (TabPFN-Rosenblatt conditional bicop)."""
 
 from __future__ import annotations
 
@@ -9,20 +9,16 @@ import pytest
 
 import torch
 
-from npcc.core.pfnr_bicop import PFNRBicop, _sinkhorn_project
-from npcc.core.tabpfn_criterion_distribution1d import (
-  TabPFNCriterionDistribution1D,
-)
-from npcc.core.tabpfn_quantile_distribution1d import (
-  TabPFNQuantileDistribution1D,
-)
+from npcc.core.backends.tabpfn_criterion import TabPFNCriterionBackend
+from npcc.core.backends.tabpfn_quantile import TabPFNQuantileBackend
+from npcc.core.bicop import RosenblattBicop, _sinkhorn_project
 
 
-def make_pfnr(method: str = "quantiles") -> PFNRBicop:
-  """Test factory.  Defaults to ``method="quantiles"`` so legacy tests
-  exercise the slope-inversion path; the criterion path is opted into
-  per-test."""
-  return PFNRBicop(method=method)  # ty: ignore[invalid-argument-type]
+def make_pfnr(method: str = "quantiles") -> RosenblattBicop:
+  """Test factory.  ``method`` is the TabPFN read-out ("quantiles" or
+  "criterion"); it maps to the ``tabpfn-<method>`` backend.  Defaults to
+  "quantiles" so legacy tests exercise the slope-inversion path."""
+  return RosenblattBicop(backend=f"tabpfn-{method}")
 
 
 # ===========================================================================
@@ -32,23 +28,23 @@ def make_pfnr(method: str = "quantiles") -> PFNRBicop:
 
 class TestPFNRInit:
   def test_default_is_criterion(self) -> None:
-    m = PFNRBicop()
-    assert m.method == "criterion"
+    m = RosenblattBicop()
+    assert m.backend == "tabpfn-criterion"
     assert m.transform == "logit"
-    assert isinstance(m.v_given_ux_, TabPFNCriterionDistribution1D)
+    assert isinstance(m.v_given_ux_, TabPFNCriterionBackend)
     assert m.u_given_vx_ is not None
 
   def test_method_quantiles_uses_quantile_module(self) -> None:
-    m = PFNRBicop(method="quantiles")
-    assert isinstance(m.v_given_ux_, TabPFNQuantileDistribution1D)
+    m = RosenblattBicop(backend="tabpfn-quantiles")
+    assert isinstance(m.v_given_ux_, TabPFNQuantileBackend)
 
   @pytest.mark.parametrize("method", ["criterion", "quantiles"])
   @pytest.mark.parametrize("transform", ["identity", "probit"])
   def test_transform_is_propagated_to_inner_distributions(
     self, method: str, transform: str
   ) -> None:
-    m = PFNRBicop(
-      method=method,  # ty: ignore[invalid-argument-type]
+    m = RosenblattBicop(
+      backend=f"tabpfn-{method}",
       transform=transform,  # ty: ignore[invalid-argument-type]
     )
     assert m.transform == transform
@@ -56,34 +52,34 @@ class TestPFNRInit:
     assert m.u_given_vx_.transform == transform
 
   def test_default_batch_size_on_cpu_is_400(self) -> None:
-    m = PFNRBicop(device="cpu")
+    m = RosenblattBicop(device="cpu")
     assert m.batch_size == 400
-    assert isinstance(m.v_given_ux_, TabPFNCriterionDistribution1D)
+    assert isinstance(m.v_given_ux_, TabPFNCriterionBackend)
     assert m.v_given_ux_.batch_size == 400
 
   def test_default_batch_size_on_cuda_is_2000(self) -> None:
-    m = PFNRBicop(device="cuda")
+    m = RosenblattBicop(device="cuda")
     assert m.batch_size == 2000
-    assert isinstance(m.v_given_ux_, TabPFNCriterionDistribution1D)
+    assert isinstance(m.v_given_ux_, TabPFNCriterionBackend)
     assert m.v_given_ux_.batch_size == 2000
 
   def test_custom_batch_size_overrides_device_default(self) -> None:
-    m = PFNRBicop(device="cpu", batch_size=123)
+    m = RosenblattBicop(device="cpu", batch_size=123)
     assert m.batch_size == 123
-    assert isinstance(m.v_given_ux_, TabPFNCriterionDistribution1D)
+    assert isinstance(m.v_given_ux_, TabPFNCriterionBackend)
     assert m.v_given_ux_.batch_size == 123
 
   def test_nonpositive_batch_size_rejected(self) -> None:
     with pytest.raises(ValueError, match="batch_size"):
-      PFNRBicop(batch_size=0)
+      RosenblattBicop(batch_size=0)
 
   def test_resolve_batch_size_rejects_nonpositive(self) -> None:
-    m = PFNRBicop()
+    m = RosenblattBicop()
     with pytest.raises(ValueError, match="batch_size must be positive"):
       m._resolve_batch_size(0)
 
   def test_resolve_sinkhorn_iters_rejects_nonpositive(self) -> None:
-    m = PFNRBicop()
+    m = RosenblattBicop()
     with pytest.raises(
       ValueError, match="sinkhorn_iters must be None or a positive integer"
     ):
@@ -135,7 +131,7 @@ def test_sinkhorn_project_rejects_nonpositive_iters() -> None:
 
 def test_trapezoidal_weights_singleton_grid() -> None:
   grid = torch.tensor([0.25], dtype=torch.float64)
-  w = PFNRBicop._trapezoidal_weights(grid)
+  w = RosenblattBicop._trapezoidal_weights(grid)
   assert torch.allclose(w, torch.tensor([1.0], dtype=torch.float64))
 
 
@@ -222,13 +218,13 @@ class TestPFNRDensity:
     rng = np.random.default_rng(16)
     u = rng.uniform(0.15, 0.85, 18)
     v = rng.uniform(0.15, 0.85, 18)
-    m = PFNRBicop(method="criterion", batch_size=31).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", batch_size=31).fit(u, v)
 
     captured: list[int | None] = []
-    original_pdf = TabPFNCriterionDistribution1D.pdf
+    original_pdf = TabPFNCriterionBackend.pdf
 
     def _spy_pdf(
-      self: TabPFNCriterionDistribution1D,
+      self: TabPFNCriterionBackend,
       w: np.ndarray | torch.Tensor,
       y: np.ndarray | torch.Tensor,
       *,
@@ -237,7 +233,7 @@ class TestPFNRDensity:
       captured.append(batch_size)
       return original_pdf(self, w, y, batch_size=batch_size)
 
-    monkeypatch.setattr(TabPFNCriterionDistribution1D, "pdf", _spy_pdf)
+    monkeypatch.setattr(TabPFNCriterionBackend, "pdf", _spy_pdf)
 
     m.pdf(u, v, batch_size=17)
     assert captured
@@ -253,13 +249,13 @@ class TestPFNRDensity:
     rng = np.random.default_rng(17)
     u = rng.uniform(0.15, 0.85, 18)
     v = rng.uniform(0.15, 0.85, 18)
-    m = PFNRBicop(method="criterion", batch_size=29).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", batch_size=29).fit(u, v)
 
     captured: list[int | None] = []
-    original_pdf = TabPFNCriterionDistribution1D.pdf
+    original_pdf = TabPFNCriterionBackend.pdf
 
     def _spy_pdf(
-      self: TabPFNCriterionDistribution1D,
+      self: TabPFNCriterionBackend,
       w: np.ndarray | torch.Tensor,
       y: np.ndarray | torch.Tensor,
       *,
@@ -268,7 +264,7 @@ class TestPFNRDensity:
       captured.append(batch_size)
       return original_pdf(self, w, y, batch_size=batch_size)
 
-    monkeypatch.setattr(TabPFNCriterionDistribution1D, "pdf", _spy_pdf)
+    monkeypatch.setattr(TabPFNCriterionBackend, "pdf", _spy_pdf)
 
     m.pdf(u, v)
     assert captured
@@ -284,13 +280,13 @@ class TestPFNRDensity:
     rng = np.random.default_rng(18)
     u = rng.uniform(0.15, 0.85, 18)
     v = rng.uniform(0.15, 0.85, 18)
-    m = PFNRBicop(method="criterion", batch_size=31).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", batch_size=31).fit(u, v)
 
     captured: list[int | None] = []
-    original_cdf = TabPFNCriterionDistribution1D.cdf
+    original_cdf = TabPFNCriterionBackend.cdf
 
     def _spy_cdf(
-      self: TabPFNCriterionDistribution1D,
+      self: TabPFNCriterionBackend,
       w: np.ndarray | torch.Tensor,
       y: np.ndarray | torch.Tensor,
       *,
@@ -299,7 +295,7 @@ class TestPFNRDensity:
       captured.append(batch_size)
       return original_cdf(self, w, y, batch_size=batch_size)
 
-    monkeypatch.setattr(TabPFNCriterionDistribution1D, "cdf", _spy_cdf)
+    monkeypatch.setattr(TabPFNCriterionBackend, "cdf", _spy_cdf)
 
     m.cdf(u, v, n_int=8, batch_size=19)
     assert captured
@@ -331,7 +327,7 @@ class TestMethodsAgree:
 
 
 class TestPFNRDensityGrid:
-  def _fit_criterion(self) -> PFNRBicop:
+  def _fit_criterion(self) -> RosenblattBicop:
     rng = np.random.default_rng(12)
     u = rng.uniform(0.2, 0.8, 25)
     v = rng.uniform(0.2, 0.8, 25)
@@ -363,13 +359,21 @@ class TestPFNRDensityGrid:
     assert out.shape == (4, 4)
     assert (out >= 0).all()
 
-  def test_grid_rejects_quantiles_method(self, patch_uniform: None) -> None:
+  def test_grid_available_for_quantiles_method(
+    self, patch_uniform: None
+  ) -> None:
     rng = np.random.default_rng(13)
     u = rng.uniform(0.2, 0.8, 10)
     v = rng.uniform(0.2, 0.8, 10)
     m = make_pfnr(method="quantiles").fit(u, v)
-    with pytest.raises(RuntimeError, match="method='criterion'"):
-      m.pdf_grid(np.array([0.3, 0.5]), np.array([0.4, 0.6]))
+    u_g = np.array([0.3, 0.5])
+    v_g = np.array([0.4, 0.6])
+    grid = m.pdf_grid(u_g, v_g)
+    assert grid.shape == (2, 2)
+    u_tile = np.repeat(u_g, len(v_g))
+    v_tile = np.tile(v_g, len(u_g))
+    expected = m.pdf(u_tile, v_tile).reshape(len(u_g), len(v_g))
+    np.testing.assert_allclose(grid, expected, atol=1e-10)
 
   def test_grid_rejects_grid_outside_unit(self, patch_uniform: None) -> None:
     m = self._fit_criterion()
@@ -399,7 +403,7 @@ class TestPFNRDensityGrid:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = PFNRBicop(method="quantiles").fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-quantiles").fit(u, v)
     u_g = torch.linspace(0.25, 0.75, 4, dtype=torch.float64, device=m._device)
     v_g = torch.linspace(0.3, 0.7, 5, dtype=torch.float64, device=m._device)
     x_row = torch.ones((1, 1), dtype=torch.float64, device=m._device)
@@ -535,7 +539,7 @@ class TestPFNRCdf:
 
 
 class TestPFNRCdfGrid:
-  def _fit(self) -> PFNRBicop:
+  def _fit(self) -> RosenblattBicop:
     return make_pfnr(method="criterion").fit(
       np.linspace(0.1, 0.9, 30), np.linspace(0.1, 0.9, 30)
     )
@@ -558,12 +562,13 @@ class TestPFNRCdfGrid:
     expected = m.cdf(u_tile, v_tile, n_int=128).reshape(len(u_g), len(v_g))
     np.testing.assert_allclose(grid, expected, atol=2e-2)
 
-  def test_rejects_quantiles_method(self, patch_uniform: None) -> None:
+  def test_available_for_quantiles_method(self, patch_uniform: None) -> None:
     m = make_pfnr(method="quantiles").fit(
       np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
     )
-    with pytest.raises(RuntimeError, match="method='criterion'"):
-      m.cdf_grid(np.array([0.3, 0.5]), np.array([0.4, 0.6]))
+    out = m.cdf_grid(np.array([0.3, 0.5]), np.array([0.4, 0.6]))
+    assert out.shape == (2, 2)
+    assert ((out >= 0.0) & (out <= 1.0)).all()
 
   def test_rejects_grid_outside_unit(self, patch_uniform: None) -> None:
     m = self._fit()
@@ -629,7 +634,7 @@ class TestPFNRTau:
 
 
 class TestPFNRAdapter:
-  def _fit(self, method: str = "criterion") -> PFNRBicop:
+  def _fit(self, method: str = "criterion") -> RosenblattBicop:
     rng = np.random.default_rng(20)
     u = rng.uniform(0.2, 0.8, 25)
     v = rng.uniform(0.2, 0.8, 25)
@@ -732,7 +737,7 @@ def test_real_tabpfn_smoke() -> None:
   u, v = uv[:, 0], uv[:, 1]
 
   try:
-    m = PFNRBicop().fit(u, v)
+    m = RosenblattBicop().fit(u, v)
   except TabPFNLicenseError as exc:
     pytest.skip(f"TabPFN authentication unavailable: {exc}")
 
@@ -826,7 +831,7 @@ class TestPFNRCUDA:
     rng = np.random.default_rng(0)
     u = rng.uniform(0.2, 0.8, 8)
     v = rng.uniform(0.2, 0.8, 8)
-    m = PFNRBicop(method="criterion", device="cuda").fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", device="cuda").fit(u, v)
     out = m.pdf(
       torch.as_tensor(u, device="cuda"), torch.as_tensor(v, device="cuda")
     )
@@ -850,9 +855,11 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 25)
     v = rng.uniform(0.2, 0.8, 25)
 
-    m_no_sinkhorn = PFNRBicop(method="criterion", sinkhorn_iters=None).fit(u, v)
-    m_with_sinkhorn_none = PFNRBicop(
-      method="criterion", sinkhorn_iters=None
+    m_no_sinkhorn = RosenblattBicop(
+      backend="tabpfn-criterion", sinkhorn_iters=None
+    ).fit(u, v)
+    m_with_sinkhorn_none = RosenblattBicop(
+      backend="tabpfn-criterion", sinkhorn_iters=None
     ).fit(u, v)
 
     u_test = np.array([0.3, 0.5, 0.7])
@@ -866,14 +873,14 @@ class TestSinkhornProjection:
   def test_sinkhorn_init_rejects_zero_iters(self, patch_uniform: None) -> None:
     """sinkhorn_iters=0 should raise ValueError."""
     with pytest.raises(ValueError, match="positive integer"):
-      PFNRBicop(sinkhorn_iters=0)
+      RosenblattBicop(sinkhorn_iters=0)
 
   def test_sinkhorn_init_rejects_negative_iters(
     self, patch_uniform: None
   ) -> None:
     """sinkhorn_iters<0 should raise ValueError."""
     with pytest.raises(ValueError, match="positive integer"):
-      PFNRBicop(sinkhorn_iters=-1)
+      RosenblattBicop(sinkhorn_iters=-1)
 
   def test_sinkhorn_pdf_shape_unchanged(self, patch_uniform: None) -> None:
     """Sinkhorn projection should not change the output shape."""
@@ -881,7 +888,7 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = PFNRBicop(method="criterion", sinkhorn_iters=3).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=3).fit(u, v)
 
     u_test = np.linspace(0.25, 0.75, 10)
     v_test = np.linspace(0.25, 0.75, 10)
@@ -895,7 +902,7 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = PFNRBicop(method="criterion", sinkhorn_iters=5).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=5).fit(u, v)
 
     u_test = np.linspace(0.25, 0.75, 15)
     v_test = np.linspace(0.25, 0.75, 15)
@@ -909,7 +916,7 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = PFNRBicop(method="criterion", sinkhorn_iters=5).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=5).fit(u, v)
 
     assert m._u_grid_borders_ is not None
     assert m._v_grid_borders_ is not None
@@ -928,7 +935,9 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = PFNRBicop(method="criterion", sinkhorn_iters=None).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=None).fit(
+      u, v
+    )
 
     assert m._u_grid_borders_ is None
     assert m._v_grid_borders_ is None
@@ -939,7 +948,7 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = PFNRBicop(method="criterion", sinkhorn_iters=3).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=3).fit(u, v)
 
     u_grid = np.linspace(0.3, 0.7, 5)
     v_grid = np.linspace(0.3, 0.7, 5)
@@ -960,8 +969,12 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 30)
     v = rng.uniform(0.2, 0.8, 30)
 
-    m_no_proj = PFNRBicop(method="criterion", sinkhorn_iters=None).fit(u, v)
-    m_proj = PFNRBicop(method="criterion", sinkhorn_iters=5).fit(u, v)
+    m_no_proj = RosenblattBicop(
+      backend="tabpfn-criterion", sinkhorn_iters=None
+    ).fit(u, v)
+    m_proj = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=5).fit(
+      u, v
+    )
 
     u_grid = np.linspace(0.2, 0.8, 15)
     v_grid = np.linspace(0.2, 0.8, 15)
@@ -1002,7 +1015,7 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = PFNRBicop(method="quantiles", sinkhorn_iters=3).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-quantiles", sinkhorn_iters=3).fit(u, v)
 
     u_test = np.array([0.3, 0.5, 0.7])
     v_test = np.array([0.4, 0.5, 0.6])
@@ -1018,7 +1031,9 @@ class TestSinkhornProjection:
     v = rng.uniform(0.2, 0.8, 30)
     x = np.column_stack([rng.normal(size=30), rng.normal(size=30)])
 
-    m = PFNRBicop(method="criterion", sinkhorn_iters=3).fit(u, v, x)
+    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=3).fit(
+      u, v, x
+    )
 
     # Query with different x values
     u_test = np.array([0.3, 0.5, 0.7, 0.4])
@@ -1038,7 +1053,9 @@ class TestSinkhornProjection:
     v = rng.uniform(0.2, 0.8, 30)
     x = np.column_stack([rng.normal(size=30), rng.normal(size=30)])
 
-    m = PFNRBicop(method="quantiles", sinkhorn_iters=3).fit(u, v, x)
+    m = RosenblattBicop(backend="tabpfn-quantiles", sinkhorn_iters=3).fit(
+      u, v, x
+    )
 
     u_test = np.array([0.3, 0.5, 0.7, 0.4])
     v_test = np.array([0.4, 0.5, 0.6, 0.5])
@@ -1058,7 +1075,7 @@ class TestSinkhornProjection:
     (the 3-D analogue of the reverse-direction transpose) that a constant,
     symmetric density would hide.
     """
-    m = PFNRBicop(method="criterion", sinkhorn_iters=3)
+    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=3)
 
     def stub(
       w: torch.Tensor, y_grid: torch.Tensor, *, batch_size: int | None = None
@@ -1093,7 +1110,7 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = PFNRBicop(method="criterion", sinkhorn_iters=2).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=2).fit(u, v)
 
     assert m._v_grid_borders_ is not None
     assert m._u_grid_borders_ is m._v_grid_borders_
@@ -1105,7 +1122,9 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = PFNRBicop(method="criterion", sinkhorn_iters=None).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=None).fit(
+      u, v
+    )
     assert m._u_grid_borders_ is None
     assert m._v_grid_borders_ is None
 

@@ -1,4 +1,4 @@
-"""Tests for ``QuantileGridConfig`` and ``TabPFNQuantileDistribution1D``."""
+"""Tests for ``QuantileGridConfig`` and ``TabPFNQuantileBackend``."""
 
 from __future__ import annotations
 
@@ -8,10 +8,8 @@ import numpy as np
 import pytest
 import torch
 
-from npcc.core.tabpfn_quantile_distribution1d import (
-  QuantileGridConfig,
-  TabPFNQuantileDistribution1D,
-)
+from npcc.core.backends.tabpfn_quantile import TabPFNQuantileBackend
+from npcc.core.quantile_table_distribution1d import QuantileGridConfig
 from tests.conftest import uniform_density_y
 
 
@@ -61,28 +59,28 @@ class TestQuantileGridConfig:
 
 class TestQuantileDistribution1D:
   def test_pdf_before_fit_raises(self, patch_uniform: None) -> None:
-    qd = TabPFNQuantileDistribution1D()
+    qd = TabPFNQuantileBackend()
     with pytest.raises(RuntimeError, match="not fitted"):
       qd.pdf(np.zeros((1, 1)), np.array([0.5]))
 
   def test_fit_accepts_1d_w(self, patch_uniform: None) -> None:
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20))
     assert qd.model_ is not None
 
   def test_fit_accepts_2d_w(self, patch_uniform: None) -> None:
     rng = np.random.default_rng(0)
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(rng.uniform(0.1, 0.9, (20, 3)), rng.uniform(0.1, 0.9, 20))
     assert qd.model_ is not None
 
   def test_fit_rejects_length_mismatch(self, patch_uniform: None) -> None:
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     with pytest.raises(ValueError, match="incompatible"):
       qd.fit(np.zeros((5, 1)), np.zeros(6))
 
   def test_pdf_rejects_length_mismatch(self, patch_uniform: None) -> None:
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
     with pytest.raises(ValueError, match="incompatible"):
       qd.pdf(np.zeros((5, 1)), np.full(6, 0.5))
@@ -90,7 +88,7 @@ class TestQuantileDistribution1D:
   def test_pdf_logit_jacobian_matches_analytic(
     self, patch_uniform: None
   ) -> None:
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     y = np.array([0.3, 0.5, 0.7])
@@ -100,7 +98,7 @@ class TestQuantileDistribution1D:
     np.testing.assert_allclose(actual, expected, atol=1e-8)
 
   def test_pdf_zero_outside_support(self, patch_uniform: None) -> None:
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     y = np.array([0.02, 0.98])
@@ -109,7 +107,7 @@ class TestQuantileDistribution1D:
     np.testing.assert_array_equal(out, np.zeros_like(out))
 
   def test_pdf_handles_transposed_output(self, patch_transposed: None) -> None:
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     y = np.array([0.3, 0.5, 0.7])
@@ -119,7 +117,7 @@ class TestQuantileDistribution1D:
     np.testing.assert_allclose(actual, expected, atol=1e-8)
 
   def test_pdf_rejects_bad_shape(self, patch_bad_shape: None) -> None:
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     with pytest.raises(RuntimeError, match="quantile output shape"):
@@ -128,7 +126,7 @@ class TestQuantileDistribution1D:
   def test_identity_transform_returns_z_density(
     self, patch_uniform: None
   ) -> None:
-    qd = TabPFNQuantileDistribution1D(transform="identity")
+    qd = TabPFNQuantileBackend(transform="identity")
     qd.fit(np.zeros((10, 1)), np.zeros(10))
 
     z = np.array([-1.0, 0.0, 1.0])
@@ -139,7 +137,7 @@ class TestQuantileDistribution1D:
   def test_probit_transform_pdf_cdf_icdf_match_analytic(
     self, patch_uniform: None
   ) -> None:
-    qd = TabPFNQuantileDistribution1D(transform="probit")
+    qd = TabPFNQuantileBackend(transform="probit")
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     y = np.array([0.2, 0.5, 0.8])
@@ -163,21 +161,21 @@ class TestQuantileDistribution1D:
 
   def test_unknown_transform_raises(self) -> None:
     bad: Any = "exp"  # bypass Literal type for test
-    qd = TabPFNQuantileDistribution1D(transform=bad)
+    qd = TabPFNQuantileBackend(transform=bad)
     with pytest.raises(ValueError, match="Unknown transform"):
       qd._transform_y(torch.tensor([0.5]))
 
   # CDF tests ---------------------------------------------------------
 
   def test_cdf_rejects_length_mismatch(self, patch_uniform: None) -> None:
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
     with pytest.raises(ValueError, match="incompatible"):
       qd.cdf(np.zeros((5, 1)), np.full(6, 0.5))
 
   def test_cdf_logit_matches_analytic(self, patch_uniform: None) -> None:
     """F_Y(y) = clip((logit(y)+2)/4, 0, 1) under the uniform fake."""
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     y = np.array([0.3, 0.5, 0.7])
@@ -190,7 +188,7 @@ class TestQuantileDistribution1D:
     self, patch_uniform: None
   ) -> None:
     """Below qi[0] returns alpha_min; above qi[-1] returns alpha_max."""
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     y = np.array([0.02, 0.98])  # logit ≈ ±3.89, outside (-2, 2)
@@ -202,7 +200,7 @@ class TestQuantileDistribution1D:
     )
 
   def test_cdf_monotone_in_y(self, patch_uniform: None) -> None:
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     y_sorted = np.linspace(0.05, 0.95, 20)
@@ -214,7 +212,7 @@ class TestQuantileDistribution1D:
 
   def test_icdf_matches_analytic(self, patch_uniform: None) -> None:
     """Q(α | w) = sigmoid(-2 + 4α) under Z ~ Uniform(-2, 2) + logit."""
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     alphas = np.array([0.1, 0.3, 0.5, 0.7, 0.9])
@@ -225,13 +223,13 @@ class TestQuantileDistribution1D:
     np.testing.assert_allclose(y_hat, expected, atol=1e-3)
 
   def test_icdf_rejects_alpha_outside_unit(self, patch_uniform: None) -> None:
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
     with pytest.raises(ValueError, match="strictly inside"):
       qd.icdf(np.zeros((2, 1)), np.array([0.5, 0.0]))
 
   def test_icdf_rejects_length_mismatch(self, patch_uniform: None) -> None:
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
     with pytest.raises(ValueError, match="incompatible"):
       qd.icdf(np.zeros((5, 1)), np.array([0.5]))
@@ -240,7 +238,7 @@ class TestQuantileDistribution1D:
 
   def test_pdf_respects_batch_size(self, patch_uniform: None) -> None:
     rng = np.random.default_rng(0)
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     n = 17  # not a multiple of batch_size
@@ -252,7 +250,7 @@ class TestQuantileDistribution1D:
 
   def test_cdf_respects_batch_size(self, patch_uniform: None) -> None:
     rng = np.random.default_rng(1)
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     n = 17
@@ -266,7 +264,7 @@ class TestQuantileDistribution1D:
     self, patch_uniform: None, monkeypatch: pytest.MonkeyPatch
   ) -> None:
     rng = np.random.default_rng(2)
-    qd = TabPFNQuantileDistribution1D(transform="logit", batch_size=4)
+    qd = TabPFNQuantileBackend(transform="logit", batch_size=4)
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
     assert qd.model_ is not None
 
@@ -299,7 +297,7 @@ class TestQuantileDistribution1D:
     """
     rng = np.random.default_rng(7)
     cfg = QuantileGridConfig(n_quantiles=11)
-    qd = TabPFNQuantileDistribution1D(transform="logit", config=cfg)
+    qd = TabPFNQuantileBackend(transform="logit", config=cfg)
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
 
     n = 15  # first chunk is square (11, 11), second is (4, 11)
@@ -312,18 +310,18 @@ class TestQuantileDistribution1D:
   # pdf_grid ----------------------------------------------------------
 
   def test_pdf_grid_before_fit_raises(self, patch_uniform: None) -> None:
-    qd = TabPFNQuantileDistribution1D()
+    qd = TabPFNQuantileBackend()
     with pytest.raises(RuntimeError, match="not fitted"):
       qd.pdf_grid(np.zeros((2, 1)), np.array([0.3, 0.5]))
 
   def test_pdf_grid_empty_y_raises(self, patch_uniform: None) -> None:
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
     with pytest.raises(ValueError, match="at least one value"):
       qd.pdf_grid(np.zeros((2, 1)), np.array([]))
 
   def test_pdf_grid_shape(self, patch_uniform: None) -> None:
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
     out = qd.pdf_grid(np.zeros((4, 1)), np.array([0.3, 0.5, 0.7]))
     assert out.shape == (4, 3)
@@ -331,7 +329,7 @@ class TestQuantileDistribution1D:
   def test_pdf_grid_matches_pdf(self, patch_uniform: None) -> None:
     """The grid fast path must equal pdf on the explicit tile."""
     rng = np.random.default_rng(5)
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(rng.uniform(0.1, 0.9, (20, 2)), rng.uniform(0.1, 0.9, 20))
 
     w = rng.uniform(0.1, 0.9, (3, 2))
@@ -344,14 +342,14 @@ class TestQuantileDistribution1D:
     np.testing.assert_allclose(grid, tiled, atol=1e-10)
 
   def test_pdf_grid_zero_outside_support(self, patch_uniform: None) -> None:
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(np.zeros((10, 1)), np.full(10, 0.5))
     out = qd.pdf_grid(np.zeros((2, 1)), np.array([0.02, 0.98]))
     np.testing.assert_array_equal(out, np.zeros_like(out))
 
   def test_pdf_grid_chunked_matches_full(self, patch_uniform: None) -> None:
     rng = np.random.default_rng(6)
-    qd = TabPFNQuantileDistribution1D(transform="logit")
+    qd = TabPFNQuantileBackend(transform="logit")
     qd.fit(rng.uniform(0.1, 0.9, (20, 1)), rng.uniform(0.1, 0.9, 20))
 
     w = rng.uniform(0.1, 0.9, (17, 1))  # not a multiple of batch_size

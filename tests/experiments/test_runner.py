@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import tempfile
+from collections.abc import Callable
 from pathlib import Path
+from typing import Literal, cast
 
-import numpy as np
 import pandas as pd
 import pytest
+import torch
 
-from npcc.experiments.config import GridConfig, RunConfig
+from npcc.core.quantile_table_distribution1d import QuantileGridConfig
+from npcc.experiments import runner as runner_mod
+from npcc.experiments.config import EstimatorSpec, GridConfig, RunConfig
 from npcc.experiments.runner import (
   aggregate_results,
   aggregate_study_outputs,
@@ -16,6 +21,7 @@ from npcc.experiments.runner import (
 )
 from tests.conftest import (
   _TABPFN_REGRESSOR_TARGETS,
+  _UniformQuantileBackend,
   _UniformQuantileRegressor,
 )
 
@@ -26,8 +32,9 @@ def _run(
   mp = pytest.MonkeyPatch()
   for target in _TABPFN_REGRESSOR_TARGETS:
     mp.setattr(target, _UniformQuantileRegressor)
+  out = Path(tempfile.mkdtemp(prefix="npcc_run_"))
   try:
-    return run_study(grid, RunConfig(out=Path("unused"), workers=1))
+    return run_study(grid, RunConfig(out=out, workers=1))
   finally:
     mp.undo()
 
@@ -40,8 +47,24 @@ def coverage_study() -> tuple[
   grid = GridConfig(
     families=["clayton"],
     tau_scenarios=["linear", "quadratic"],
-    transforms=["logit", "identity"],
-    methods=["criterion", "quantiles"],
+    estimators=[
+      EstimatorSpec(
+        label="crit-logit", backend="tabpfn-criterion", transform="logit"
+      ),
+      EstimatorSpec(
+        label="crit-identity",
+        backend="tabpfn-criterion",
+        transform="identity",
+      ),
+      EstimatorSpec(
+        label="quant-logit", backend="tabpfn-quantiles", transform="logit"
+      ),
+      EstimatorSpec(
+        label="quant-identity",
+        backend="tabpfn-quantiles",
+        transform="identity",
+      ),
+    ],
     normalize=[None],
     n=[20],
     n_rep=1,
@@ -54,19 +77,24 @@ def coverage_study() -> tuple[
 
 
 @pytest.fixture(scope="module")
-def model_version_study() -> tuple[
+def backend_study() -> tuple[
   pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float
 ]:
-  """Two model versions on the same conditional data cell."""
+  """Two backends on the same conditional data cell."""
   grid = GridConfig(
     families=["clayton"],
     tau_scenarios=["linear"],
-    transforms=["logit"],
-    methods=["criterion"],
+    estimators=[
+      EstimatorSpec(
+        label="crit", backend="tabpfn-criterion", transform="logit"
+      ),
+      EstimatorSpec(
+        label="quant", backend="tabpfn-quantiles", transform="logit"
+      ),
+    ],
     normalize=[None],
     n=[20],
     n_rep=1,
-    model_versions=["v2.5", "v3"],
     projection_grid_size=8,
     conditional_uv_grid_n=3,
     conditional_x_grid_n=2,
@@ -82,8 +110,9 @@ def projection_study() -> tuple[
   grid = GridConfig(
     families=["clayton"],
     tau_scenarios=["linear"],
-    transforms=["logit"],
-    methods=["criterion"],
+    estimators=[
+      EstimatorSpec(label="crit", backend="tabpfn-criterion", transform="logit")
+    ],
     normalize=[None, 2],
     n=[20],
     n_rep=1,
@@ -108,8 +137,10 @@ def test_run_study_covers_conditional_axes(
     "n",
     "rep",
     "seed",
+    "label",
+    "estimator_id",
     "transform",
-    "method",
+    "backend",
     "normalize",
     "quantity",
     "x",
@@ -124,11 +155,19 @@ def test_run_study_covers_conditional_axes(
     diagnostic_df.columns
   )
   assert "tau_time" in runtime_df.columns
-  assert set(metric_df["method"].unique()) == {"criterion", "quantiles"}
+  assert {
+    "gpu_peak_reserved_mb",
+    "gpu_peak_alloc_mb",
+    "rss_mb",
+    "mem_available_mb",
+  }.issubset(runtime_df.columns)
+  assert set(metric_df["backend"].unique()) == {
+    "tabpfn-criterion",
+    "tabpfn-quantiles",
+  }
   assert set(metric_df["transform"].unique()) == {"logit", "identity"}
   assert set(metric_df["quantity"].unique()) == {
     "pdf",
-    "cdf",
     "hfunc1",
     "hfunc2",
   }
@@ -143,7 +182,7 @@ def test_conditional_metrics_are_fixed_x_uv_summaries(
 ) -> None:
   metric_df = coverage_study[0]
   grouped = metric_df.groupby(
-    ["tau_scenario", "method", "transform", "quantity", "normalize"],
+    ["tau_scenario", "backend", "transform", "quantity", "normalize"],
     dropna=False,
   )
   assert grouped.size().min() == 2
@@ -191,18 +230,27 @@ def test_aggregate_study_outputs_have_paper_tables(
   assert set(outputs["selection_summary"]["metric"].unique()) == {"KL"}
 
 
-def test_model_version_axis_labels_rows_and_aggregates(
-  model_version_study: tuple[
+def test_backend_axis_labels_rows_and_aggregates(
+  backend_study: tuple[
     pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, float
   ],
 ) -> None:
-  metric_df, _, _, runtime_df, _ = model_version_study
-  assert "model_version" in metric_df.columns
-  assert "model_version" in runtime_df.columns
-  assert set(metric_df["model_version"].unique()) == {"v2.5", "v3"}
+  metric_df, _, _, runtime_df, _ = backend_study
+  for col in ("backend", "label", "estimator_id"):
+    assert col in metric_df.columns
+    assert col in runtime_df.columns
+  assert set(metric_df["backend"].unique()) == {
+    "tabpfn-criterion",
+    "tabpfn-quantiles",
+  }
+  assert set(metric_df["label"].unique()) == {"crit", "quant"}
   mc_summary, runtime_summary = aggregate_results(metric_df, runtime_df)
-  assert "model_version" in mc_summary.columns
-  assert set(runtime_summary["model_version"].unique()) == {"v2.5", "v3"}
+  assert "backend" in mc_summary.columns
+  assert "label" in mc_summary.columns
+  assert set(runtime_summary["backend"].unique()) == {
+    "tabpfn-criterion",
+    "tabpfn-quantiles",
+  }
 
 
 def test_normalize_axis_applies_only_to_pdf(
@@ -239,8 +287,9 @@ def test_tau_diagnostics_can_be_disabled() -> None:
   grid = GridConfig(
     families=["clayton"],
     tau_scenarios=["linear"],
-    transforms=["logit"],
-    methods=["criterion"],
+    estimators=[
+      EstimatorSpec(label="crit", backend="tabpfn-criterion", transform="logit")
+    ],
     normalize=[None],
     n=[20],
     n_rep=1,
@@ -254,3 +303,138 @@ def test_tau_diagnostics_can_be_disabled() -> None:
   assert diagnostic_df["tau_abs_err"].isna().all()
   assert diagnostic_df["row_mean_abs_err"].notna().all()
   assert runtime_df["tau_time"].eq(0.0).all()
+
+
+def _small_grid(n_rep: int = 2) -> GridConfig:
+  return GridConfig(
+    families=["clayton"],
+    tau_scenarios=["linear"],
+    estimators=[
+      EstimatorSpec(label="crit", backend="tabpfn-criterion", transform="logit")
+    ],
+    normalize=[None],
+    n=[20],
+    n_rep=n_rep,
+    projection_grid_size=8,
+    conditional_uv_grid_n=3,
+    conditional_x_grid_n=2,
+    surface_families=[],
+  )
+
+
+def _fake_mp() -> pytest.MonkeyPatch:
+  mp = pytest.MonkeyPatch()
+  for target in _TABPFN_REGRESSOR_TARGETS:
+    mp.setattr(target, _UniformQuantileRegressor)
+  return mp
+
+
+def test_release_gpu_no_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+  monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+  # Must be a harmless no-op when CUDA is unavailable.
+  runner_mod._release_gpu()
+
+
+def test_release_gpu_calls_empty_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+  calls: list[int] = []
+  monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+  monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append(1))
+  runner_mod._release_gpu()
+  assert calls == [1]
+
+
+def test_resume_skips_completed_cells(
+  tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  grid = _small_grid(n_rep=2)
+  run = RunConfig(out=tmp_path, workers=1)
+  mp = _fake_mp()
+  try:
+    metric1 = run_study(grid, run)[0]
+    cells = grid.cells()
+    assert len(cells) == 2
+    for cell in cells:
+      done = tmp_path / "cells" / runner_mod._cell_key(cell) / "DONE"
+      assert done.exists()
+
+    # Force the first cell to recompute by removing only its marker.
+    (tmp_path / "cells" / runner_mod._cell_key(cells[0]) / "DONE").unlink()
+
+    seen: list[object] = []
+    orig = cast(Callable[..., object], runner_mod.summarize_one_cell)
+
+    def _spy(*args: object, **kwargs: object) -> object:
+      seen.append(args[0])
+      return orig(*args, **kwargs)
+
+    monkeypatch.setattr(runner_mod, "summarize_one_cell", _spy)
+    metric2 = run_study(grid, run, resume=True)[0]
+  finally:
+    mp.undo()
+
+  assert seen == [cells[0]]
+  assert len(metric2) == len(metric1)
+
+
+def test_resume_grid_signature_mismatch_raises(tmp_path: Path) -> None:
+  run = RunConfig(out=tmp_path, workers=1)
+  mp = _fake_mp()
+  try:
+    run_study(_small_grid(n_rep=1), run)
+    with pytest.raises(ValueError, match="signature"):
+      run_study(_small_grid(n_rep=3), run, resume=True)
+  finally:
+    mp.undo()
+
+
+def test_run_study_forwards_backend_kwargs(tmp_path: Path) -> None:
+  from npcc.core import registry
+
+  captured: list[dict] = []
+
+  def _factory(
+    *,
+    transform: Literal["identity", "logit", "probit"],
+    config: QuantileGridConfig,
+    device: str | torch.device | None,
+    batch_size: int | None,
+    **kw: object,
+  ) -> _UniformQuantileBackend:
+    captured.append(dict(kw))
+    return _UniformQuantileBackend(
+      transform=transform,
+      config=config,
+      device=device,
+      batch_size=batch_size,
+    )
+
+  registry.register_backend(
+    "capture-be", _factory, allowed_kwargs=frozenset({"foo"})
+  )
+  try:
+    grid = GridConfig(
+      families=["clayton"],
+      tau_scenarios=["linear"],
+      estimators=[
+        EstimatorSpec(
+          label="cap",
+          backend="capture-be",
+          transform="logit",
+          backend_kwargs={"foo": 7},
+        )
+      ],
+      normalize=[None],
+      n=[20],
+      n_rep=1,
+      projection_grid_size=8,
+      conditional_uv_grid_n=3,
+      conditional_x_grid_n=2,
+      surface_families=[],
+    )
+    run_study(grid, RunConfig(out=tmp_path, workers=1))
+  finally:
+    registry._REGISTRY.pop("capture-be", None)
+
+  # Both Rosenblatt directions build the backend with the configured kwargs.
+  assert captured
+  assert all(kw == {"foo": 7} for kw in captured)

@@ -3,9 +3,8 @@ _common.py — small array helpers shared across npcc modules.
 
 All exports are private (leading underscore) and are not part of the
 package's public API.  They live here only to avoid duplication between
-:mod:`npcc.tabpfn_quantile_distribution1d`,
-:mod:`npcc.tabpfn_criterion_distribution1d`, and
-:mod:`npcc.pfnr_bicop`.
+:mod:`npcc.core.quantile_table_distribution1d`,
+:mod:`npcc.core.backends`, and :mod:`npcc.core.bicop`.
 
 The helpers are torch-aware: numeric inputs may be NumPy arrays or
 torch tensors, and the corresponding output is a torch tensor on the

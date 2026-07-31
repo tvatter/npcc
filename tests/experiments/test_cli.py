@@ -13,11 +13,14 @@ _TOML = """
 [grid]
 families = ["clayton"]
 tau_scenarios = ["linear"]
-transforms = ["logit"]
-methods = ["criterion"]
 normalize = ["none", 2]
 n = [30]
 n_rep = 1
+
+[[grid.estimators]]
+label = "crit-logit"
+backend = "tabpfn-criterion"
+transform = "logit"
 """
 
 
@@ -96,4 +99,7 @@ def test_cli_parser_requires_config_and_out() -> None:
   ns = parser.parse_args(["--config", "g.toml", "--out", "o", "--workers", "4"])
   assert ns.fmt == "parquet"
   assert ns.workers == 4
+  assert ns.resume is False
   assert Path(ns.config).name == "g.toml"
+  resumed = parser.parse_args(["--config", "g.toml", "--out", "o", "--resume"])
+  assert resumed.resume is True
