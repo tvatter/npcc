@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from time import perf_counter
@@ -213,6 +214,102 @@ def _base_row(cell: Cell, est: EstimatorSpec, seed: int) -> dict[str, object]:
     "backend": est.backend,
   }
 
+def _external_workdir(run_out: Path, cell: Cell, est: EstimatorSpec) -> Path:
+  return run_out / "external" / _cell_key(cell) / est.label
+
+
+def _run_external_r_method(
+  script: str,
+  train_df: pd.DataFrame,
+  eval_df: pd.DataFrame,
+  workdir: Path,
+) -> pd.DataFrame:
+  workdir.mkdir(parents=True, exist_ok=True)
+  train_path = workdir / "train.csv"
+  eval_path = workdir / "eval_grid.csv"
+  pred_path = workdir / "pred.csv"
+
+  train_df.to_csv(train_path, index=False)
+  eval_df.to_csv(eval_path, index=False)
+
+  subprocess.run(
+    ["Rscript", script, str(train_path), str(eval_path), str(pred_path)],
+    check=True,
+  )
+  return pd.read_csv(pred_path)
+
+
+def _external_diag_rows(
+  cell: Cell,
+  est: EstimatorSpec,
+  seed: int,
+  pred_df: pd.DataFrame,
+  grid: EvalGrid,
+  *,
+  normalize: str,
+) -> list[dict[str, object]]:
+  """Marginal-density diagnostics and conditional tau from an external R method."""
+  base = _base_row(cell, est, seed)
+  rows: list[dict[str, object]] = []
+
+  pred_df = pred_df.copy()
+  if "tau_hat" not in pred_df.columns:
+    pred_df["tau_hat"] = np.nan
+
+  if not grid.conditional:
+    pdf_hat = pred_df["pdf_hat"].to_numpy(dtype=np.float64)
+    c = pdf_hat.reshape((grid.u_axis.shape[0], grid.v_axis.shape[0]))
+    diag = metrics.marginal_diagnostics(c, grid.u_axis, grid.v_axis)
+    tau_true = float(_tau_values(cell.tau_scenario, None)[0])
+    tau_hat = (
+      float(pred_df["tau_hat"].iloc[0])
+      if pred_df["tau_hat"].notna().any()
+      else np.nan
+    )
+    rows.append(
+      {
+        **base,
+        "normalize": normalize,
+        "x": np.nan,
+        "tau_true": tau_true,
+        "tau_hat": tau_hat,
+        "tau_abs_err": abs(tau_hat - tau_true)
+        if np.isfinite(tau_hat)
+        else np.nan,
+        **diag,
+      }
+    )
+    return rows
+
+  assert grid.x_axis is not None
+  tau_x = _tau_values(cell.tau_scenario, grid.x_axis)
+
+  pdf_grid = pred_df["pdf_hat"].to_numpy(dtype=np.float64).reshape(grid.shape)
+  tau_grid = pred_df["tau_hat"].to_numpy(dtype=np.float64).reshape(grid.shape)
+
+  for x_idx, x_val in enumerate(grid.x_axis):
+    c = pdf_grid[:, x_idx].reshape((grid.u_axis.shape[0], grid.v_axis.shape[0]))
+    diag = metrics.marginal_diagnostics(c, grid.u_axis, grid.v_axis)
+
+    tau_hat_val = tau_grid[0, x_idx]
+    tau_hat = float(tau_hat_val) if np.isfinite(tau_hat_val) else np.nan
+    tau_true = float(tau_x[x_idx])
+
+    rows.append(
+      {
+        **base,
+        "normalize": normalize,
+        "x": float(x_val),
+        "tau_true": tau_true,
+        "tau_hat": tau_hat,
+        "tau_abs_err": abs(tau_hat - tau_true)
+        if np.isfinite(tau_hat)
+        else np.nan,
+        **diag,
+      }
+    )
+
+  return rows
 
 def _estimator_seed(cell_seed: int, estimator_id: str) -> int:
   """Deterministic per-estimator seed mixing the cell seed and estimator id.
@@ -457,6 +554,7 @@ def summarize_one_cell(
   surface_families: list[str],
   enable_tau_diagnostics: bool,
   tau_diagnostic_n: int,
+  run_out: Path,  # NEW
 ) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
   """Fit every estimator on one cell's data and return all output rows."""
   seed = _cell_seed(base_seed, cell)
@@ -495,6 +593,167 @@ def summarize_one_cell(
   runtime_rows: list[dict] = []
 
   for est in estimator_specs:
+    if est.kind == "external_r":
+      if any(norm is not None for norm in normalize):
+        raise NotImplementedError(
+          "External R baselines currently support normalize=['none'] only."
+        )
+      if est.script is None:
+        raise ValueError(f"{est.label!r} is missing script= for external_r.")
+
+      train_df = pd.DataFrame({"u1": u, "u2": v, "x": x})
+      eval_df = pd.DataFrame(
+        {
+          "u1": metric_grid.u_flat,
+          "u2": metric_grid.v_flat,
+          "x": metric_grid.x_flat,
+        }
+      )
+
+      pred_df = _run_external_r_method(
+        est.script,
+        train_df,
+        eval_df,
+        _external_workdir(run_out, cell, est),
+      )
+
+      metric_rows += _metric_rows_for_quantity(
+        cell,
+        est,
+        seed,
+        "pdf",
+        truth["pdf"],
+        pred_df["pdf_hat"].to_numpy(dtype=np.float64),
+        metric_grid,
+        normalize="none",
+        include_kl=True,
+      )
+      metric_rows += _metric_rows_for_quantity(
+        cell,
+        est,
+        seed,
+        "hfunc1",
+        truth["hfunc1"],
+        pred_df["h1_hat"].to_numpy(dtype=np.float64),
+        metric_grid,
+        normalize="none",
+        include_kl=False,
+      )
+      metric_rows += _metric_rows_for_quantity(
+        cell,
+        est,
+        seed,
+        "hfunc2",
+        truth["hfunc2"],
+        pred_df["h2_hat"].to_numpy(dtype=np.float64),
+        metric_grid,
+        normalize="none",
+        include_kl=False,
+      )
+
+      diagnostic_rows += _external_diag_rows(
+        cell,
+        est,
+        seed,
+        pred_df,
+        metric_grid,
+        normalize="none",
+      )
+
+      surface_time = 0.0
+
+      if (
+        surface_grid is not None
+        and surface_truth is not None
+        and surface_target_tau is not None
+        and surface_tau_true is not None
+      ):
+        surface_eval_df = pd.DataFrame(
+          {
+            "u1": surface_grid.u_flat,
+            "u2": surface_grid.v_flat,
+            "x": surface_grid.x_flat,
+          }
+        )
+
+        t0 = perf_counter()
+        surface_pred = _run_external_r_method(
+          est.script,
+          train_df,
+          surface_eval_df,
+          _external_workdir(run_out, cell, est),
+        )
+        surface_time += perf_counter() - t0
+
+        quantity_rows += _quantity_rows(
+          cell,
+          est,
+          seed,
+          "pdf",
+          surface_truth["pdf"],
+          surface_pred["pdf_hat"].to_numpy(dtype=np.float64),
+          surface_grid,
+          normalize="none",
+          target_tau=surface_target_tau,
+          tau_true=surface_tau_true,
+        )
+
+        quantity_rows += _quantity_rows(
+          cell,
+          est,
+          seed,
+          "hfunc1",
+          surface_truth["hfunc1"],
+          surface_pred["h1_hat"].to_numpy(dtype=np.float64),
+          surface_grid,
+          normalize="none",
+          target_tau=surface_target_tau,
+          tau_true=surface_tau_true,
+        )
+
+        quantity_rows += _quantity_rows(
+          cell,
+          est,
+          seed,
+          "hfunc2",
+          surface_truth["hfunc2"],
+          surface_pred["h2_hat"].to_numpy(dtype=np.float64),
+          surface_grid,
+          normalize="none",
+          target_tau=surface_target_tau,
+          tau_true=surface_tau_true,
+        )
+
+      rss_mb, mem_available_mb = _system_mem_mb()
+
+      runtime_rows.append(
+        {
+          "family": cell.family,
+          "tau_scenario": cell.tau_scenario,
+          "n": cell.n,
+          "rep": cell.rep,
+          "seed": seed,
+          "label": est.label,
+          "estimator_id": est.estimator_id,
+          "transform": est.transform,
+          "backend": est.backend,
+          "fit_time": float(pred_df["fit_time"].iloc[0]),
+          "pdf_time": float(pred_df["pdf_time"].iloc[0]),
+          "h1_time": float(pred_df["h1_time"].iloc[0]),
+          "h2_time": float(pred_df["h2_time"].iloc[0]),
+          "tau_time": float(pred_df["tau_time"].iloc[0]),
+          "surface_time": surface_time,
+          "total_estimator_time": float(
+            pred_df["total_estimator_time"].iloc[0]
+          ),
+          "gpu_peak_reserved_mb": np.nan,
+          "gpu_peak_alloc_mb": np.nan,
+          "rss_mb": float(rss_mb),
+          "mem_available_mb": float(mem_available_mb),
+        }
+      )
+      continue
+
     t0 = perf_counter()
     est_seed = _estimator_seed(seed, est.estimator_id)
     np.random.seed(est_seed)
@@ -771,6 +1030,7 @@ def run_study(
       surface_families=grid.surface_families,
       enable_tau_diagnostics=grid.enable_tau_diagnostics,
       tau_diagnostic_n=grid.tau_diagnostic_n,
+      run_out=run.out,  # NEW
     )
     _write_cell_shard(cells_root, cell, out, run.fmt)
     logger.info("cell done: %s", cell)

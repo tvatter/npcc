@@ -16,7 +16,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 from npcc.core.errors import (
   EstimatorConfigError,
@@ -31,40 +31,61 @@ TRANSFORMS: tuple[str, ...] = ("identity", "logit", "probit")
 
 @dataclass(frozen=True)
 class EstimatorSpec:
-  """One estimator: a registry backend + transform + its own hyperparameters.
-
-  ``backend_kwargs`` are validated against the backend's allow-list at
-  construction; ``estimator_id`` is a stable content hash of the *effective*
-  config (``backend``/``transform``/``backend_kwargs``, not the display
-  ``label``), used to seed per-estimator RNG and join result rows.
-  """
+  """One estimator: either a registry backend or an external method."""
 
   label: str
   backend: str
   transform: str
   backend_kwargs: Mapping[str, object] = field(default_factory=dict)
 
+  # NEW:
+  kind: Literal["backend", "external_r"] = "backend"
+  script: str | None = None
+
   def __post_init__(self) -> None:
     if not self.label:
       raise EstimatorConfigError("Estimator label must be non-empty.")
-    if self.backend not in available_backends():
-      raise UnknownBackendError(
-        f"Unknown backend {self.backend!r}. Available: {available_backends()}."
-      )
-    if self.transform not in TRANSFORMS:
-      raise EstimatorConfigError(
-        f"Unknown transform {self.transform!r}. Allowed: {list(TRANSFORMS)}."
-      )
-    frozen = MappingProxyType(deepcopy(dict(self.backend_kwargs)))
-    validate_backend_kwargs(self.backend, frozen)
-    object.__setattr__(self, "backend_kwargs", frozen)
+
+    if self.kind == "backend":
+      if self.backend not in available_backends():
+        raise UnknownBackendError(
+          f"Unknown backend {self.backend!r}. Available: {available_backends()}."
+        )
+      if self.transform not in TRANSFORMS:
+        raise EstimatorConfigError(
+          f"Unknown transform {self.transform!r}. Allowed: {list(TRANSFORMS)}."
+        )
+      frozen = MappingProxyType(deepcopy(dict(self.backend_kwargs)))
+      validate_backend_kwargs(self.backend, frozen)
+      object.__setattr__(self, "backend_kwargs", frozen)
+      if self.script is not None:
+        raise EstimatorConfigError(
+          "script must be omitted for kind='backend'."
+        )
+      return
+
+    if self.kind == "external_r":
+      # External R methods are not validated against the Python backend registry.
+      if self.script is None:
+        raise EstimatorConfigError(
+          "External R estimators require script='...'."
+        )
+      frozen = MappingProxyType(deepcopy(dict(self.backend_kwargs)))
+      object.__setattr__(self, "backend_kwargs", frozen)
+      return
+
+    raise EstimatorConfigError(
+      f"Unknown estimator kind {self.kind!r}; allowed: backend, external_r."
+    )
 
   def canonical_dict(self) -> dict[str, object]:
     """The effective config, exactly as forwarded at runtime (for hashing)."""
     return {
+      "kind": self.kind,
       "backend": self.backend,
       "transform": self.transform,
       "backend_kwargs": dict(self.backend_kwargs),
+      "script": self.script,
     }
 
   @property
@@ -73,7 +94,6 @@ class EstimatorSpec:
       self.canonical_dict(), sort_keys=True, separators=(",", ":")
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
-
 
 @dataclass(frozen=True)
 class Cell:
@@ -218,14 +238,22 @@ def _parse_estimator(entry: Mapping[str, object]) -> EstimatorSpec:
     raise EstimatorConfigError(
       f"Estimator entry is missing required key: {exc}."
     ) from exc
+
   raw = entry.get("backend_kwargs", {})
   if not isinstance(raw, dict):
     raise InvalidBackendKwargsError("backend_kwargs must be a TOML table.")
+
+  kind = str(entry.get("kind", "backend"))
+  script = entry.get("script")
+  script_str = None if script is None else str(script)
+
   return EstimatorSpec(
     label=label,
     backend=backend,
     transform=transform,
     backend_kwargs={str(k): v for k, v in raw.items()},
+    kind=kind,          # type: ignore[arg-type]
+    script=script_str,
   )
 
 

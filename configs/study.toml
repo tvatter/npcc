@@ -32,10 +32,10 @@
 
 [grid]
 # Copula families (one-parameter): clayton, gumbel, frank, gaussian, joe.
-families = ["clayton", "gumbel", "frank", "gaussian"]
+families = ["clayton", "gumbel"]
 
 # Conditional tau(x) regimes: monotone, symmetric, and nonmonotone.
-tau_scenarios = ["linear", "quadratic", "sin"]
+tau_scenarios = ["linear", "sin"]
 
 # Sinkhorn normalization variants applied to the density. "none" = off.
 # Kept at "none" only: the projection degenerates (±inf KL) for the sharper
@@ -62,7 +62,7 @@ surface_families = ["clayton"]
 
 # Kendall's tau diagnostics are sample-based and comparatively expensive.
 enable_tau_diagnostics = true
-tau_diagnostic_n = 1000
+tau_diagnostic_n = 50
 
 # Estimators: each is a registry backend + support transform + optional
 # per-estimator `backend_kwargs` (see `npcc.available_backends()`). TabPFN model
@@ -167,3 +167,17 @@ transform = "logit"
 label = "pytabkit-tabm-probit"
 backend = "pytabkit-tabm"
 transform = "probit"
+
+[[grid.estimators]]
+label = "gamCopula"
+kind = "external_r"
+backend = "gamCopula"
+transform = "identity"
+script = "r_methods/fit_gamcopula.R"
+
+[[grid.estimators]]
+label = "boostCopula"
+kind = "external_r"
+backend = "boostCopula"
+transform = "identity"
+script = "r_methods/fit_boostcopula.R"
