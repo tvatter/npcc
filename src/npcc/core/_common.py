@@ -17,6 +17,11 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+# `is_torch_array` is the same predicate pyvinecopulib uses (via array-api-compat)
+# to decide "did the caller pass torch?" at a public-API boundary. Used below in
+# `_normalize_inputs` and re-exported for `bicop.py`'s output-type decisions.
+from array_api_compat import is_torch_array
+
 TensorLike = np.ndarray | torch.Tensor
 """Public-API numeric input type: NumPy array or torch tensor."""
 
@@ -59,9 +64,7 @@ def _normalize_inputs(
   ``None`` entries pass through to let callers preserve optional-arg
   semantics (e.g. ``x: TensorLike | None``).
   """
-  return_as_torch = any(
-    isinstance(x, torch.Tensor) for x in inputs if x is not None
-  )
+  return_as_torch = any(is_torch_array(x) for x in inputs if x is not None)
   tensors: list[torch.Tensor | None] = [
     None if x is None else _to_tensor(x, device=device) for x in inputs
   ]

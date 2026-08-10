@@ -6,7 +6,41 @@ import numpy as np
 import pytest
 import torch
 
-from npcc.core._common import _as_2d, _check_uv, _logit
+from npcc.core._common import (
+  _as_2d,
+  _check_uv,
+  _logit,
+  _normalize_inputs,
+  is_torch_array,
+)
+
+_CPU = torch.device("cpu")
+
+
+class TestNormalizeInputs:
+  """`return_as_torch` decides output type via array_api_compat.is_torch_array."""
+
+  def test_numpy_input_flags_false(self) -> None:
+    rt, (t,) = _normalize_inputs(np.zeros(3), device=_CPU)
+    assert rt is False
+    assert isinstance(t, torch.Tensor)  # still coerced to torch for compute
+
+  def test_torch_input_flags_true(self) -> None:
+    rt, (t,) = _normalize_inputs(torch.zeros(3), device=_CPU)
+    assert rt is True
+    assert isinstance(t, torch.Tensor)
+
+  def test_mixed_flags_true_and_none_passes_through(self) -> None:
+    rt, (a, b, c) = _normalize_inputs(
+      np.zeros(2), torch.zeros(2), None, device=_CPU
+    )
+    assert rt is True
+    assert isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor)
+    assert c is None
+
+  def test_is_torch_array_predicate(self) -> None:
+    assert is_torch_array(torch.zeros(1)) is True
+    assert is_torch_array(np.zeros(1)) is False
 
 
 class TestAs2d:

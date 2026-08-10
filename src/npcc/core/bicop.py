@@ -80,6 +80,7 @@ from npcc.core._common import (
   _to_tensor,
   _torch_interp,
   _wrap_output,
+  is_torch_array,
 )
 from npcc.core.conditional_distribution1d import ConditionalDistribution1D
 from npcc.core.quantile_table_distribution1d import QuantileGridConfig
@@ -409,7 +410,7 @@ class RosenblattBicop(BicopBase[TensorLike]):
     iteration count; ``None`` means "use ``self.sinkhorn_iters``".  If the
     effective value is ``None``, no projection is applied.
     """
-    return_as_torch = isinstance(u, torch.Tensor)
+    return_as_torch = is_torch_array(u)
     with torch.inference_mode():
       out = self._pdf_torch(
         u,
@@ -597,7 +598,7 @@ class RosenblattBicop(BicopBase[TensorLike]):
 
     ``batch_size`` and ``sinkhorn_iters`` match :py:meth:`pdf`.
     """
-    return_as_torch = isinstance(uv, torch.Tensor)
+    return_as_torch = is_torch_array(uv)
     with torch.inference_mode():
       c = self._pdf_torch(
         uv,
@@ -694,16 +695,16 @@ class RosenblattBicop(BicopBase[TensorLike]):
     Convention matches :py:meth:`pyvinecopulib.Bicop.hfunc1`: ``hfunc1``
     conditions on the first argument.
     """
-    return_as_torch = isinstance(u, torch.Tensor)
+    return_as_torch = is_torch_array(u)
     u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
 
     out = self.v_given_ux_.cdf(self._features(u_t, x_t), v_t)
+    assert isinstance(out, torch.Tensor)
     out = torch.clamp(
       out,
       self.quantile_config.eps,
       1.0 - self.quantile_config.eps,
     )
-    assert isinstance(out, torch.Tensor)
     return _wrap_output(out, return_as_torch=return_as_torch)
 
   def hfunc2(
@@ -718,16 +719,16 @@ class RosenblattBicop(BicopBase[TensorLike]):
     Convention matches :py:meth:`pyvinecopulib.Bicop.hfunc2`: ``hfunc2``
     conditions on the second argument.
     """
-    return_as_torch = isinstance(u, torch.Tensor)
+    return_as_torch = is_torch_array(u)
     u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
 
     out = self.u_given_vx_.cdf(self._features(v_t, x_t), u_t)
+    assert isinstance(out, torch.Tensor)
     out = torch.clamp(
       out,
       self.quantile_config.eps,
       1.0 - self.quantile_config.eps,
     )
-    assert isinstance(out, torch.Tensor)
     return _wrap_output(out, return_as_torch=return_as_torch)
 
   def hinv1(
@@ -736,7 +737,7 @@ class RosenblattBicop(BicopBase[TensorLike]):
     x: TensorLike | None = None,
   ) -> TensorLike:
     """Invert :meth:`hfunc1` using the V|U backend's native quantiles."""
-    return_as_torch = isinstance(u, torch.Tensor)
+    return_as_torch = is_torch_array(u)
     u_t, alpha_t, x_t = self._prepare_joint_inputs(u, x)
     out = self.v_given_ux_.icdf(self._features(u_t, x_t), alpha_t)
     assert isinstance(out, torch.Tensor)
@@ -748,7 +749,7 @@ class RosenblattBicop(BicopBase[TensorLike]):
     x: TensorLike | None = None,
   ) -> TensorLike:
     """Invert :meth:`hfunc2` using the U|V backend's native quantiles."""
-    return_as_torch = isinstance(u, torch.Tensor)
+    return_as_torch = is_torch_array(u)
     alpha_t, v_t, x_t = self._prepare_joint_inputs(u, x)
     out = self.u_given_vx_.icdf(self._features(v_t, x_t), alpha_t)
     assert isinstance(out, torch.Tensor)
@@ -810,7 +811,7 @@ class RosenblattBicop(BicopBase[TensorLike]):
       raise ValueError("n_int must be at least 2.")
     effective_batch_size = self._resolve_batch_size(batch_size)
 
-    return_as_torch = isinstance(u, torch.Tensor)
+    return_as_torch = is_torch_array(u)
     u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
 
     cdf_v_dir = self._integrate_one_direction(
