@@ -1,57 +1,23 @@
 """
-tabpfn_criterion_distribution1d.py — univariate conditional predictive
-distribution via TabPFN's native distribution head.
+tabpfn_criterion.py — native-head TabPFN backend (the default).
 
-Approach
---------
-TabPFN's regressor is internally a classifier over a set of pre-computed
-"bar distribution" bins.  Calling
+TabPFN's regressor is internally a classifier over a "bar distribution".
+``predict(W, output_type="full")`` returns per-row logits over the bins
+plus a ``criterion`` head exposing ``pdf`` / ``cdf`` / ``icdf`` that
+evaluate the corresponding density / CDF / quantile at arbitrary points.
+Reading the head directly avoids the quantile-table inversion and is
+both faster and (currently) as accurate — hence this is the default
+backend for TabPFN.
 
-    pred = regressor.predict(W, output_type="full")
+This backend subclasses the neutral
+:class:`~npcc.core.conditional_distribution1d.ConditionalDistribution1D`
+directly (it is native-evaluation, not quantile-table based) and
+provides its own fast ``pdf_grid`` / ``cdf_grid`` overrides that predict
+once per conditioning row.
 
-returns a dictionary with two pieces:
-
-- ``pred["logits"]``: tensor of shape ``(n_w, n_bins)`` whose rows are
-  the unnormalised log-densities over the bins.
-- ``pred["criterion"]``: the ``BarDistribution``-like head used during
-  training; it carries the bin edges and exposes ``pdf`` / ``cdf`` /
-  ``icdf`` methods that turn logits into per-bin probability mass and
-  evaluate the corresponding piecewise-linear PDF / CDF / quantile
-  function at arbitrary points ``z``.
-
-Compared to
-:class:`npcc.tabpfn_quantile_distribution1d.TabPFNQuantileDistribution1D`
-this avoids querying a quantile grid and inverting a numerical
-derivative for the PDF, so it is faster and typically more accurate,
-but it is specific to TabPFN's binned output.
-
-Support transforms
-------------------
-``U`` and ``V`` are copula scores in ``(0, 1)``.  When
-``transform="logit"`` we fit on ``Z = logit(Y)``; with
-``transform="probit"`` we use ``Z = Phi^{-1}(Y)``. Convert back via
-the corresponding Jacobian for densities (CDFs and quantiles need no
-correction since monotone transforms preserve them):
-
-  f_Y(y | w) = f_Z(T(y) | w) * |dT(y)/dy|.
-
-For example, ``T(y) = logit(y)`` gives
-
-  f_Y(y | w) = f_Z(logit(y) | w) / (y * (1 - y)),
-
-while ``T(y) = Phi^{-1}(y)`` gives
-
-  f_Y(y | w) = f_Z(Phi^{-1}(y) | w) / phi(Phi^{-1}(y)).
-
-Cartesian-product evaluation (``pdf_grid`` / ``cdf_grid``)
-----------------------------------------------------------
-For diagnostics and grid-based copula plots one often needs the
-density (or CDF) on the full Cartesian product of conditioning rows
-``W`` and evaluation points ``y_grid``.  ``pdf_grid`` / ``cdf_grid``
-exploit the fact that a single TabPFN forward pass per row of ``W``
-is enough — the same logits are re-used across every ``y`` value —
-and are materially faster than calling :py:meth:`pdf` /
-:py:meth:`cdf` on the explicit tile.
+Support transforms and the change-of-variables are as documented on the
+base class: ``f_Y(y | w) = f_Z(T(y) | w) * |T'(y)|``; CDFs and quantiles
+need no Jacobian.
 """
 
 from __future__ import annotations
@@ -61,18 +27,18 @@ from typing import Any, Literal, Protocol
 import numpy as np
 import torch
 
-from tabpfn.constants import ModelVersion
-
 from npcc.core._common import (
   TensorLike,
   _as_2d,
   _normalize_inputs,
   _wrap_output,
 )
-from npcc.core.tabpfn_distribution1d import (
+from npcc.core.backends.tabpfn_common import (
   _DEFAULT_MODEL_VERSION,
-  TabPFNDistribution1D,
+  ModelVersion,
+  make_tabpfn_regressor,
 )
+from npcc.core.conditional_distribution1d import ConditionalDistribution1D
 
 
 class _CriterionLike(Protocol):
@@ -93,8 +59,8 @@ def _coerce_logits_tensor(
   """Convert TabPFN ``full`` logits to a float32 tensor on ``device``.
 
   TabPFN may return masked / invalid bins as ``None`` inside an object
-  array; map those to ``-inf`` so a downstream softmax assigns them
-  zero probability.
+  array; map those to ``-inf`` so a downstream softmax assigns them zero
+  probability.
   """
   if isinstance(logits, torch.Tensor):
     return logits.to(device=device, dtype=torch.float32)
@@ -105,18 +71,20 @@ def _coerce_logits_tensor(
   return torch.as_tensor(safe, dtype=torch.float32, device=device)
 
 
-class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
-  """Univariate conditional predictive distribution via TabPFN's binned head.
+class TabPFNCriterionBackend(ConditionalDistribution1D):
+  """Conditional predictive distribution via TabPFN's native binned head.
 
-  See the module-level docstring for the algorithm.  The ``fit`` /
-  ``pdf`` / ``cdf`` / ``icdf`` API mirrors
-  :class:`TabPFNQuantileDistribution1D` so the two classes are drop-in
-  interchangeable inside :class:`PFNRBicop`.
+  Parameters
+  ----------
+  transform, eps, device, batch_size
+      Forwarded to :class:`ConditionalDistribution1D`.
+  model_kwargs
+      Forwarded to the ``TabPFNRegressor`` constructor.
+  model_version
+      TabPFN model version (default: v3).
   """
 
-  # ------------------------------------------------------------------
-  # Internal helpers.
-  # ------------------------------------------------------------------
+  model_: Any | None
 
   def __init__(
     self,
@@ -133,9 +101,19 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
       eps=eps,
       device=device,
       batch_size=batch_size,
-      model_kwargs=model_kwargs,
-      model_version=model_version,
     )
+    self.model_kwargs = dict(model_kwargs or {})
+    self.model_kwargs.setdefault("device", str(self._device))
+    self.model_version = model_version
+    self.model_ = None
+
+  def _fit_model(self, w: torch.Tensor, z: torch.Tensor) -> None:
+    self.model_ = make_tabpfn_regressor(self.model_version, self.model_kwargs)
+    self.model_.fit(w, z)
+
+  # ------------------------------------------------------------------
+  # Internal helpers.
+  # ------------------------------------------------------------------
 
   def _predict_full(
     self, w_t: torch.Tensor
@@ -145,8 +123,7 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     TabPFN's predict input must be on CPU; the returned logits land on
     TabPFN's internal device, which we coerce onto ``self._device``.
     """
-    if self.model_ is None:
-      raise RuntimeError("The model is not fitted.")
+    assert self.model_ is not None
     pred = self.model_.predict(w_t.detach().cpu(), output_type="full")
     logits = pred["logits"]
     criterion: _CriterionLike = pred["criterion"]
@@ -158,12 +135,7 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     criterion: _CriterionLike,
     z: torch.Tensor,
   ) -> torch.Tensor:
-    """Evaluate ``criterion.pdf`` at z-space points; returns shape ``(n,)``.
-
-    The criterion head consumes ``logits_t``'s dtype (typically
-    float32); we down-cast ``z`` for the call and bring the result
-    back to ``z``'s dtype (float64 by convention) for downstream use.
-    """
+    """Evaluate ``criterion.pdf`` at z-space points; returns shape ``(n,)``."""
     z_eval = z.to(dtype=logits_t.dtype, device=logits_t.device).reshape(-1, 1)
     dens = criterion.pdf(logits_t, z_eval)
     return dens.reshape(-1).to(dtype=z.dtype)
@@ -174,11 +146,7 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     criterion: _CriterionLike,
     z: torch.Tensor,
   ) -> torch.Tensor:
-    """Evaluate ``criterion.cdf`` at the (already z-space) eval points.
-
-    The CDF of ``Y`` equals the CDF of ``Z = transform(Y)`` evaluated at
-    ``transform(y)`` — no Jacobian for monotone transforms.
-    """
+    """Evaluate ``criterion.cdf`` at the (already z-space) eval points."""
     z_eval = z.to(dtype=logits_t.dtype, device=logits_t.device).reshape(-1, 1)
     cdf = criterion.cdf(logits_t, z_eval)
     return cdf.reshape(-1).to(dtype=z.dtype)
@@ -190,16 +158,8 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
   def pdf(
     self, w: TensorLike, y: TensorLike, *, batch_size: int | None = None
   ) -> TensorLike:
-    """Return ``f(y_i | w_i)`` for each row ``i``.
-
-    Inference is chunked to bound GPU memory usage.  ``batch_size``
-    overrides the instance default for this call; when omitted the
-    instance default is used (400 on CPU, 2000 on CUDA unless
-    overridden at construction).  Results are concatenated and the
-    inverse-Jacobian is applied at the end.
-    """
-    if self.model_ is None:
-      raise RuntimeError("The model is not fitted.")
+    """Return ``f(y_i | w_i)`` for each row ``i`` (chunked over rows)."""
+    self._check_fitted()
     effective_batch_size = self._resolve_batch_size(batch_size)
 
     return_as_torch, (w_in, y_in) = _normalize_inputs(w, y, device=self._device)
@@ -231,27 +191,22 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
   ) -> TensorLike:
     """Density on the Cartesian product of ``w`` rows and ``y_grid``.
 
-    Returns shape ``(n_w, n_y)`` with ``out[i, j] = f(y_grid[j] | w[i])``.
-    Each ``w`` row triggers exactly one TabPFN forward pass; the same
-    logits are then evaluated against every ``y`` value.  This is the
-    fast path for grid plots and copula visualisations.
+    Returns shape ``(n_w, n_y)``.  Each ``w`` row triggers exactly one
+    TabPFN forward pass; the same logits are evaluated against every
+    ``y`` value.
     """
-    if self.model_ is None:
-      raise RuntimeError("The model is not fitted.")
+    self._check_fitted()
     effective_batch_size = self._resolve_batch_size(batch_size)
 
     return_as_torch, (w_in, y_in) = _normalize_inputs(
       w, y_grid, device=self._device
     )
     assert w_in is not None and y_in is not None
-
     w_t = _as_2d(w_in, device=self._device)
     y_grid_t = y_in.reshape(-1)
-
     if y_grid_t.numel() == 0:
       raise ValueError("y_grid must contain at least one value.")
 
-    # Transform once to z-space; same y_grid for every row of w.
     z_grid_t = self._transform_y(y_grid_t)
     jac = self._jacobian_inverse(y_grid_t)
 
@@ -260,12 +215,10 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
 
     for start in range(0, w_t.shape[0], effective_batch_size):
       stop = min(start + effective_batch_size, w_t.shape[0])
-
       w_chunk = w_t[start:stop]
       logits_t, criterion = self._predict_full(w_chunk)
 
       logits_rep = logits_t.repeat_interleave(n_grid, dim=0)
-
       z_flat = (
         z_grid_t.repeat(w_chunk.shape[0])
         .to(dtype=logits_t.dtype, device=logits_t.device)
@@ -281,9 +234,7 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
       pdf_z = pdf_z_flat.reshape(w_chunk.shape[0], n_grid).to(
         dtype=y_grid_t.dtype
       )
-      pdf_y = pdf_z * jac.unsqueeze(0)
-
-      chunks.append(pdf_y)
+      chunks.append(pdf_z * jac.unsqueeze(0))
 
     out = torch.cat(chunks, dim=0)
     return _wrap_output(out, return_as_torch=return_as_torch)
@@ -291,15 +242,8 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
   def cdf(
     self, w: TensorLike, y: TensorLike, *, batch_size: int | None = None
   ) -> TensorLike:
-    """Return ``F(y_i | w_i) = P(Y <= y_i | W = w_i)`` per row.
-
-    Uses ``criterion.cdf`` directly on the binned distribution head.
-    No Jacobian correction is needed: monotone transforms preserve the
-    CDF, so ``F_Y(y | w) = F_Z(transform(y) | w)``.  ``batch_size``
-    overrides the instance default for this call.
-    """
-    if self.model_ is None:
-      raise RuntimeError("The model is not fitted.")
+    """Return ``F(y_i | w_i)`` per row via ``criterion.cdf`` (chunked)."""
+    self._check_fitted()
     effective_batch_size = self._resolve_batch_size(batch_size)
 
     return_as_torch, (w_in, y_in) = _normalize_inputs(w, y, device=self._device)
@@ -321,19 +265,18 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     out = torch.cat(parts) if parts else torch.empty(0, device=self._device)
     return _wrap_output(out, return_as_torch=return_as_torch)
 
-  def icdf(self, w: TensorLike, alphas: TensorLike) -> TensorLike:
+  def icdf(
+    self, w: TensorLike, alphas: TensorLike, *, batch_size: int | None = None
+  ) -> TensorLike:
     """Per-row conditional quantile ``F^{-1}(alphas_i | w_i)`` on the y-scale.
 
-    For each row ``i``, returns ``y`` such that
-    ``F(y | w_i) = alphas_i``.  Used by the Rosenblatt simulation
-    recipe behind :py:meth:`PFNRBicop.tau`.
-
-    The criterion's ``icdf`` is scalar-α, so we loop over rows after a
-    single batched ``predict(output_type="full")`` forward pass — the
-    forward pass dominates the cost.
+    The criterion's ``icdf`` is scalar-alpha, so we loop over rows within
+    each chunk after a single batched ``predict(output_type="full")``
+    forward pass — the forward pass dominates the cost.  The forward is
+    chunked by ``batch_size`` to bound the logits transient.
     """
-    if self.model_ is None:
-      raise RuntimeError("The model is not fitted.")
+    self._check_fitted()
+    effective_batch_size = self._resolve_batch_size(batch_size)
 
     return_as_torch, (w_in, a_in) = _normalize_inputs(
       w, alphas, device=self._device
@@ -346,28 +289,39 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     if torch.any((alpha_t <= 0.0) | (alpha_t >= 1.0)):
       raise ValueError("alphas must lie strictly inside (0, 1).")
 
-    logits_t, criterion = self._predict_full(w_t)
+    n = alpha_t.shape[0]
+    z_out = torch.empty(n, dtype=alpha_t.dtype, device=self._device)
 
-    z_out = torch.empty(
-      alpha_t.shape[0], dtype=alpha_t.dtype, device=self._device
-    )
-    for i in range(alpha_t.shape[0]):
-      z_i = criterion.icdf(logits_t[i : i + 1], float(alpha_t[i].item()))
-      z_out[i] = z_i.reshape(-1)[0].to(device=self._device, dtype=alpha_t.dtype)
+    for start in range(0, n, effective_batch_size):
+      end = min(start + effective_batch_size, n)
+      logits_t, criterion = self._predict_full(w_t[start:end])
+      for j in range(end - start):
+        z_ij = criterion.icdf(
+          logits_t[j : j + 1], float(alpha_t[start + j].item())
+        )
+        z_out[start + j] = z_ij.reshape(-1)[0].to(
+          device=self._device, dtype=alpha_t.dtype
+        )
 
     return _wrap_output(
       self._inverse_transform(z_out), return_as_torch=return_as_torch
     )
 
-  def cdf_grid(self, w: TensorLike, y_grid: TensorLike) -> TensorLike:
-    """CDF on the Cartesian product of ``w`` rows and ``y_grid`` values.
+  def cdf_grid(
+    self,
+    w: TensorLike,
+    y_grid: TensorLike,
+    *,
+    batch_size: int | None = None,
+  ) -> TensorLike:
+    """CDF on the Cartesian product of ``w`` rows and ``y_grid``.
 
-    Returns shape ``(n_w, n_y)`` with ``out[i, j] = F(y_grid[j] | w[i])``.
-    One TabPFN forward pass per ``w`` row; the fast path for grid-based
-    integration of the joint copula CDF.
+    Returns shape ``(n_w, n_y)``.  One TabPFN forward pass per ``w`` row
+    (chunked by ``batch_size``); the same logits are evaluated against
+    every ``y`` value.
     """
-    if self.model_ is None:
-      raise RuntimeError("The model is not fitted.")
+    self._check_fitted()
+    effective_batch_size = self._resolve_batch_size(batch_size)
 
     return_as_torch, (w_in, y_in) = _normalize_inputs(
       w, y_grid, device=self._device
@@ -375,13 +329,25 @@ class TabPFNCriterionDistribution1D(TabPFNDistribution1D):
     assert w_in is not None and y_in is not None
     w_t = _as_2d(w_in, device=self._device)
     y_t = y_in.reshape(-1)
-    n_w, n_y = w_t.shape[0], y_t.shape[0]
+    if y_t.numel() == 0:
+      raise ValueError("y_grid must contain at least one value.")
 
-    logits_t, criterion = self._predict_full(w_t)
-    logits_eval = logits_t.repeat_interleave(n_y, dim=0)
-    y_tiled = y_t.tile(n_w)
-    z = self._transform_y(y_tiled)
-    cdf_z = self._criterion_cdf_z(logits_eval, criterion, z)
-    return _wrap_output(
-      cdf_z.reshape(n_w, n_y), return_as_torch=return_as_torch
+    n_y = y_t.shape[0]
+    z_grid = self._transform_y(y_t)
+
+    chunks: list[torch.Tensor] = []
+    for start in range(0, w_t.shape[0], effective_batch_size):
+      stop = min(start + effective_batch_size, w_t.shape[0])
+      n_chunk = stop - start
+      logits_t, criterion = self._predict_full(w_t[start:stop])
+      logits_eval = logits_t.repeat_interleave(n_y, dim=0)
+      z_flat = z_grid.repeat(n_chunk)
+      cdf_z = self._criterion_cdf_z(logits_eval, criterion, z_flat)
+      chunks.append(cdf_z.reshape(n_chunk, n_y))
+
+    out = (
+      torch.cat(chunks, dim=0)
+      if chunks
+      else torch.empty((0, n_y), dtype=torch.float64, device=self._device)
     )
+    return _wrap_output(out, return_as_torch=return_as_torch)

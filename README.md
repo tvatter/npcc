@@ -1,17 +1,17 @@
 # Neural Pair-Copulas Constructions (NPCCs)
 
 A Python library for **conditional bivariate copula density estimation**
-backed by [TabPFN](https://github.com/PriorLabs/TabPFN).  The package
-exposes one outer estimator — `PFNRBicop` — and two interchangeable
-inner univariate-conditional-predictive-distribution wrappers
-(`TabPFNCriterionDistribution1D`, `TabPFNQuantileDistribution1D`,
-both subclassing the abstract `TabPFNDistribution1D`).  They read the
-predictive distribution (`pdf`, `cdf`, `icdf`) off a fitted TabPFN
-regressor in two complementary ways.
+built on top of *any* distributional-regression backend.  The package
+exposes one outer estimator — `RosenblattBicop` — whose inner
+univariate-conditional-predictive-distribution model is **pluggable**
+(selected by name via `backend=`).  TabPFN is the default backend, but the
+construction only needs a regressor that can produce a conditional
+predictive distribution (`pdf`, `cdf`, `icdf`), so classical and
+foundation-model regressors slot in on equal footing.
 
 ---
 
-## TabPFN-Rosenblatt conditional bivariate copula
+## Rosenblatt conditional bivariate copula
 
 Let $(U, V, X)$ denote observations with $U, V \in (0, 1)$ and
 $X \in \mathbb{R}^p$.  We want to estimate the conditional copula
@@ -26,9 +26,9 @@ density,
 $$c(u, v \mid x) = f_{V \mid U, X}(v \mid u, x).$$
 
 So estimating $c$ reduces to estimating $f_{V \mid U, X}$, which is
-exactly what a flexible distributional regressor like TabPFN provides.
-The features fed to the regressor are simply $W = [u, x]$ (or $[v, x]$
-for the reverse direction).
+exactly what a flexible **distributional regressor** provides.  The
+features fed to the regressor are simply $W = [u, x]$ (or $[v, x]$ for
+the reverse direction).
 
 ### Symmetric averaging
 
@@ -43,13 +43,13 @@ $$\hat c(u, v \mid x)
 + \tfrac{1}{2} \, \hat f_{U \mid V, X}(u \mid v, x).$$
 
 This still does not impose exact uniform copula margins; if you need
-that, evaluate the density on a grid and apply
-iterative-proportional-fitting / Sinkhorn projection.
+that, enable the optional iterative-proportional-fitting / Sinkhorn
+projection via `sinkhorn_iters`.
 
 ### Support transforms
 
-Both copula scores live in $(0, 1)$.  The inner estimator can fit
-TabPFN on a transformed target
+Both copula scores live in $(0, 1)$.  The inner estimator can fit the
+backend on a transformed target
 
 $$Z = T(Y),$$
 
@@ -57,90 +57,90 @@ and convert the density back via the change-of-variables formula
 
 $$f_Y(y \mid w) = f_Z(T(y) \mid w) \left|\tfrac{dT(y)}{dy}\right|.$$
 
-Currently supported transforms are:
-
-- `transform="logit"` (default):
-
-   $$f_Y(y \mid w) = f_Z(\mathrm{logit}(y) \mid w) \, \tfrac{1}{y(1-y)}.$$
-
-- `transform="probit"`:
-
-   $$f_Y(y \mid w) = f_Z(\Phi^{-1}(y) \mid w) \, \tfrac{1}{\phi(\Phi^{-1}(y))}.$$
-
-- `transform="identity"`:
-
-   $$f_Y(y \mid w) = f_Z(y \mid w).$$
-
-The default transform is usually numerically better behaved than
-estimating a density directly on a bounded interval.
+Supported transforms: `transform="logit"` (default,
+$\tfrac{1}{y(1-y)}$), `transform="probit"`
+($\tfrac{1}{\phi(\Phi^{-1}(y))}$), and `transform="identity"`.  The
+transform machinery lives on the backend-neutral base class, so every
+backend gets it for free.
 
 ---
 
-## Two predictive-distribution recovery methods
+## Pluggable backends
 
-Both subclasses share the abstract `TabPFNDistribution1D` interface
-(`fit(w, y)`, `pdf(w, y)`, `cdf(w, y)`, `icdf(w, alphas)`) and are
-drop-in interchangeable inside `PFNRBicop` via the `method=` argument.
+The inner conditional-density model is any registered backend, chosen by
+name:
 
-### `TabPFNCriterionDistribution1D` — TabPFN's native distribution head (default)
+| `backend=`            | Underlying model                     | Extra to install       |
+| --------------------- | ------------------------------------ | ---------------------- |
+| `"tabpfn-criterion"`  | TabPFN native binned head (default)  | — (core)               |
+| `"tabpfn-quantiles"`  | TabPFN quantile output, inverted     | — (core)               |
+| `"ngboost"`           | NGBoost parametric (analytic)        | `npcc[ngboost]`        |
+| `"gbm"`               | scikit-learn quantile GBM            | `npcc[gbm]`            |
+| `"tabicl"`            | TabICL foundation model              | `npcc[tabicl]`         |
 
-TabPFN's regressor is internally a classifier over a binned
-distribution.  Calling `predict(W, output_type="full")` returns logits
-over the bins plus a `criterion` object exposing `pdf` / `cdf` /
-`icdf` directly:
+`available_backends()` lists them; `register_backend(name, factory)` adds
+your own.
 
-$$f(y \mid w) = \mathrm{criterion.pdf}\bigl( \mathrm{logits}(w), \, z = T(y) \bigr).$$
+### Two base classes
 
-A single forward pass is needed per row of $W$.  The
-`pdf_grid(w, y_grid)` and `cdf_grid(w, y_grid)` methods exploit this
-— one forward pass per $w$ row, then evaluate at every $y$ value — to
-produce the full Cartesian-product matrix in a single shot.
+Every backend implements the abstract
+`ConditionalDistribution1D` interface — `fit(w, y)`, `pdf(w, y)`,
+`cdf(w, y)`, `icdf(w, alphas)`, plus the Cartesian-grid fast paths
+`pdf_grid(w, y_grid)` / `cdf_grid(w, y_grid)`.  There are two ways to
+implement it:
 
-### `TabPFNQuantileDistribution1D` — numerical inversion of the quantile table
+- **Quantile-table backends** subclass `QuantileTableDistribution1D` and
+  implement a single hook, `_predict_quantiles(w, alphas) -> (n, K)`.
+  Everything else — the chunked, memory-safe quantile-table prediction,
+  the monotone re-sort, and the predict-once-per-row pdf/cdf/icdf/grid
+  inversion — is inherited.  This is the universal fast path used by
+  `tabpfn-quantiles`, `gbm`, and `tabicl`.  Recovery details: pdf via
+  $f(y \mid w) = 1 / Q'(\alpha)$ at $\alpha = F(y \mid w)$; cdf/icdf by
+  linear interpolation in the sorted quantile table; $Q'$ floored to a
+  positive constant for stability.
 
-Asks TabPFN for the conditional quantile function $Q(\alpha \mid w)$
-on a grid of $\alpha$ values, then derives each primitive:
+- **Native-evaluation backends** subclass `ConditionalDistribution1D`
+  directly and evaluate the predictive distribution at arbitrary points.
+  `tabpfn-criterion` reads TabPFN's `criterion` head
+  (`predict(W, output_type="full")` → logits + `pdf`/`cdf`/`icdf`); it is
+  faster than, and (currently) as accurate as, the quantile read-out —
+  hence the **default**.  `ngboost` uses the analytic SciPy frozen
+  distribution (`pred_dist(W).dist`).
 
-- pdf via $f(y \mid w) = 1 / Q'(\alpha)$ at $\alpha = F(y \mid w)$;
-- cdf and icdf via linear interpolation in the predicted quantile
-  table.
+### Speed
 
-The class enforces monotonicity by sorting (rearrangement), clips
-$Q'$ to a positive floor to avoid singularities at quantile plateaus,
-and uses linear interpolation in all lookup steps.  Slower and less
-direct than the criterion approach, but model-agnostic.
+Grid methods (`pdf_grid` / `cdf_grid`), which drive the Sinkhorn
+projection and plotting, predict **at most once per conditioning row** and
+evaluate every grid point by interpolation — never one forward pass per
+grid cell.  Inference is chunked by `batch_size` (device-aware default:
+400 on CPU, 2000 on CUDA) to bound memory.
 
 ---
 
 ## Public API
 
-`PFNRBicop` is the main entry point.  Its key methods:
+`RosenblattBicop` is the main entry point.  `batch_size` defaults are
+device-aware and overridable model-wide
+(`RosenblattBicop(..., batch_size=...)`) or per call.
 
-For `method="criterion"`, batching defaults are device-aware: CPU uses
-`batch_size=400`, CUDA uses `batch_size=2000`.  You can override this
-model-wide via `PFNRBicop(..., batch_size=...)` and per-call via
-`pdf(..., batch_size=...)` / `cdf(..., batch_size=...)`.
+| Method | What it returns |
+| --- | --- |
+| `fit(u, v, x=None)` | Fits both Rosenblatt directions.  `x=None` → unconditional fit. |
+| `pdf(u, v, x=None, *, batch_size=None, sinkhorn_iters=None)` | Pointwise $\hat c(u_i, v_i \mid x_i)$. |
+| `log_pdf(u, v, x=None, *, batch_size=None, sinkhorn_iters=None)` | $\log$ of `pdf`, floored at the smallest positive float. |
+| `pdf_grid(u_grid, v_grid, x_row=None, *, batch_size=None, sinkhorn_iters=None)` | Cartesian-grid density `out[i, j] = c(u_grid[i], v_grid[j] | x_row)`.  Available for every backend. |
+| `cdf(u, v, x=None, *, n_int=12, batch_size=None)` | Pointwise joint CDF, trapezoidal in $s$ and $t$. |
+| `cdf_grid(u_grid, v_grid, x_row=None, *, n_int=64)` | Cartesian-grid joint CDF.  Available for every backend. |
+| `hfunc1(u, v, x=None)` | $h_1 = \partial C / \partial u = F_{V \mid U, X}(v \mid u, x)$ (conditions on the first argument; matches `pyvinecopulib`). |
+| `hfunc2(u, v, x=None)` | $h_2 = \partial C / \partial v = F_{U \mid V, X}(u \mid v, x)$. |
+| `tau(x_row=None, *, n=1000, seeds=None)` | Kendall's $\tau(x)$ via [pyvinecopulib](https://github.com/vinecopulib/pyvinecopulib)'s recipe: `ghalton(n, 2)` + inverse-Rosenblatt + `wdm`. |
+| `as_bicop(x_row=None)` | A `pyvinecopulib`-compatible adapter (`var_types = ["c", "c"]`, `pdf(uv)`). |
+| `plot(*, x_row=None, plot_type="contour", margin_type="norm", ...)` | Contour/surface plot via `pyvinecopulib`'s plotter (lazy-imports `matplotlib`). |
 
-| Method                              | What it returns                                                                  |
-| ----------------------------------- | -------------------------------------------------------------------------------- |
-| `fit(u, v, x=None)`                 | Fits the inner predictive-distribution estimator(s).  `x=None` → unconditional fit. |
-| `pdf(u, v, x=None, *, batch_size=None)`                 | Pointwise $\hat c(u_i, v_i \mid x_i)$ (vectorised over rows).                    |
-| `log_pdf(u, v, x=None, *, batch_size=None)`             | $\log$ of `pdf`, floored at the smallest positive float.                         |
-| `pdf_grid(u_grid, v_grid, x_row=None)` | Cartesian-grid density `out[i, j] = c(u_grid[i], v_grid[j] | x_row)`.  Requires `method="criterion"`. |
-| `cdf(u, v, x=None, *, n_int=12, batch_size=None)`    | Pointwise joint CDF $\hat C(u_i, v_i \mid x_i)$, trapezoidal in $s$ and $t$. |
-| `cdf_grid(u_grid, v_grid, x_row=None, *, n_int=64)` | Cartesian-grid joint CDF.  Requires `method="criterion"`.            |
-| `hfunc1(u, v, x=None)`              | $h_1(u, v \mid x) = \partial C / \partial u = F_{V \mid U, X}(v \mid u, x)$.  Always available.  Conditions on the first argument (matches `pyvinecopulib`). |
-| `hfunc2(u, v, x=None)`              | $h_2(u, v \mid x) = \partial C / \partial v = F_{U \mid V, X}(u \mid v, x)$. |
-| `tau(x_row=None, *, n=1000, seeds=None)` | Kendall's $\tau(x)$ via [pyvinecopulib](https://github.com/vinecopulib/pyvinecopulib)'s recipe: quasi-random `ghalton(n, 2)` + inverse-Rosenblatt + `wdm`. Matches `pv.KernelBicop::parameters_to_tau`. |
-| `conditional_cdf_v_given_u(u, v_grid, x=None)` | Diagnostic: $C_{V \mid U, X}(v \mid u_i)$ broadcast over `v_grid`.  Wraps `hfunc2`. |
-| `as_bicop(x_row=None)`              | Returns a [`pyvinecopulib`](https://github.com/vinecopulib/pyvinecopulib)-compatible adapter (exposes `var_types = ["c", "c"]` and `pdf(uv)`). |
-| `plot(*, x_row=None, plot_type="contour", margin_type="norm", ...)` | Renders a contour or surface plot via `pyvinecopulib`'s plotter (lazy-imports `matplotlib`). |
-
-The two concrete subclasses
-(`TabPFNCriterionDistribution1D`, `TabPFNQuantileDistribution1D`) and
-their abstract base (`TabPFNDistribution1D`) are also exported and
-can be used directly for univariate conditional predictive
-distributions outside the copula context.
+Exported names: `RosenblattBicop`, the abstract `ConditionalDistribution1D`
+and `QuantileTableDistribution1D` base classes, `QuantileGridConfig`, the
+`TabPFNCriterionBackend` / `TabPFNQuantileBackend` leaves, and the registry
+helpers `create_backend` / `register_backend` / `available_backends`.
 
 ### Quick start
 
@@ -151,7 +151,7 @@ load_dotenv()  # picks up TABPFN_TOKEN from .env
 import numpy as np
 import pyvinecopulib as pv
 
-from npcc import PFNRBicop
+from npcc import RosenblattBicop
 
 # Simulate from a Clayton bicop
 clayton = pv.Bicop(
@@ -160,14 +160,14 @@ clayton = pv.Bicop(
 )
 u = clayton.simulate(n=1000, seeds=[2, 2, 4])
 
-# Fit the TabPFN-Rosenblatt copula (default method="criterion")
-model = PFNRBicop()
+# Fit the Rosenblatt copula (default backend="tabpfn-criterion")
+model = RosenblattBicop()
 model.fit(u[:, 0], u[:, 1])
 
 # Pointwise density
 print(model.pdf(np.array([0.3, 0.5]), np.array([0.4, 0.6])))
 
-# Cartesian-grid density (fast path, criterion method only)
+# Cartesian-grid density (fast path, any backend)
 u_grid = np.linspace(0.05, 0.95, 30)
 v_grid = np.linspace(0.05, 0.95, 30)
 grid = model.pdf_grid(u_grid, v_grid)   # shape (30, 30)
@@ -178,17 +178,32 @@ h1 = model.hfunc1(np.array([0.3, 0.5]), np.array([0.4, 0.6]))   # F_{V|U,X}
 h2 = model.hfunc2(np.array([0.3, 0.5]), np.array([0.4, 0.6]))   # F_{U|V,X}
 
 # Kendall's tau via the pyvinecopulib quasi-random recipe.
-tau = model.tau()
-# Clayton(theta=3) analytic: theta / (theta + 2) = 0.6.
+tau = model.tau()   # Clayton(theta=3) analytic: theta / (theta + 2) = 0.6
 
 # Plot via pyvinecopulib's helper (matplotlib)
 model.plot(plot_type="contour", margin_type="norm")
 ```
 
-To switch to the quantile-based method:
+To switch backends (TabPFN read-outs need no extra):
 
 ```python
-model = PFNRBicop(method="quantiles")
+model = RosenblattBicop(backend="tabpfn-quantiles")
+
+# Non-TabPFN backends (install the matching extra); backend-specific
+# hyperparameters go in backend_kwargs.
+model = RosenblattBicop(backend="ngboost", backend_kwargs={"n_estimators": 500})
+model = RosenblattBicop(backend="gbm", backend_kwargs={"max_depth": 3})
+model = RosenblattBicop(backend="tabicl")
+```
+
+To pin the TabPFN model version, pass it through `backend_kwargs`:
+
+```python
+from tabpfn.constants import ModelVersion
+model = RosenblattBicop(
+    backend="tabpfn-criterion",
+    backend_kwargs={"model_version": ModelVersion.V3},
+)
 ```
 
 To pass a covariate matrix:
@@ -198,26 +213,13 @@ model.fit(u, v, x=X_train)               # X_train shape (n, p)
 model.pdf(u_query, v_query, x_query)     # x_query shape (n_query, p)
 ```
 
-To plot at a specific covariate row:
-
-```python
-model.plot(x_row=np.array([[1.5, -0.5]]))
-```
-
 ---
 
-## Notebook
+## Notebooks
 
-A worked end-to-end demo lives at
-[`notebooks/pfnr_bicop_demo.ipynb`](notebooks/pfnr_bicop_demo.ipynb).
-It simulates from a Clayton copula, fits `PFNRBicop`, compares against
-the `pv.tll` benchmark on a regular grid (ISE / IAE / KL), renders
-contour plots for the truth, `tll`, and `PFNRBicop`, then prints
-Kendall's tau and a side-by-side joint-CDF heatmap.
-
-```bash
-uv run jupyter lab notebooks/pfnr_bicop_demo.ipynb
-```
+Worked demos live under [`notebooks/`](notebooks/) (Clayton demo,
+conditional copula, Sinkhorn projection, and the simulation study).  They
+require a `TABPFN_TOKEN` (see below) to run against the real TabPFN model.
 
 ---
 
@@ -226,46 +228,45 @@ uv run jupyter lab notebooks/pfnr_bicop_demo.ipynb
 ### Install
 
 ```bash
-# Pick exactly one of: cpu, cu126, cu128, cu130 (PyTorch flavour)
+# Pick exactly one PyTorch flavour: cpu, cu126, cu128, cu130, cu132
 uv sync --extra cpu
+
+# Optionally add non-TabPFN backends:
+uv sync --extra cpu --extra ngboost --extra gbm --extra tabicl
 ```
 
 The package depends on `numpy>=2.0`, `pyvinecopulib>=0.7.5`, and
-`tabpfn>=2.0`.  TabPFN pulls in PyTorch transitively; the extras above
-just pin its build (CPU-only or one of the CUDA variants).
+`tabpfn>=8.0`.  TabPFN pulls in PyTorch transitively; the flavour extras
+just pin its build.
 
 ### Authenticate TabPFN (one-time)
 
 `tabpfn` runs locally but authenticates once via a token from the
 PriorLabs portal.
 
-1. Go to <https://ux.priorlabs.ai>, log in (or register), accept the
-   `priorlabs-1-1` license on the **Licenses** tab, and copy your API
-   key from the **Account** tab.
+1. Go to <https://ux.priorlabs.ai>, log in, accept the `priorlabs-1-1`
+   license on the **Licenses** tab, and copy your API key from the
+   **Account** tab.
 2. Drop it into a `.env` file at the repo root:
 
    ```
    TABPFN_TOKEN="..."
    ```
 
-3. Make sure your code calls `dotenv.load_dotenv()` before instantiating
-   `PFNRBicop`.  Alternatively, just `export TABPFN_TOKEN=...` in your
-   shell.
+3. Call `dotenv.load_dotenv()` before fitting, or `export TABPFN_TOKEN=...`
+   in your shell.
 
-The first call to `model.fit(...)` downloads the TabPFN-v3 regressor
-checkpoint from HuggingFace into the platform cache directory (Linux
-default: `~/.cache/tabpfn/`; override with `TABPFN_MODEL_CACHE_DIR`).
-Subsequent runs are fully offline.
-
-> **Model version:** `PFNRBicop` currently uses TabPFN-v3. Override via 
-`model_kwargs={...}` if needed.
+The first `fit(...)` downloads the TabPFN-v3 regressor checkpoint from
+HuggingFace into the platform cache (Linux default: `~/.cache/tabpfn/`;
+override with `TABPFN_MODEL_CACHE_DIR`).  Subsequent runs are offline.
+(Only relevant to the TabPFN backends.)
 
 ### CPU sample-size cap
 
 TabPFN refuses to fit on more than 1000 samples on CPU by default.  On
-larger samples either use a CUDA build, set the
-`TABPFN_ALLOW_CPU_LARGE_DATASET=1` environment variable, or pass
-`model_kwargs={"ignore_pretraining_limits": True}` to `PFNRBicop`.
+larger samples either use a CUDA build, set
+`TABPFN_ALLOW_CPU_LARGE_DATASET=1`, or pass
+`backend_kwargs={"model_kwargs": {"ignore_pretraining_limits": True}}`.
 
 ---
 
@@ -282,13 +283,10 @@ uv run ty check
 # Tests
 uv run pytest tests/ -v -n auto
 uv run pytest tests/ --cov=src/npcc --cov-report=term-missing -v -n auto
-
-# Run the demo notebook end-to-end
-uv run jupyter nbconvert --to notebook --execute --inplace notebooks/pfnr_bicop_demo.ipynb
 ```
 
-The test suite contains an integration test
-(`tests/test_pfnr_bicop.py::test_real_tabpfn_smoke`) that hits the real
-TabPFN-v3 model.  It is skipped automatically when `TABPFN_TOKEN` is
-unset or when the PriorLabs license endpoint is unreachable, so the
-default unit-test surface stays hermetic.
+The suite is hermetic by default: TabPFN is faked via a monkeypatched
+regressor, and pluggable-backend behaviour is proven end-to-end with a
+TabPFN-free in-process backend.  A few tests hit the real models
+(`test_real_tabpfn_smoke`, the TabICL smoke) and skip automatically when
+their dependency/credentials are absent.

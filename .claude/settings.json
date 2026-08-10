@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python -c *)",
+      "Bash(git restore *)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:arxiv.org)",
+      "Bash(gh api *)",
+      "Bash(uv run python -c ' *)",
+      "Bash(uv run *)",
+      "Bash(git checkout *)",
+      "Bash(gh pr *)",
+      "Bash(python3 *)",
+      "Bash(git ls-tree *)",
+      "Bash(git -C *)",
+      "Bash(echo *)"
+    ]
+  }
+}
