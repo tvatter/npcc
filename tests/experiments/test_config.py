@@ -213,10 +213,10 @@ def test_shipped_study_config_loads() -> None:
   """The committed paper config must load and match the study design."""
   cfg_path = Path(__file__).resolve().parents[2] / "configs" / "study.toml"
   grid = load_grid(cfg_path)
-  assert grid.families == ["clayton", "gumbel", "frank", "gaussian"]
-  assert grid.tau_scenarios == ["linear", "quadratic", "sin"]
-  assert grid.n == [200, 500, 1000]
-  assert grid.n_rep == 5
+  assert grid.families == ["clayton", "gaussian"]
+  assert grid.tau_scenarios == ["linear", "sin"]
+  assert grid.n == [200, 500, 1000, 2000]
+  assert grid.n_rep == 10
   assert grid.normalize == [None]
   assert len(grid.estimators) == 18
   labels = [e.label for e in grid.estimators]
@@ -240,7 +240,7 @@ def test_shipped_study_config_loads() -> None:
     if e.backend.startswith("tabpfn-") and e.backend_kwargs
   }
   assert versions == {"v2.5", "v3"}
-  assert len(grid.cells()) == 4 * 3 * 3 * 5
+  assert len(grid.cells()) == 2 * 2 * 4 * 10
 
 
 def test_runconfig_validates_workers_and_fmt(tmp_path: Path) -> None:

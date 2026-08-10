@@ -763,7 +763,7 @@ class RosenblattBicop(BicopBase[TensorLike]):
   ) -> torch.Tensor:
     """Draw float64 base uniforms on the estimator's configured device."""
     if qrng:
-      from pyvinecopulib import simulate_uniform
+      from pyvinecopulib.utils import simulate_uniform
 
       draws = simulate_uniform(n, 2, qrng=True, seeds=list(seeds))
       return torch.as_tensor(draws, dtype=torch.float64, device=self._device)
@@ -992,7 +992,7 @@ class RosenblattBicop(BicopBase[TensorLike]):
     else:
       seeds_list = list(seeds)
 
-    from pyvinecopulib import ghalton, wdm
+    from pyvinecopulib.utils import ghalton, wdm
 
     quasi = np.asarray(ghalton(n, 2, seeds_list), dtype=float)
     eps = self.quantile_config.eps

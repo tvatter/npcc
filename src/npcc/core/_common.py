@@ -27,10 +27,19 @@ TensorLike = np.ndarray | torch.Tensor
 
 
 def _resolve_device(device: str | torch.device | None) -> torch.device:
-  """Resolve ``None`` to ``cuda`` if available, else ``cpu``."""
+  """Resolve ``None`` to ``cuda`` if available, else ``cpu``.
+
+  A bare ``cuda`` device (no index) is normalised to ``cuda:<current index>``
+  so it compares equal to the device tensors actually materialise on (e.g.
+  ``cuda:0``); ``torch.device("cuda") != torch.device("cuda:0")`` otherwise.
+  """
   if device is None:
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-  return torch.device(device)
+    resolved = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+  else:
+    resolved = torch.device(device)
+  if resolved.type == "cuda" and resolved.index is None:
+    resolved = torch.device("cuda", torch.cuda.current_device())
+  return resolved
 
 
 def _to_tensor(
