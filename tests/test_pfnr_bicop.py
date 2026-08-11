@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 import torch
+from pyvinecopulib.core import BicopBase, BicopLike
 
 from npcc.core.backends.tabpfn_criterion import TabPFNCriterionBackend
 from npcc.core.backends.tabpfn_quantile import TabPFNQuantileBackend
@@ -27,6 +28,11 @@ def make_pfnr(method: str = "quantiles") -> RosenblattBicop:
 
 
 class TestPFNRInit:
+  def test_implements_bicop_contract(self) -> None:
+    m = RosenblattBicop()
+    assert isinstance(m, BicopBase)
+    assert isinstance(m, BicopLike)
+
   def test_default_is_criterion(self) -> None:
     m = RosenblattBicop()
     assert m.backend == "tabpfn-criterion"
@@ -93,6 +99,20 @@ class TestPFNRInit:
 
 @pytest.mark.parametrize("method", ["quantiles", "criterion"])
 class TestPFNRValidation:
+  @pytest.mark.parametrize(
+    "uv",
+    [
+      np.array([0.2, 0.3]),
+      np.ones((2, 1)),
+      np.ones((2, 3)),
+    ],
+  )
+  def test_fit_rejects_invalid_uv_shape(
+    self, patch_uniform: None, method: str, uv: np.ndarray
+  ) -> None:
+    with pytest.raises(ValueError, match=r"shape \(n, 2\)"):
+      make_pfnr(method=method).fit(uv)
+
   def test_fit_rejects_x_length_mismatch(
     self, patch_uniform: None, method: str
   ) -> None:
@@ -101,7 +121,7 @@ class TestPFNRValidation:
     v = rng.uniform(0.1, 0.9, 10)
     x = rng.normal(size=(5, 2))
     with pytest.raises(ValueError, match="same number"):
-      make_pfnr(method=method).fit(u, v, x)
+      make_pfnr(method=method).fit(np.column_stack([u, v]), x)
 
   def test_pdf_rejects_x_length_mismatch(
     self, patch_uniform: None, method: str
@@ -109,9 +129,9 @@ class TestPFNRValidation:
     rng = np.random.default_rng(0)
     u = rng.uniform(0.1, 0.9, 10)
     v = rng.uniform(0.1, 0.9, 10)
-    m = make_pfnr(method=method).fit(u, v)
+    m = make_pfnr(method=method).fit(np.column_stack([u, v]))
     with pytest.raises(ValueError, match="same number"):
-      m.pdf(u, v, rng.normal(size=(5, 2)))
+      m.pdf(np.column_stack([u, v]), rng.normal(size=(5, 2)))
 
   def test_fit_rejects_uv_outside_unit(
     self, patch_uniform: None, method: str
@@ -119,7 +139,7 @@ class TestPFNRValidation:
     u = np.array([0.5, 0.0])
     v = np.array([0.3, 0.4])
     with pytest.raises(ValueError, match="strictly inside"):
-      make_pfnr(method=method).fit(u, v)
+      make_pfnr(method=method).fit(np.column_stack([u, v]))
 
 
 def test_sinkhorn_project_rejects_nonpositive_iters() -> None:
@@ -148,28 +168,28 @@ class TestPFNRDensity:
     rng = np.random.default_rng(0)
     u = rng.uniform(0.15, 0.85, 30)
     v = rng.uniform(0.15, 0.85, 30)
-    m = make_pfnr(method=method).fit(u, v)
-    out = m.pdf(u, v)
+    m = make_pfnr(method=method).fit(np.column_stack([u, v]))
+    out = m.pdf(np.column_stack([u, v]))
     assert out.shape == (30,)
 
   def test_pdf_nonnegative(self, patch_uniform: None, method: str) -> None:
     rng = np.random.default_rng(1)
     u = rng.uniform(0.15, 0.85, 30)
     v = rng.uniform(0.15, 0.85, 30)
-    m = make_pfnr(method=method).fit(u, v)
-    out = m.pdf(u, v)
+    m = make_pfnr(method=method).fit(np.column_stack([u, v]))
+    out = m.pdf(np.column_stack([u, v]))
     assert (out >= 0).all()
 
-  def test_pdf_x_default_is_constant(
+  def test_pdf_x_default_has_no_external_features(
     self, patch_uniform: None, method: str
   ) -> None:
     rng = np.random.default_rng(2)
     u = rng.uniform(0.15, 0.85, 20)
     v = rng.uniform(0.15, 0.85, 20)
-    m = make_pfnr(method=method).fit(u, v)
+    m = make_pfnr(method=method).fit(np.column_stack([u, v]))
 
-    out_default = m.pdf(u, v)
-    out_explicit = m.pdf(u, v, x=np.ones((len(u), 1)))
+    out_default = m.pdf(np.column_stack([u, v]))
+    out_explicit = m.pdf(np.column_stack([u, v]), x=np.empty((len(u), 0)))
     np.testing.assert_allclose(out_default, out_explicit)
 
   def test_pdf_with_2d_x(self, patch_uniform: None, method: str) -> None:
@@ -177,8 +197,8 @@ class TestPFNRDensity:
     u = rng.uniform(0.15, 0.85, 25)
     v = rng.uniform(0.15, 0.85, 25)
     x = rng.normal(size=(25, 3))
-    m = make_pfnr(method=method).fit(u, v, x)
-    out = m.pdf(u, v, x)
+    m = make_pfnr(method=method).fit(np.column_stack([u, v]), x)
+    out = m.pdf(np.column_stack([u, v]), x)
     assert out.shape == (25,)
     assert (out >= 0).all()
 
@@ -188,7 +208,7 @@ class TestPFNRDensity:
     rng = np.random.default_rng(4)
     u = rng.uniform(0.15, 0.85, 20)
     v = rng.uniform(0.15, 0.85, 20)
-    m = make_pfnr(method=method).fit(u, v)
+    m = make_pfnr(method=method).fit(np.column_stack([u, v]))
 
     x_default = np.ones((len(u), 1))
     c_v = m.v_given_ux_.pdf(np.column_stack([u, x_default]), v)
@@ -196,7 +216,9 @@ class TestPFNRDensity:
     c_u = m.u_given_vx_.pdf(np.column_stack([v, x_default]), u)
     expected = 0.5 * (c_v + c_u)
 
-    np.testing.assert_allclose(m.pdf(u, v), expected, atol=1e-12)
+    np.testing.assert_allclose(
+      m.pdf(np.column_stack([u, v])), expected, atol=1e-12
+    )
 
   def test_log_density_matches_log_of_density(
     self, patch_uniform: None, method: str
@@ -204,9 +226,11 @@ class TestPFNRDensity:
     rng = np.random.default_rng(6)
     u = rng.uniform(0.15, 0.85, 15)
     v = rng.uniform(0.15, 0.85, 15)
-    m = make_pfnr(method=method).fit(u, v)
-    expected = np.log(np.maximum(m.pdf(u, v), np.finfo(float).tiny))
-    np.testing.assert_allclose(m.log_pdf(u, v), expected)
+    m = make_pfnr(method=method).fit(np.column_stack([u, v]))
+    expected = np.log(
+      np.maximum(m.pdf(np.column_stack([u, v])), np.finfo(float).tiny)
+    )
+    np.testing.assert_allclose(m.log_pdf(np.column_stack([u, v])), expected)
 
   def test_pdf_forwards_per_call_batch_size(
     self,
@@ -218,7 +242,9 @@ class TestPFNRDensity:
     rng = np.random.default_rng(16)
     u = rng.uniform(0.15, 0.85, 18)
     v = rng.uniform(0.15, 0.85, 18)
-    m = RosenblattBicop(backend="tabpfn-criterion", batch_size=31).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", batch_size=31).fit(
+      np.column_stack([u, v])
+    )
 
     captured: list[int | None] = []
     original_pdf = TabPFNCriterionBackend.pdf
@@ -235,7 +261,7 @@ class TestPFNRDensity:
 
     monkeypatch.setattr(TabPFNCriterionBackend, "pdf", _spy_pdf)
 
-    m.pdf(u, v, batch_size=17)
+    m.pdf(np.column_stack([u, v]), batch_size=17)
     assert captured
     assert all(size == 17 for size in captured)
 
@@ -249,7 +275,9 @@ class TestPFNRDensity:
     rng = np.random.default_rng(17)
     u = rng.uniform(0.15, 0.85, 18)
     v = rng.uniform(0.15, 0.85, 18)
-    m = RosenblattBicop(backend="tabpfn-criterion", batch_size=29).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", batch_size=29).fit(
+      np.column_stack([u, v])
+    )
 
     captured: list[int | None] = []
     original_pdf = TabPFNCriterionBackend.pdf
@@ -266,7 +294,7 @@ class TestPFNRDensity:
 
     monkeypatch.setattr(TabPFNCriterionBackend, "pdf", _spy_pdf)
 
-    m.pdf(u, v)
+    m.pdf(np.column_stack([u, v]))
     assert captured
     assert all(size == 29 for size in captured)
 
@@ -280,7 +308,9 @@ class TestPFNRDensity:
     rng = np.random.default_rng(18)
     u = rng.uniform(0.15, 0.85, 18)
     v = rng.uniform(0.15, 0.85, 18)
-    m = RosenblattBicop(backend="tabpfn-criterion", batch_size=31).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", batch_size=31).fit(
+      np.column_stack([u, v])
+    )
 
     captured: list[int | None] = []
     original_cdf = TabPFNCriterionBackend.cdf
@@ -297,7 +327,7 @@ class TestPFNRDensity:
 
     monkeypatch.setattr(TabPFNCriterionBackend, "cdf", _spy_cdf)
 
-    m.cdf(u, v, n_int=8, batch_size=19)
+    m.cdf(np.column_stack([u, v]), n_int=8, batch_size=19)
     assert captured
     assert all(size == 19 for size in captured)
 
@@ -315,10 +345,11 @@ class TestMethodsAgree:
     u = rng.uniform(0.2, 0.8, 30)
     v = rng.uniform(0.2, 0.8, 30)
 
-    m_q = make_pfnr(method="quantiles").fit(u, v)
-    m_c = make_pfnr(method="criterion").fit(u, v)
+    m_q = make_pfnr(method="quantiles").fit(np.column_stack([u, v]))
+    m_c = make_pfnr(method="criterion").fit(np.column_stack([u, v]))
 
-    np.testing.assert_allclose(m_q.pdf(u, v), m_c.pdf(u, v), atol=1e-6)
+    uv = np.column_stack([u, v])
+    np.testing.assert_allclose(m_q.pdf(uv), m_c.pdf(uv), atol=1e-6)
 
 
 # ===========================================================================
@@ -331,7 +362,7 @@ class TestPFNRDensityGrid:
     rng = np.random.default_rng(12)
     u = rng.uniform(0.2, 0.8, 25)
     v = rng.uniform(0.2, 0.8, 25)
-    return make_pfnr(method="criterion").fit(u, v)
+    return make_pfnr(method="criterion").fit(np.column_stack([u, v]))
 
   def test_grid_shape(self, patch_uniform: None) -> None:
     m = self._fit_criterion()
@@ -348,7 +379,9 @@ class TestPFNRDensityGrid:
 
     u_tile = np.repeat(u_g, len(v_g))
     v_tile = np.tile(v_g, len(u_g))
-    expected = m.pdf(u_tile, v_tile).reshape(len(u_g), len(v_g))
+    expected = m.pdf(np.column_stack([u_tile, v_tile])).reshape(
+      len(u_g), len(v_g)
+    )
     np.testing.assert_allclose(grid, expected, atol=1e-6)
 
   def test_grid_with_x_row(self, patch_uniform: None) -> None:
@@ -365,14 +398,16 @@ class TestPFNRDensityGrid:
     rng = np.random.default_rng(13)
     u = rng.uniform(0.2, 0.8, 10)
     v = rng.uniform(0.2, 0.8, 10)
-    m = make_pfnr(method="quantiles").fit(u, v)
+    m = make_pfnr(method="quantiles").fit(np.column_stack([u, v]))
     u_g = np.array([0.3, 0.5])
     v_g = np.array([0.4, 0.6])
     grid = m.pdf_grid(u_g, v_g)
     assert grid.shape == (2, 2)
     u_tile = np.repeat(u_g, len(v_g))
     v_tile = np.tile(v_g, len(u_g))
-    expected = m.pdf(u_tile, v_tile).reshape(len(u_g), len(v_g))
+    expected = m.pdf(np.column_stack([u_tile, v_tile])).reshape(
+      len(u_g), len(v_g)
+    )
     np.testing.assert_allclose(grid, expected, atol=1e-10)
 
   def test_grid_rejects_grid_outside_unit(self, patch_uniform: None) -> None:
@@ -403,7 +438,7 @@ class TestPFNRDensityGrid:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = RosenblattBicop(backend="tabpfn-quantiles").fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-quantiles").fit(np.column_stack([u, v]))
     u_g = torch.linspace(0.25, 0.75, 4, dtype=torch.float64, device=m._device)
     v_g = torch.linspace(0.3, 0.7, 5, dtype=torch.float64, device=m._device)
     x_row = torch.ones((1, 1), dtype=torch.float64, device=m._device)
@@ -413,7 +448,9 @@ class TestPFNRDensityGrid:
 
     u_tile = u_g.repeat_interleave(v_g.shape[0])
     v_tile = v_g.tile(u_g.shape[0])
-    expected = m.pdf(u_tile, v_tile).reshape(u_g.shape[0], v_g.shape[0])
+    expected = m.pdf(torch.column_stack([u_tile, v_tile])).reshape(
+      u_g.shape[0], v_g.shape[0]
+    )
     assert isinstance(expected, torch.Tensor)
     np.testing.assert_allclose(
       grid.cpu().numpy(), expected.cpu().numpy(), atol=1e-10
@@ -440,41 +477,41 @@ class TestPFNRHfunc1:
 
   def test_shape(self, patch_uniform: None, method: str) -> None:
     m = make_pfnr(method=method).fit(
-      np.linspace(0.1, 0.9, 30), np.linspace(0.1, 0.9, 30)
+      np.column_stack([np.linspace(0.1, 0.9, 30), np.linspace(0.1, 0.9, 30)])
     )
     u = np.array([0.3, 0.5, 0.7])
     v = np.array([0.4, 0.5, 0.6])
-    assert m.hfunc1(u, v).shape == (3,)
+    assert m.hfunc1(np.column_stack([u, v])).shape == (3,)
 
   def test_matches_analytic_uniform(
     self, patch_uniform: None, method: str
   ) -> None:
     """Under the fake, h₁(u, v) = F_Y(v) (constant in u)."""
     m = make_pfnr(method=method).fit(
-      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+      np.column_stack([np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)])
     )
     u = np.array([0.3, 0.5, 0.7])
     v = np.array([0.3, 0.5, 0.7])
-    actual = m.hfunc1(u, v)
+    actual = m.hfunc1(np.column_stack([u, v]))
     expected = _analytic_F_y(v)
     np.testing.assert_allclose(actual, expected, atol=1e-3)
 
   def test_monotone_in_v(self, patch_uniform: None, method: str) -> None:
     m = make_pfnr(method=method).fit(
-      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+      np.column_stack([np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)])
     )
     v_sorted = np.linspace(0.1, 0.9, 15)
     u_const = np.full(len(v_sorted), 0.5)
-    h = m.hfunc1(u_const, v_sorted)
+    h = m.hfunc1(np.column_stack([u_const, v_sorted]))
     assert (np.diff(h) >= -1e-9).all()
 
   def test_boundary_values(self, patch_uniform: None, method: str) -> None:
     m = make_pfnr(method=method).fit(
-      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+      np.column_stack([np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)])
     )
     # logit(0.05) = -2.94 < -2 → F → 0; logit(0.95) = 2.94 > 2 → F → 1.
-    h_low = m.hfunc1(np.array([0.5]), np.array([0.05]))
-    h_high = m.hfunc1(np.array([0.5]), np.array([0.95]))
+    h_low = m.hfunc1(np.array([[0.5, 0.05]]))
+    h_high = m.hfunc1(np.array([[0.5, 0.95]]))
     assert h_low[0] < 0.05
     assert h_high[0] > 0.95
 
@@ -485,12 +522,86 @@ class TestPFNRHfunc2:
 
   def test_returns_F_U_given_V(self, patch_uniform: None, method: str) -> None:
     m = make_pfnr(method=method).fit(
-      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+      np.column_stack([np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)])
     )
     u = np.array([0.3, 0.5, 0.7])
     v = np.array([0.4, 0.5, 0.6])
     expected = m.u_given_vx_.cdf(np.column_stack([v, np.ones(len(u))]), u)
-    np.testing.assert_allclose(m.hfunc2(u, v), expected, atol=1e-12)
+    np.testing.assert_allclose(
+      m.hfunc2(np.column_stack([u, v])), expected, atol=1e-12
+    )
+
+
+@pytest.mark.parametrize("method", ["quantiles", "criterion"])
+class TestPFNRInheritedAPI:
+  def _fit(self, method: str) -> RosenblattBicop:
+    uv = np.column_stack(
+      [np.linspace(0.1, 0.9, 30), np.linspace(0.15, 0.85, 30)]
+    )
+    return make_pfnr(method=method).fit(uv)
+
+  def test_native_inverse_hfuncs(
+    self, patch_uniform: None, method: str
+  ) -> None:
+    m = self._fit(method)
+    u = np.array([0.25, 0.5, 0.75])
+    v = np.array([0.3, 0.55, 0.7])
+
+    alpha1 = np.asarray(m.hfunc1(np.column_stack([u, v])))
+    alpha2 = np.asarray(m.hfunc2(np.column_stack([u, v])))
+    np.testing.assert_allclose(
+      m.hinv1(np.column_stack([u, alpha1])), v, atol=2e-2
+    )
+    np.testing.assert_allclose(
+      m.hinv2(np.column_stack([alpha2, v])), u, atol=2e-2
+    )
+
+  def test_inherited_loglik(self, patch_uniform: None, method: str) -> None:
+    m = self._fit(method)
+    uv = np.array([[0.3, 0.4], [0.5, 0.6], [0.7, 0.8]])
+    expected = np.log(np.clip(m.pdf(uv), 1e-20, None)).sum()
+    assert m.loglik(uv) == pytest.approx(expected)
+
+  def test_simulate_seed_dtype_and_inverse_rosenblatt(
+    self, patch_uniform: None, method: str
+  ) -> None:
+    m = self._fit(method)
+    first = m.simulate(12, seeds=[42])
+    second = m.simulate(12, seeds=[42])
+
+    assert isinstance(first, torch.Tensor)
+    assert first.shape == (12, 2)
+    assert first.dtype == torch.float64
+    assert first.device == m._device
+    torch.testing.assert_close(first, second)
+    recovered = m.hfunc1(first)
+    assert isinstance(recovered, torch.Tensor)
+    assert torch.all((recovered > 0.0) & (recovered < 1.0))
+
+  def test_simulate_qrng_with_conditional_x(
+    self, patch_uniform: None, method: str
+  ) -> None:
+    uv = np.column_stack(
+      [np.linspace(0.1, 0.9, 30), np.linspace(0.15, 0.85, 30)]
+    )
+    x = np.linspace(-1.0, 1.0, 30)[:, None]
+    m = make_pfnr(method=method).fit(uv, x)
+    out = m.simulate(
+      8,
+      x=torch.linspace(-0.5, 0.5, 8)[:, None],
+      qrng=True,
+      seeds=[1, 2, 3, 4, 5],
+    )
+    assert isinstance(out, torch.Tensor)
+    assert out.shape == (8, 2)
+    assert out.dtype == torch.float64
+    assert out.device == m._device
+
+  def test_flip_remains_unsupported(
+    self, patch_uniform: None, method: str
+  ) -> None:
+    with pytest.raises(NotImplementedError):
+      self._fit(method).flip()
 
 
 # ===========================================================================
@@ -502,22 +613,22 @@ class TestPFNRHfunc2:
 class TestPFNRCdf:
   def test_shape(self, patch_uniform: None, method: str) -> None:
     m = make_pfnr(method=method).fit(
-      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+      np.column_stack([np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)])
     )
     u = np.array([0.3, 0.5, 0.7])
     v = np.array([0.4, 0.5, 0.6])
-    assert m.cdf(u, v).shape == (3,)
+    assert m.cdf(np.column_stack([u, v])).shape == (3,)
 
   def test_independent_factorisation(
     self, patch_uniform: None, method: str
   ) -> None:
     """Under the fake (Z independent of W), C(u, v) ≈ F_Y(u) F_Y(v)."""
     m = make_pfnr(method=method).fit(
-      np.linspace(0.1, 0.9, 30), np.linspace(0.1, 0.9, 30)
+      np.column_stack([np.linspace(0.1, 0.9, 30), np.linspace(0.1, 0.9, 30)])
     )
     u = np.array([0.3, 0.5, 0.7])
     v = np.array([0.6, 0.5, 0.4])
-    actual = m.cdf(u, v, n_int=128)
+    actual = m.cdf(np.column_stack([u, v]), n_int=128)
     expected = _analytic_F_y(u) * _analytic_F_y(v)
     np.testing.assert_allclose(actual, expected, atol=2e-2)
 
@@ -525,23 +636,23 @@ class TestPFNRCdf:
     self, patch_uniform: None, method: str
   ) -> None:
     m = make_pfnr(method=method).fit(
-      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+      np.column_stack([np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)])
     )
     with pytest.raises(ValueError, match="strictly inside"):
-      m.cdf(np.array([0.5, 0.0]), np.array([0.3, 0.4]))
+      m.cdf(np.array([[0.5, 0.3], [0.0, 0.4]]))
 
   def test_rejects_bad_n_int(self, patch_uniform: None, method: str) -> None:
     m = make_pfnr(method=method).fit(
-      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+      np.column_stack([np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)])
     )
     with pytest.raises(ValueError, match="n_int"):
-      m.cdf(np.array([0.5]), np.array([0.5]), n_int=1)
+      m.cdf(np.array([[0.5, 0.5]]), n_int=1)
 
 
 class TestPFNRCdfGrid:
   def _fit(self) -> RosenblattBicop:
     return make_pfnr(method="criterion").fit(
-      np.linspace(0.1, 0.9, 30), np.linspace(0.1, 0.9, 30)
+      np.column_stack([np.linspace(0.1, 0.9, 30), np.linspace(0.1, 0.9, 30)])
     )
 
   def test_shape(self, patch_uniform: None) -> None:
@@ -559,12 +670,14 @@ class TestPFNRCdfGrid:
 
     u_tile = np.repeat(u_g, len(v_g))
     v_tile = np.tile(v_g, len(u_g))
-    expected = m.cdf(u_tile, v_tile, n_int=128).reshape(len(u_g), len(v_g))
+    expected = m.cdf(np.column_stack([u_tile, v_tile]), n_int=128).reshape(
+      len(u_g), len(v_g)
+    )
     np.testing.assert_allclose(grid, expected, atol=2e-2)
 
   def test_available_for_quantiles_method(self, patch_uniform: None) -> None:
     m = make_pfnr(method="quantiles").fit(
-      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+      np.column_stack([np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)])
     )
     out = m.cdf_grid(np.array([0.3, 0.5]), np.array([0.4, 0.6]))
     assert out.shape == (2, 2)
@@ -593,7 +706,7 @@ class TestPFNRTau:
   ) -> None:
     """Under the fake, Z components are independent → τ ≈ 0."""
     m = make_pfnr(method=method).fit(
-      np.linspace(0.1, 0.9, 30), np.linspace(0.1, 0.9, 30)
+      np.column_stack([np.linspace(0.1, 0.9, 30), np.linspace(0.1, 0.9, 30)])
     )
     tau = m.tau(n=1000)
     # Quasi-random + wdm should give a small non-zero residual.
@@ -603,7 +716,7 @@ class TestPFNRTau:
     self, patch_uniform: None, method: str
   ) -> None:
     m = make_pfnr(method=method).fit(
-      np.linspace(0.1, 0.9, 30), np.linspace(0.1, 0.9, 30)
+      np.column_stack([np.linspace(0.1, 0.9, 30), np.linspace(0.1, 0.9, 30)])
     )
     tau = m.tau()
     assert isinstance(tau, float)
@@ -611,7 +724,7 @@ class TestPFNRTau:
 
   def test_rejects_small_n(self, patch_uniform: None, method: str) -> None:
     m = make_pfnr(method=method).fit(
-      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+      np.column_stack([np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)])
     )
     with pytest.raises(ValueError, match="n must be at least"):
       m.tau(n=5)
@@ -620,7 +733,7 @@ class TestPFNRTau:
     self, patch_uniform: None, method: str
   ) -> None:
     m = make_pfnr(method=method).fit(
-      np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)
+      np.column_stack([np.linspace(0.1, 0.9, 20), np.linspace(0.1, 0.9, 20)])
     )
     s = [1, 2, 3, 4, 5]
     tau_a = m.tau(n=200, seeds=s)
@@ -638,7 +751,7 @@ class TestPFNRAdapter:
     rng = np.random.default_rng(20)
     u = rng.uniform(0.2, 0.8, 25)
     v = rng.uniform(0.2, 0.8, 25)
-    return make_pfnr(method=method).fit(u, v)
+    return make_pfnr(method=method).fit(np.column_stack([u, v]))
 
   def test_var_types_is_two_continuous(self, patch_uniform: None) -> None:
     m = self._fit()
@@ -653,9 +766,7 @@ class TestPFNRAdapter:
   def test_pdf_matches_density(self, patch_uniform: None) -> None:
     m = self._fit(method="quantiles")  # avoid Cartesian fast path
     uv = np.array([[0.3, 0.4], [0.5, 0.6], [0.7, 0.2]])
-    np.testing.assert_allclose(
-      m.as_bicop().pdf(uv), m.pdf(uv[:, 0], uv[:, 1]), atol=1e-12
-    )
+    np.testing.assert_allclose(m.as_bicop().pdf(uv), m.pdf(uv), atol=1e-12)
 
   def test_pdf_cartesian_fast_path_matches_density(
     self, patch_uniform: None
@@ -667,7 +778,7 @@ class TestPFNRAdapter:
     uv = np.column_stack([grid_u.flatten(), grid_v.flatten()])
 
     actual = m.as_bicop().pdf(uv)
-    expected = m.pdf(uv[:, 0], uv[:, 1])
+    expected = m.pdf(uv)
     np.testing.assert_allclose(actual, expected, atol=1e-6)
 
   def test_pdf_rejects_bad_shape(self, patch_uniform: None) -> None:
@@ -703,7 +814,7 @@ class TestPFNRPlot:
     rng = np.random.default_rng(99)
     u = rng.uniform(0.15, 0.85, 20)
     v = rng.uniform(0.15, 0.85, 20)
-    m = make_pfnr(method="criterion").fit(u, v)
+    m = make_pfnr(method="criterion").fit(np.column_stack([u, v]))
 
     try:
       m.plot(grid_size=8, plot_type="contour", margin_type="norm")
@@ -737,14 +848,14 @@ def test_real_tabpfn_smoke() -> None:
   u, v = uv[:, 0], uv[:, 1]
 
   try:
-    m = RosenblattBicop().fit(u, v)
+    m = RosenblattBicop().fit(np.column_stack([u, v]))
   except TabPFNLicenseError as exc:
     pytest.skip(f"TabPFN authentication unavailable: {exc}")
 
   # Density: finite + positive on a few points.
   query_u = np.array([0.3, 0.5, 0.7])
   query_v = np.array([0.3, 0.5, 0.7])
-  dens = m.pdf(query_u, query_v)
+  dens = m.pdf(np.column_stack([query_u, query_v]))
   assert dens.shape == (3,)
   assert np.all(np.isfinite(dens))
   assert np.all(dens > 0)
@@ -752,13 +863,13 @@ def test_real_tabpfn_smoke() -> None:
   # h-function: hfunc1(u, v) = F_{V|U,X}(v|u,x) ∈ [0, 1], monotone in v.
   v_sorted = np.linspace(0.1, 0.9, 6)
   u_const = np.full(len(v_sorted), 0.5)
-  h1 = m.hfunc1(u_const, v_sorted)
+  h1 = m.hfunc1(np.column_stack([u_const, v_sorted]))
   assert h1.shape == (6,)
   assert (h1 >= 0).all() and (h1 <= 1).all()
   assert (np.diff(h1) >= -1e-6).all()
 
   # Joint CDF: in [0, 1] and roughly monotone.
-  big_c = m.cdf(query_u, query_v, n_int=32)
+  big_c = m.cdf(np.column_stack([query_u, query_v]), n_int=32)
   assert (big_c >= 0).all() and (big_c <= 1).all()
 
   # Kendall's tau via ghalton + inverse-Rosenblatt + wdm.  Under
@@ -782,8 +893,8 @@ class TestPFNRInputTypes:
     rng = np.random.default_rng(0)
     u = rng.uniform(0.2, 0.8, 8)
     v = rng.uniform(0.2, 0.8, 8)
-    m = make_pfnr(method=method).fit(u, v)
-    out = m.pdf(u, v)
+    m = make_pfnr(method=method).fit(np.column_stack([u, v]))
+    out = m.pdf(np.column_stack([u, v]))
     assert isinstance(out, np.ndarray)
     assert out.shape == (8,)
 
@@ -793,8 +904,9 @@ class TestPFNRInputTypes:
     rng = np.random.default_rng(0)
     u = torch.as_tensor(rng.uniform(0.2, 0.8, 8))
     v = torch.as_tensor(rng.uniform(0.2, 0.8, 8))
-    m = make_pfnr(method=method).fit(u, v)
-    out = m.pdf(u, v)
+    uv = torch.column_stack([u, v])
+    m = make_pfnr(method=method).fit(uv)
+    out = m.pdf(uv)
     assert isinstance(out, torch.Tensor)
     assert out.shape == (8,)
 
@@ -804,9 +916,19 @@ class TestPFNRInputTypes:
     rng = np.random.default_rng(0)
     u_np = rng.uniform(0.2, 0.8, 8)
     v_t = torch.as_tensor(rng.uniform(0.2, 0.8, 8))
-    m = make_pfnr(method=method).fit(u_np, v_t)
-    out = m.pdf(u_np, v_t)
+    uv_t = torch.column_stack([torch.as_tensor(u_np), v_t])
+    m = make_pfnr(method=method).fit(uv_t)
+    out = m.pdf(uv_t)
     assert isinstance(out, torch.Tensor)
+
+  def test_x_type_does_not_change_uv_return_routing(
+    self, patch_uniform: None, method: str
+  ) -> None:
+    uv_np = np.array([[0.3, 0.4], [0.6, 0.7]])
+    x_t = torch.ones((2, 1))
+    m = make_pfnr(method=method).fit(uv_np, x_t)
+    assert isinstance(m.pdf(uv_np, x_t), np.ndarray)
+    assert isinstance(m.pdf(torch.as_tensor(uv_np), x_t), torch.Tensor)
 
   def test_torch_inputs_match_numpy_results(
     self, patch_uniform: None, method: str
@@ -814,10 +936,12 @@ class TestPFNRInputTypes:
     rng = np.random.default_rng(7)
     u_np = rng.uniform(0.2, 0.8, 12)
     v_np = rng.uniform(0.2, 0.8, 12)
-    m = make_pfnr(method=method).fit(u_np, v_np)
+    m = make_pfnr(method=method).fit(np.column_stack([u_np, v_np]))
 
-    np_out = m.pdf(u_np, v_np)
-    torch_out = m.pdf(torch.as_tensor(u_np), torch.as_tensor(v_np))
+    np_out = m.pdf(np.column_stack([u_np, v_np]))
+    torch_out = m.pdf(
+      torch.column_stack([torch.as_tensor(u_np), torch.as_tensor(v_np)])
+    )
     assert isinstance(np_out, np.ndarray)
     assert isinstance(torch_out, torch.Tensor)
     np.testing.assert_allclose(
@@ -831,9 +955,16 @@ class TestPFNRCUDA:
     rng = np.random.default_rng(0)
     u = rng.uniform(0.2, 0.8, 8)
     v = rng.uniform(0.2, 0.8, 8)
-    m = RosenblattBicop(backend="tabpfn-criterion", device="cuda").fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", device="cuda").fit(
+      np.column_stack([u, v])
+    )
     out = m.pdf(
-      torch.as_tensor(u, device="cuda"), torch.as_tensor(v, device="cuda")
+      torch.column_stack(
+        [
+          torch.as_tensor(u, device="cuda"),
+          torch.as_tensor(v, device="cuda"),
+        ]
+      )
     )
     assert isinstance(out, torch.Tensor)
     assert out.device.type == "cuda"
@@ -857,16 +988,17 @@ class TestSinkhornProjection:
 
     m_no_sinkhorn = RosenblattBicop(
       backend="tabpfn-criterion", sinkhorn_iters=None
-    ).fit(u, v)
+    ).fit(np.column_stack([u, v]))
     m_with_sinkhorn_none = RosenblattBicop(
       backend="tabpfn-criterion", sinkhorn_iters=None
-    ).fit(u, v)
+    ).fit(np.column_stack([u, v]))
 
     u_test = np.array([0.3, 0.5, 0.7])
     v_test = np.array([0.4, 0.5, 0.6])
 
-    out1 = m_no_sinkhorn.pdf(u_test, v_test)
-    out2 = m_with_sinkhorn_none.pdf(u_test, v_test)
+    uv_test = np.column_stack([u_test, v_test])
+    out1 = m_no_sinkhorn.pdf(uv_test)
+    out2 = m_with_sinkhorn_none.pdf(uv_test)
 
     np.testing.assert_allclose(out1, out2, atol=1e-12)
 
@@ -888,12 +1020,14 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=3).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=3).fit(
+      np.column_stack([u, v])
+    )
 
     u_test = np.linspace(0.25, 0.75, 10)
     v_test = np.linspace(0.25, 0.75, 10)
 
-    out = m.pdf(u_test, v_test)
+    out = m.pdf(np.column_stack([u_test, v_test]))
     assert out.shape == (10,)
 
   def test_sinkhorn_pdf_nonnegative(self, patch_uniform: None) -> None:
@@ -902,12 +1036,14 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=5).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=5).fit(
+      np.column_stack([u, v])
+    )
 
     u_test = np.linspace(0.25, 0.75, 15)
     v_test = np.linspace(0.25, 0.75, 15)
 
-    out = m.pdf(u_test, v_test)
+    out = m.pdf(np.column_stack([u_test, v_test]))
     assert (out >= -1e-10).all(), "Projected density has negative values"
 
   def test_sinkhorn_grid_borders_cached(self, patch_uniform: None) -> None:
@@ -916,7 +1052,9 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=5).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=5).fit(
+      np.column_stack([u, v])
+    )
 
     assert m._u_grid_borders_ is not None
     assert m._v_grid_borders_ is not None
@@ -936,7 +1074,7 @@ class TestSinkhornProjection:
     v = rng.uniform(0.2, 0.8, 20)
 
     m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=None).fit(
-      u, v
+      np.column_stack([u, v])
     )
 
     assert m._u_grid_borders_ is None
@@ -948,7 +1086,9 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=3).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=3).fit(
+      np.column_stack([u, v])
+    )
 
     u_grid = np.linspace(0.3, 0.7, 5)
     v_grid = np.linspace(0.3, 0.7, 5)
@@ -971,9 +1111,9 @@ class TestSinkhornProjection:
 
     m_no_proj = RosenblattBicop(
       backend="tabpfn-criterion", sinkhorn_iters=None
-    ).fit(u, v)
+    ).fit(np.column_stack([u, v]))
     m_proj = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=5).fit(
-      u, v
+      np.column_stack([u, v])
     )
 
     u_grid = np.linspace(0.2, 0.8, 15)
@@ -1015,12 +1155,14 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = RosenblattBicop(backend="tabpfn-quantiles", sinkhorn_iters=3).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-quantiles", sinkhorn_iters=3).fit(
+      np.column_stack([u, v])
+    )
 
     u_test = np.array([0.3, 0.5, 0.7])
     v_test = np.array([0.4, 0.5, 0.6])
 
-    out = m.pdf(u_test, v_test)
+    out = m.pdf(np.column_stack([u_test, v_test]))
     assert out.shape == (3,)
     assert (out >= -1e-10).all()
 
@@ -1032,7 +1174,7 @@ class TestSinkhornProjection:
     x = np.column_stack([rng.normal(size=30), rng.normal(size=30)])
 
     m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=3).fit(
-      u, v, x
+      np.column_stack([u, v]), x
     )
 
     # Query with different x values
@@ -1040,7 +1182,7 @@ class TestSinkhornProjection:
     v_test = np.array([0.4, 0.5, 0.6, 0.5])
     x_test = np.array([[0.0, 0.0], [1.0, 1.0], [0.0, 0.0], [1.0, 1.0]])
 
-    out = m.pdf(u_test, v_test, x_test)
+    out = m.pdf(np.column_stack([u_test, v_test]), x_test)
     assert out.shape == (4,)
     assert (out >= -1e-10).all()
 
@@ -1054,14 +1196,14 @@ class TestSinkhornProjection:
     x = np.column_stack([rng.normal(size=30), rng.normal(size=30)])
 
     m = RosenblattBicop(backend="tabpfn-quantiles", sinkhorn_iters=3).fit(
-      u, v, x
+      np.column_stack([u, v]), x
     )
 
     u_test = np.array([0.3, 0.5, 0.7, 0.4])
     v_test = np.array([0.4, 0.5, 0.6, 0.5])
     x_test = np.array([[0.0, 0.0], [1.0, 1.0], [0.0, 0.0], [1.0, 1.0]])
 
-    out = m.pdf(u_test, v_test, x_test)
+    out = m.pdf(np.column_stack([u_test, v_test]), x_test)
     assert out.shape == (4,)
     assert (out >= -1e-10).all()
 
@@ -1110,7 +1252,9 @@ class TestSinkhornProjection:
     u = rng.uniform(0.2, 0.8, 20)
     v = rng.uniform(0.2, 0.8, 20)
 
-    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=2).fit(u, v)
+    m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=2).fit(
+      np.column_stack([u, v])
+    )
 
     assert m._v_grid_borders_ is not None
     assert m._u_grid_borders_ is m._v_grid_borders_
@@ -1123,12 +1267,12 @@ class TestSinkhornProjection:
     v = rng.uniform(0.2, 0.8, 20)
 
     m = RosenblattBicop(backend="tabpfn-criterion", sinkhorn_iters=None).fit(
-      u, v
+      np.column_stack([u, v])
     )
     assert m._u_grid_borders_ is None
     assert m._v_grid_borders_ is None
 
-    _ = m.pdf(u, v, sinkhorn_iters=2)
+    _ = m.pdf(np.column_stack([u, v]), sinkhorn_iters=2)
 
     assert m._u_grid_borders_ is not None
     assert m._v_grid_borders_ is not None

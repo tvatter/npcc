@@ -34,10 +34,10 @@ def _gaussian_copula_sample(
 
 def _check_fitted_model(m: RosenblattBicop) -> None:
   pts = np.array([0.3, 0.5, 0.7])
-  pdf = np.asarray(m.pdf(pts, pts))
+  pdf = np.asarray(m.pdf(np.column_stack([pts, pts])))
   assert np.all(np.isfinite(pdf)) and np.all(pdf >= 0.0)
 
-  h = np.asarray(m.hfunc1(pts, pts))
+  h = np.asarray(m.hfunc1(np.column_stack([pts, pts])))
   assert np.all((h >= 0.0) & (h <= 1.0))
 
   grid = np.asarray(
@@ -58,7 +58,7 @@ def test_gbm_backend_smoke() -> None:
     backend="gbm",
     quantile_config=QuantileGridConfig(n_quantiles=11),
     backend_kwargs={"n_estimators": 20, "max_depth": 2},
-  ).fit(u, v)
+  ).fit(np.column_stack([u, v]))
   _check_fitted_model(m)
 
 
@@ -68,7 +68,7 @@ def test_ngboost_backend_smoke() -> None:
   m = RosenblattBicop(
     backend="ngboost",
     backend_kwargs={"n_estimators": 40},
-  ).fit(u, v)
+  ).fit(np.column_stack([u, v]))
   _check_fitted_model(m)
 
 
@@ -79,7 +79,7 @@ def test_catboost_backend_smoke() -> None:
     backend="catboost",
     backend_kwargs={"iterations": 100},
     quantile_config=QuantileGridConfig(n_quantiles=21),
-  ).fit(u, v)
+  ).fit(np.column_stack([u, v]))
   _check_fitted_model(m)
 
 
@@ -90,7 +90,7 @@ def test_pytabkit_realmlp_backend_smoke() -> None:
     backend="pytabkit-realmlp",
     backend_kwargs={"n_epochs": 8},
     quantile_config=QuantileGridConfig(n_quantiles=21),
-  ).fit(u, v)
+  ).fit(np.column_stack([u, v]))
   _check_fitted_model(m)
 
 
@@ -101,7 +101,7 @@ def test_nori_backend_smoke() -> None:
     m = RosenblattBicop(
       backend="nori",
       quantile_config=QuantileGridConfig(n_quantiles=41),
-    ).fit(u, v)
+    ).fit(np.column_stack([u, v]))
   except Exception as exc:  # noqa: BLE001 - weight download / runtime issues
     pytest.skip(f"Nori unavailable at runtime: {exc}")
   _check_fitted_model(m)
@@ -122,8 +122,8 @@ def test_tabpfn_finetune_backend_smoke() -> None:
     m = RosenblattBicop(
       backend="tabpfn-finetune",
       backend_kwargs={"epochs": 1, "early_stopping": False},
-    ).fit(u, v)
-    pdf = np.asarray(m.pdf(np.array([0.5]), np.array([0.5])))
+    ).fit(np.column_stack([u, v]))
+    pdf = np.asarray(m.pdf(np.array([[0.5, 0.5]])))
   except Exception as exc:  # noqa: BLE001 - license/download/runtime issues
     pytest.skip(f"TabPFN fine-tune unavailable at runtime: {exc}")
   assert np.all(np.isfinite(pdf)) and np.all(pdf >= 0.0)
@@ -136,8 +136,8 @@ def test_tabicl_backend_smoke() -> None:
     m = RosenblattBicop(
       backend="tabicl",
       backend_kwargs={"model_kwargs": {"n_estimators": 1}},
-    ).fit(u, v)
-    pdf = np.asarray(m.pdf(np.array([0.3, 0.5]), np.array([0.4, 0.6])))
+    ).fit(np.column_stack([u, v]))
+    pdf = np.asarray(m.pdf(np.array([[0.3, 0.4], [0.5, 0.6]])))
   except Exception as exc:  # noqa: BLE001 - weight download / runtime issues
     pytest.skip(f"TabICL unavailable at runtime: {exc}")
   assert np.all(np.isfinite(pdf)) and np.all(pdf >= 0.0)

@@ -69,6 +69,7 @@ from typing import Any, Literal, Self
 
 import numpy as np
 import torch
+from pyvinecopulib.core import BicopBase
 
 from npcc.core._common import (
   TensorLike,
@@ -79,6 +80,7 @@ from npcc.core._common import (
   _to_tensor,
   _torch_interp,
   _wrap_output,
+  is_torch_array,
 )
 from npcc.core.conditional_distribution1d import ConditionalDistribution1D
 from npcc.core.quantile_table_distribution1d import QuantileGridConfig
@@ -155,7 +157,7 @@ def _sinkhorn_project(
   return r, s
 
 
-class RosenblattBicop:
+class RosenblattBicop(BicopBase[TensorLike]):
   """Rosenblatt conditional bivariate copula estimator.
 
   Parameters
@@ -198,9 +200,9 @@ class RosenblattBicop:
   -----
   - The estimator fits both Rosenblatt directions and averages them to
     reduce directional bias (see the module docstring).
-  - Public methods accept either NumPy arrays or torch tensors.  When any
-    positional numeric input is a torch tensor, the return value is a
-    torch tensor on ``device``; otherwise it is a NumPy array.
+  - Public methods accept either NumPy arrays or torch tensors.  A NumPy
+    ``uv`` produces NumPy output; a torch ``uv`` produces torch output on
+    ``device``.  The type of an optional ``x`` does not change that routing.
   """
 
   def __init__(
@@ -291,13 +293,18 @@ class RosenblattBicop:
     return torch.column_stack([first_coord, x])
 
   def _default_x(self, n: int) -> torch.Tensor:
-    """Constant covariate column of ones (used when ``x`` is omitted)."""
-    return torch.ones((n, 1), dtype=torch.float64, device=self._device)
+    """Empty covariate matrix used when ``x`` is omitted."""
+    return torch.empty((n, 0), dtype=torch.float64, device=self._device)
 
   def _prepare_joint_inputs(
-    self, u: TensorLike, v: TensorLike, x: TensorLike | None
+    self, uv: TensorLike, x: TensorLike | None
   ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    u_t, v_t = _check_uv(u, v, self.quantile_config.eps, device=self._device)
+    uv_t = _to_tensor(uv, device=self._device)
+    if uv_t.ndim != 2 or uv_t.shape[1] != 2:
+      raise ValueError("uv must have shape (n, 2).")
+    u_t, v_t = _check_uv(
+      uv_t[:, 0], uv_t[:, 1], self.quantile_config.eps, device=self._device
+    )
     x_t = (
       self._default_x(u_t.shape[0])
       if x is None
@@ -305,7 +312,7 @@ class RosenblattBicop:
     )
 
     if x_t.shape[0] != u_t.shape[0]:
-      raise ValueError("x, u, and v must have the same number of observations.")
+      raise ValueError("x and uv must have the same number of observations.")
 
     return u_t, v_t, x_t
 
@@ -331,7 +338,7 @@ class RosenblattBicop:
     v_t = torch.clamp(v_t, eps, 1.0 - eps)
 
     if x_in is None:
-      x_row_t = torch.ones((1, 1), dtype=torch.float64, device=self._device)
+      x_row_t = self._default_x(1)
     else:
       x_row_t = _as_2d(x_in, device=self._device)
       if x_row_t.shape[0] != 1:
@@ -364,21 +371,20 @@ class RosenblattBicop:
 
   def fit(
     self,
-    u: TensorLike,
-    v: TensorLike,
+    uv: TensorLike,
     x: TensorLike | None = None,
   ) -> Self:
     """Fit the inner conditional density estimators.
 
     Fits both Rosenblatt directions, ``f(V | U, X)`` and
     ``f(U | V, X)``.  ``x=None`` is shorthand for the unconditional case
-    (a constant covariate column).
+    (an empty covariate matrix).
 
     When ``self.sinkhorn_iters`` is not ``None``, the uniform 1-D grid
     used for the optional Sinkhorn projection is initialized and cached
     during fit.
     """
-    u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
+    u_t, v_t, x_t = self._prepare_joint_inputs(uv, x)
 
     self.v_given_ux_.fit(self._features(u_t, x_t), v_t)
     self.u_given_vx_.fit(self._features(v_t, x_t), u_t)
@@ -392,7 +398,6 @@ class RosenblattBicop:
   def pdf(
     self,
     u: TensorLike,
-    v: TensorLike,
     x: TensorLike | None = None,
     *,
     batch_size: int | None = None,
@@ -405,11 +410,10 @@ class RosenblattBicop:
     iteration count; ``None`` means "use ``self.sinkhorn_iters``".  If the
     effective value is ``None``, no projection is applied.
     """
-    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
+    return_as_torch = is_torch_array(u)
     with torch.inference_mode():
       out = self._pdf_torch(
         u,
-        v,
         x,
         batch_size=self._resolve_batch_size(batch_size),
         sinkhorn_iters=self._resolve_sinkhorn_iters(sinkhorn_iters),
@@ -418,14 +422,13 @@ class RosenblattBicop:
 
   def _pdf_torch(
     self,
-    u: TensorLike,
-    v: TensorLike,
+    uv: TensorLike,
     x: TensorLike | None,
     *,
     batch_size: int,
     sinkhorn_iters: int | None,
   ) -> torch.Tensor:
-    u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
+    u_t, v_t, x_t = self._prepare_joint_inputs(uv, x)
     c_raw = self._raw_pdf_torch(u_t, v_t, x_t, batch_size=batch_size)
 
     if sinkhorn_iters is None:
@@ -463,7 +466,11 @@ class RosenblattBicop:
     wu = self._trapezoidal_weights(u_grid)
     wv = self._trapezoidal_weights(v_grid)
 
-    x_unique, x_inverse = torch.unique(x, dim=0, return_inverse=True)
+    if x.shape[1] == 0:
+      x_unique = x[:1]
+      x_inverse = torch.zeros(x.shape[0], dtype=torch.long, device=x.device)
+    else:
+      x_unique, x_inverse = torch.unique(x, dim=0, return_inverse=True)
 
     # All unique-x density grids in a few batched forward passes.
     density_all = self._raw_pdf_grids_by_x(
@@ -581,8 +588,7 @@ class RosenblattBicop:
 
   def log_pdf(
     self,
-    u: TensorLike,
-    v: TensorLike,
+    uv: TensorLike,
     x: TensorLike | None = None,
     *,
     batch_size: int | None = None,
@@ -592,11 +598,10 @@ class RosenblattBicop:
 
     ``batch_size`` and ``sinkhorn_iters`` match :py:meth:`pdf`.
     """
-    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
+    return_as_torch = is_torch_array(uv)
     with torch.inference_mode():
       c = self._pdf_torch(
-        u,
-        v,
+        uv,
         x,
         batch_size=self._resolve_batch_size(batch_size),
         sinkhorn_iters=self._resolve_sinkhorn_iters(sinkhorn_iters),
@@ -617,7 +622,7 @@ class RosenblattBicop:
 
     Available for every backend (each backend's ``pdf_grid`` predicts once
     per conditioning row).  ``x_row`` is a single covariate row reused on
-    both axes; when ``None`` a constant one-column row is used.  Both
+    both axes; when ``None`` an empty covariate row is used.  Both
     Rosenblatt directions are evaluated on the same Cartesian product
     (transposing the reverse one) and averaged.
 
@@ -679,7 +684,6 @@ class RosenblattBicop:
   def hfunc1(
     self,
     u: TensorLike,
-    v: TensorLike,
     x: TensorLike | None = None,
   ) -> TensorLike:
     """``h_1(u, v | x) = P(V <= v | U = u, X = x) = F_{V | U, X}(v | u, x)``.
@@ -691,17 +695,21 @@ class RosenblattBicop:
     Convention matches :py:meth:`pyvinecopulib.Bicop.hfunc1`: ``hfunc1``
     conditions on the first argument.
     """
-    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
-    u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
+    return_as_torch = is_torch_array(u)
+    u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
 
     out = self.v_given_ux_.cdf(self._features(u_t, x_t), v_t)
     assert isinstance(out, torch.Tensor)
+    out = torch.clamp(
+      out,
+      self.quantile_config.eps,
+      1.0 - self.quantile_config.eps,
+    )
     return _wrap_output(out, return_as_torch=return_as_torch)
 
   def hfunc2(
     self,
     u: TensorLike,
-    v: TensorLike,
     x: TensorLike | None = None,
   ) -> TensorLike:
     """``h_2(u, v | x) = P(U <= u | V = v, X = x) = F_{U | V, X}(u | v, x)``.
@@ -711,12 +719,66 @@ class RosenblattBicop:
     Convention matches :py:meth:`pyvinecopulib.Bicop.hfunc2`: ``hfunc2``
     conditions on the second argument.
     """
-    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
-    u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
+    return_as_torch = is_torch_array(u)
+    u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
 
     out = self.u_given_vx_.cdf(self._features(v_t, x_t), u_t)
     assert isinstance(out, torch.Tensor)
+    out = torch.clamp(
+      out,
+      self.quantile_config.eps,
+      1.0 - self.quantile_config.eps,
+    )
     return _wrap_output(out, return_as_torch=return_as_torch)
+
+  def hinv1(
+    self,
+    u: TensorLike,
+    x: TensorLike | None = None,
+  ) -> TensorLike:
+    """Invert :meth:`hfunc1` using the V|U backend's native quantiles."""
+    return_as_torch = is_torch_array(u)
+    u_t, alpha_t, x_t = self._prepare_joint_inputs(u, x)
+    out = self.v_given_ux_.icdf(self._features(u_t, x_t), alpha_t)
+    assert isinstance(out, torch.Tensor)
+    return _wrap_output(out, return_as_torch=return_as_torch)
+
+  def hinv2(
+    self,
+    u: TensorLike,
+    x: TensorLike | None = None,
+  ) -> TensorLike:
+    """Invert :meth:`hfunc2` using the U|V backend's native quantiles."""
+    return_as_torch = is_torch_array(u)
+    alpha_t, v_t, x_t = self._prepare_joint_inputs(u, x)
+    out = self.u_given_vx_.icdf(self._features(v_t, x_t), alpha_t)
+    assert isinstance(out, torch.Tensor)
+    return _wrap_output(out, return_as_torch=return_as_torch)
+
+  def _simulate_uniform(
+    self,
+    n: int,
+    qrng: bool,
+    seeds: list[int],
+  ) -> torch.Tensor:
+    """Draw float64 base uniforms on the estimator's configured device."""
+    if qrng:
+      from pyvinecopulib.utils import simulate_uniform
+
+      draws = simulate_uniform(n, 2, qrng=True, seeds=list(seeds))
+      return torch.as_tensor(draws, dtype=torch.float64, device=self._device)
+
+    generator = torch.Generator(device=self._device)
+    if seeds:
+      generator.manual_seed(int(seeds[0]))
+    else:
+      generator.seed()
+    return torch.rand(
+      (n, 2),
+      generator=generator,
+      dtype=torch.float64,
+      device=self._device,
+    )
 
   # -------------------------------------------------------------------
   # Joint CDF
@@ -725,7 +787,6 @@ class RosenblattBicop:
   def cdf(
     self,
     u: TensorLike,
-    v: TensorLike,
     x: TensorLike | None = None,
     *,
     n_int: int = 12,
@@ -750,8 +811,8 @@ class RosenblattBicop:
       raise ValueError("n_int must be at least 2.")
     effective_batch_size = self._resolve_batch_size(batch_size)
 
-    return_as_torch, _ = _normalize_inputs(u, v, x, device=self._device)
-    u_t, v_t, x_t = self._prepare_joint_inputs(u, v, x)
+    return_as_torch = is_torch_array(u)
+    u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
 
     cdf_v_dir = self._integrate_one_direction(
       upper=u_t,
@@ -931,7 +992,7 @@ class RosenblattBicop:
     else:
       seeds_list = list(seeds)
 
-    from pyvinecopulib import ghalton, wdm
+    from pyvinecopulib.utils import ghalton, wdm
 
     quasi = np.asarray(ghalton(n, 2, seeds_list), dtype=float)
     eps = self.quantile_config.eps
@@ -972,19 +1033,19 @@ class RosenblattBicop:
     ----------
     x_row
         Single covariate row (shape ``(1, p)``) reused on every queried
-        ``(u, v)`` pair.  ``None`` keeps the constant-one default used
-        when fitting without covariates.
+        ``(u, v)`` pair.  ``None`` keeps the empty-covariate default used
+        when fitting without external covariates.
     """
     return _BicopAdapter(self, x_row=x_row)
 
   def plot(
     self,
+    plot_type: str = "contour",
+    margin_type: str = "norm",
+    xylim: tuple[float, float] | None = None,
+    grid_size: int | None = None,
     *,
     x_row: TensorLike | None = None,
-    plot_type: Literal["contour", "surface"] = "contour",
-    margin_type: Literal["unif", "norm", "exp"] = "norm",
-    grid_size: int | None = None,
-    xylim: tuple[float, float] | None = None,
   ) -> None:
     """Render a copula contour or surface plot of the fitted density.
 
@@ -996,8 +1057,8 @@ class RosenblattBicop:
     ----------
     x_row
         Single covariate row to condition on.  ``None`` uses the
-        constant-one default — appropriate when the model was fit without
-        covariates.
+        empty-covariate default — appropriate when the model was fit without
+        external covariates.
     plot_type
         ``"contour"`` (default) or ``"surface"``.
     margin_type
@@ -1070,6 +1131,6 @@ class _BicopAdapter:
       return grid[inv_u, inv_v].detach().cpu().numpy()
 
     x = None if self._x_row is None else self._x_row.repeat_interleave(n, dim=0)
-    out = self._model.pdf(uv_t[:, 0], uv_t[:, 1], x)
+    out = self._model.pdf(uv_t, x)
     assert isinstance(out, torch.Tensor)
     return out.detach().cpu().numpy()

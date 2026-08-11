@@ -17,15 +17,29 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+# `is_torch_array` is the same predicate pyvinecopulib uses (via array-api-compat)
+# to decide "did the caller pass torch?" at a public-API boundary. Used below in
+# `_normalize_inputs` and re-exported for `bicop.py`'s output-type decisions.
+from array_api_compat import is_torch_array
+
 TensorLike = np.ndarray | torch.Tensor
 """Public-API numeric input type: NumPy array or torch tensor."""
 
 
 def _resolve_device(device: str | torch.device | None) -> torch.device:
-  """Resolve ``None`` to ``cuda`` if available, else ``cpu``."""
+  """Resolve ``None`` to ``cuda`` if available, else ``cpu``.
+
+  A bare ``cuda`` device (no index) is normalised to ``cuda:<current index>``
+  so it compares equal to the device tensors actually materialise on (e.g.
+  ``cuda:0``); ``torch.device("cuda") != torch.device("cuda:0")`` otherwise.
+  """
   if device is None:
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-  return torch.device(device)
+    resolved = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+  else:
+    resolved = torch.device(device)
+  if resolved.type == "cuda" and resolved.index is None:
+    resolved = torch.device("cuda", torch.cuda.current_device())
+  return resolved
 
 
 def _to_tensor(
@@ -59,9 +73,7 @@ def _normalize_inputs(
   ``None`` entries pass through to let callers preserve optional-arg
   semantics (e.g. ``x: TensorLike | None``).
   """
-  return_as_torch = any(
-    isinstance(x, torch.Tensor) for x in inputs if x is not None
-  )
+  return_as_torch = any(is_torch_array(x) for x in inputs if x is not None)
   tensors: list[torch.Tensor | None] = [
     None if x is None else _to_tensor(x, device=device) for x in inputs
   ]
