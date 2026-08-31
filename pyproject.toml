@@ -92,7 +92,7 @@ conflicts = [
 ]
 
 [tool.uv.sources]
-pyvinecopulib = { git = "https://github.com/vinecopulib/pyvinecopulib.git", branch = "main" }
+pyvinecopulib = { git = "https://github.com/vinecopulib/pyvinecopulib.git", rev = "b090ba36eb23302a088de8627a8d91e985a4187c" }
 # Temporary: install Synthefy Nori from the fork branch that uncaps torch
 # (PR https://github.com/Synthefy/synthefy-nori/pull/79). Drop once on PyPI.
 synthefy-nori = { git = "https://github.com/tvatter/synthefy-nori.git", branch = "allow-newer-torch-cuda" }

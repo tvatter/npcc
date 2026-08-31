@@ -1,6 +1,7 @@
 from npcc.core.backends.tabpfn_criterion import TabPFNCriterionBackend
 from npcc.core.backends.tabpfn_quantile import TabPFNQuantileBackend
 from npcc.core.bicop import RosenblattBicop
+from npcc.core.vinecop import RosenblattVinecop
 from npcc.core.conditional_distribution1d import ConditionalDistribution1D
 from npcc.core.errors import (
   BackendError,
@@ -34,6 +35,7 @@ __all__ = [
   "QuantileGridConfig",
   "QuantileTableDistribution1D",
   "RosenblattBicop",
+  "RosenblattVinecop",
   "TabPFNCriterionBackend",
   "TabPFNQuantileBackend",
   "UnknownBackendError",
