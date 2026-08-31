@@ -249,7 +249,7 @@ def sample(
 
   Conditional: ``x`` is a deterministic ``linspace`` and each row is sampled by
   inverse Rosenblatt, ``v = hinv1([u, w])`` under the row's own ``tau(x_i)``.
-  Unconditional: ``Bicop.simulate`` with no covariate (``x is None``).
+  Unconditional: ``Bicop.sample`` with no covariate (``x is None``).
   """
   fam = FAMILIES[family]
   spec = TAU_SCENARIOS[scenario]
@@ -259,7 +259,7 @@ def sample(
     assert spec.tau is not None
     cop = _bicop(fam, spec.tau)
     uv = np.asarray(
-      cop.simulate(n, seeds=[int(s) for s in rng.integers(1, 2**31 - 1, 3)]),
+      cop.sample(n, seeds=[int(s) for s in rng.integers(1, 2**31 - 1, 3)]),
       dtype=np.float64,
     )
     return uv[:, 0], uv[:, 1], None
