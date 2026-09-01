@@ -342,3 +342,52 @@ def test_sample_conditional_preserves_input_type(
     np.testing.assert_allclose(result[:, 2], u_cond_np[:, 0])
 
   assert result.shape == (3, 3)
+
+
+def test_from_data_rejects_structure_dimension_mismatch(
+  register_uniform_backends: None,
+) -> None:
+  u = np.full((10, 2), 0.5)
+
+  with pytest.raises(ValueError, match=r"u must have shape \(n, 3\)"):
+    RosenblattVinecop.from_data(
+      u, make_structure(), backend="uniform-native", device="cpu"
+    )
+
+
+def test_from_data_rejects_covariate_row_mismatch(
+  register_uniform_backends: None,
+) -> None:
+  u = np.full((10, 3), 0.5)
+  x = np.full((9, 1), 0.5)
+
+  with pytest.raises(
+    ValueError,
+    match="x and uv must have the same number of observations",
+  ):
+    RosenblattVinecop.from_data(
+      u, make_structure(), x=x, backend="uniform-native", device="cpu"
+    )
+
+
+def test_cdf_rejects_external_covariates(
+  fitted_vine: RosenblattVinecop,
+) -> None:
+  u = np.full((10, 3), 0.5)
+  x = np.full((10, 1), 0.5)
+
+  with pytest.raises(NotImplementedError, match="Conditional cdf"):
+    fitted_vine.cdf(u, x=x, N=32)
+
+
+def test_sample_conditional_rejects_reorientation(
+  fitted_vine: RosenblattVinecop,
+) -> None:
+  u_cond = np.array([[0.4], [0.6]])
+
+  with pytest.raises(NotImplementedError, match="non-simplified"):
+    fitted_vine.sample_conditional(
+      u_cond,
+      conditioning_set=[1],
+      seeds=[42],
+    )
