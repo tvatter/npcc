@@ -21,7 +21,29 @@ from npcc.core.quantile_table_distribution1d import QuantileGridConfig
 
 
 class RosenblattVinecop(VinecopBase[TensorLike]):
-  """A fixed-structure non-simplified vine of Rosenblatt pair copulas."""
+  """Fixed-structure non-simplified vine of Rosenblatt pair copulas.
+
+  Each edge is a fitted :class:`RosenblattBicop`. Higher-tree edges receive
+  their vine conditioning-set values followed by any external covariates.
+  The vine structure is fixed; automatic structure selection is not provided.
+
+  Parameters
+  ----------
+  pair_copulas
+    Fitted pair copulas arranged as ``[tree][edge]``. Tree ``t`` must contain
+    ``dim - t - 1`` pairs.
+  structure
+    R-vine structure defining the edge layout, order, and truncation level.
+  device
+    Device used for random sampling. When omitted, it is inherited from the
+    pair copulas. All pair copulas must use the same device.
+
+  Notes
+  -----
+  NumPy and torch inputs are supported, but ``u`` and ``x`` must use the same
+  array namespace within a call- Unconditional ``sample`` returns a float64
+  torch tensor on ``device``.
+  """
 
   supports_covariates: bool = True
 
@@ -54,7 +76,53 @@ class RosenblattVinecop(VinecopBase[TensorLike]):
     sinkhorn_iters: int | None = None,
     projection_grid_size: int = 101,
   ) -> Self:
-    """Fit Rosenblatt pair copulas along a fixed R-vine structure."""
+    """Fit Rosenblatt pair copulas along a fixed R-vine structure.
+
+    Parameters
+    ----------
+    u
+      Continuous pseudo-observations with shape ``(n, structure.dim)`` and
+      values in the unit interval.
+    structure
+      Fixed R-vine structure. Its order and truncation level are retained.
+    x
+      Optional external covariates with shape ``(n, p)``. These are appended
+      after each edge's internal conditioning-set values.
+    backend
+      Registered conditional-distribution backend used for every pair copula.
+    quantile_config
+      Quantile-grid and boundary configuration forwarded to every pair copula.
+    transform
+      Target-support transform used by every pair copula backend.
+    device
+      Shared pair copula and sampling device.
+    batch_size
+      Default backend inference chunk size.
+    backend_kwargs
+      Backend-specific constructor options forwarded to every pair.
+    sinkhorn_iters
+      Optional pair copula-level Sinkhorn projection iteration count.
+    projection_grid_size
+      Pair copula-level Sinkhorn projection grid size.
+
+    Returns
+    -------
+    RosenblattVinecop
+      Fitted non-simplified vine using the supplied structure.
+
+    Raises
+    ------
+    ValueError
+      If the observations, covariates, or structure dimensions are
+      incompatible.
+
+    Notes
+    -----
+    Tree-zero pair copulas receive external ``x`` only. A higher-tree pair copula
+    receives ``[u_D, x]``, where ``u_D`` follows pyvinecopulib's conditioning-tree
+    order. The method fits edges sequentially because later trees depend on
+    h-functions from earlier fitted pair copulas.
+    """
 
     effective_device = _resolve_device(device)
 
@@ -179,7 +247,13 @@ class RosenblattVinecop(VinecopBase[TensorLike]):
     block_size: int = 4096,
     batched: bool | None = None,
   ) -> TensorLike:
-    """Evaluate the Monte Carlo CDF while preserving the query array type."""
+    """Evaluate the Monte Carlo CDF while preserving the query array type.
+
+    The inherited CDF combines query points with samples generated on the vine's
+    torch device. NumPy queries are temporarily converted to torch and converted
+    back after evaluation. External-covariate CDF evaluation is unsupported by
+    ``VinecopBase``.
+    """
 
     return_as_torch = is_torch_array(u)
     u_t = _to_tensor(u, device=self._device)
@@ -208,7 +282,12 @@ class RosenblattVinecop(VinecopBase[TensorLike]):
     conditioning_set: list[int] | None = None,
     x: TensorLike | None = None,
   ) -> TensorLike:
-    """Conditionally sample while preserving the conditioning array type."""
+    """Conditionally sample while preserving the conditioning array type.
+
+    The inherited sampler uses torch base uniforms. NumPy conditioning values are
+    temporarily converted to the vine device and the resulting samples are
+    converted back to NumPy.
+    """
 
     return_as_torch = is_torch_array(u_cond)
     u_cond_t = _to_tensor(u_cond, device=self._device)

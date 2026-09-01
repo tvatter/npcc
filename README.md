@@ -1,6 +1,6 @@
 # Neural Pair-Copulas Constructions (NPCCs)
 
-A Python library for **conditional bivariate copula density estimation**
+A Python library for **conditional pair copula and fixed-structure vine density estimation**
 built on top of *any* distributional-regression backend.  The package
 exposes one outer estimator — `RosenblattBicop` — whose inner
 univariate-conditional-predictive-distribution model is **pluggable**
@@ -137,7 +137,7 @@ device-aware and overridable model-wide
 | `as_bicop(x_row=None)` | A `pyvinecopulib`-compatible adapter (`var_types = ["c", "c"]`, `pdf(uv)`). |
 | `plot(*, x_row=None, plot_type="contour", margin_type="norm", ...)` | Contour/surface plot via `pyvinecopulib`'s plotter (lazy-imports `matplotlib`). |
 
-Exported names: `RosenblattBicop`, the abstract `ConditionalDistribution1D`
+Exported names: `RosenblattBicop`, `RosenblattVinecop`, the abstract `ConditionalDistribution1D`
 and `QuantileTableDistribution1D` base classes, `QuantileGridConfig`, the
 `TabPFNCriterionBackend` / `TabPFNQuantileBackend` leaves, and the registry
 helpers `create_backend` / `register_backend` / `available_backends`.
@@ -220,6 +220,96 @@ model.pdf(np.column_stack([u_query, v_query]), x_query)     # x_query shape (n_q
 
 ---
 
+## Fixed-structure multivariate vine
+
+`RosenblattVinecop` composes fitted `RosenblattBicop` modules along a
+caller-supplied `pyvinecopulib.RVineStructure`. The structure fixes the variable
+order, edge layout, and truncation level; this estimator does not perform
+automatic structure selection.
+
+The vine is non-simplified. For an edge with conditioned variables
+\(a_e, b_e\) and conditioning set \(D_e\), the pair copula receives
+
+\[
+   x_e = [u_{D_e}, x],
+\]
+
+where \(u_{D_e}\) contains the internal vine conditioning variables and \(x\)
+contains optional external covariates. Consequently, the fitted vine density is
+
+\[
+   \hat c(u_1, \ldots, u_d \mid x)
+   =
+   \prod_e
+   \hat c_{a_e,b_e;D_e}
+   \left(
+      u_{a_e\mid D_e},
+      u_{b_e\mid D_e}
+      \mid
+      u_{D_e}, x
+   \right).
+\]
+
+For tree-zero edges, \(D_e\) is empty, so those pairs receive only the external
+covariates. Higher-tree pair copulas receive the conditioning-set values first and the
+external coavariates last.
+
+```python
+import numpy as np
+import pyvinecopulib as pv
+import torch
+
+from npcc import RosenblattVinecop
+
+# Continuous pseudo-observations and optional external covariates.
+u_train = rng.uniform(0.05, 0.95, size=(500, 3))
+x_train = rng.normal(size=(500, 2))
+
+# The order and truncation level are fixed by the supplied structure.
+structure = pv.RVineStructure.from_order([1, 2, 3])
+
+vine = RosenblattVinecop.from_data(
+   u_train,
+   structure,
+   x=x_train,
+   backend="tabpfn-criterion",
+   device="cpu",
+)
+
+u_query = rng.uniform(0.05, 0.95, size=(2, 3))
+x_query = rng.normal(size=(2, 2))
+
+# NumPy inputs produce NumPy outputs.
+density = vine.pdf(u_query, x=x_query)
+independent = vine.rosenblatt(u_query, x=x_query)
+recovered = vine.inverse_rosenblatt(independent, x=x_query)
+
+# sample() has no input array from which to infer an output namespace, so it
+# returns a float64 torch tensor on the configured device. Its covariates must
+# therefore also be torch tensors on that device.
+x_sample = torch.as_tensor(x_query, dtype=torch.float64)
+samples = vine.sample(2, x=x_sample, seeds=[42])
+
+# With order [1, 2, 3], a one-column conditioning matrix conditions on
+# variable 3, the current order tail.
+u_cond = np.array([[0.3], [0.7]])
+conditional_samples = vine.sample_conditional(
+   u_cond,
+   x=x_query,
+   seeds=[42],
+)
+```
+
+The initial vine integration supports continuous fixed structures only.
+Automatic structure selection and discrete variables are not (yet) implemented.
+Within ordinary evaluator calls, `u` and `x` must both be NumPy arrays or both
+be torch tensors. A joint CDF with external covariates is not currently
+available because it would require a separate Monte Carlo sample for every
+covariate row. For non-simplified vines, `sample_conditional()` can condition
+only on variables already forming the tail of the structure order.
+
+---
+
 ## Notebooks
 
 Worked demos live under [`notebooks/`](notebooks/) (Clayton demo,
@@ -240,7 +330,7 @@ uv sync --extra cpu
 uv sync --extra cpu --extra ngboost --extra gbm --extra tabicl
 ```
 
-The package depends on `numpy>=2.0`, `pyvinecopulib>=0.7.5`, and
+The package depends on `numpy>=2.0`, `pyvinecopulib>=0.8.0`, and
 `tabpfn>=8.0`.  TabPFN pulls in PyTorch transitively; the flavour extras
 just pin its build.
 
