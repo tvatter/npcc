@@ -391,3 +391,39 @@ def test_sample_conditional_rejects_reorientation(
       conditioning_set=[1],
       seeds=[42],
     )
+
+
+@pytest.mark.parametrize("array_type", ["numpy", "torch"])
+def test_sample_with_covariates_preserves_array_type(
+  register_uniform_backends: None,
+  array_type: str,
+) -> None:
+  rng = np.random.default_rng(42)
+  train_u_np = rng.uniform(0.1, 0.9, size=(40, 3))
+  train_x_np = rng.normal(size=(40, 2))
+  query_x_np = rng.normal(size=(5, 2))
+
+  if array_type == "torch":
+    train_u: TensorLike = torch.as_tensor(train_u_np)
+    train_x: TensorLike = torch.as_tensor(train_x_np)
+    query_x: TensorLike = torch.as_tensor(query_x_np)
+  else:
+    train_u = train_u_np
+    train_x = train_x_np
+    query_x = query_x_np
+
+  vine = RosenblattVinecop.from_data(
+    train_u,
+    make_structure(),
+    x=train_x,
+    backend="uniform-native",
+    device="cpu",
+  )
+  result = vine.sample(5, x=query_x, seeds=[42])
+
+  if array_type == "torch":
+    assert isinstance(result, torch.Tensor)
+  else:
+    assert isinstance(result, np.ndarray)
+
+  assert result.shape == (5, 3)
