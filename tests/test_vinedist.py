@@ -289,3 +289,43 @@ def test_from_data_rejects_mixed_array_namespaces(
       pair_backend="uniform-native",
       device="cpu",
     )
+
+
+@pytest.mark.parametrize("array_type", ["numpy", "torch"])
+def test_conditional_sample_preserves_covariate_array_type(
+  register_uniform_backends: None,
+  array_type: str,
+) -> None:
+  y_np = make_data()
+  x_np = np.random.default_rng(43).normal(size=(40, 2))
+
+  if array_type == "torch":
+    y: TensorLike = torch.as_tensor(y_np)
+    x: TensorLike = torch.as_tensor(x_np)
+  else:
+    y = y_np
+    x = x_np
+
+  dist = RosenblattVinedist.from_data(
+    y,
+    structure=make_structure(),
+    x=x,
+    margin_backend="uniform-native",
+    pair_backend="uniform-native",
+    device="cpu",
+  )
+  result = dist.sample(5, x=x[:5], seeds=[42])
+
+  if array_type == "torch":
+    assert isinstance(result, torch.Tensor)
+  else:
+    assert isinstance(result, np.ndarray)
+
+  assert result.shape == (5, 3)
+
+
+def test_vinedist_types_are_publicly_exported() -> None:
+  import npcc
+
+  assert npcc.BackendMargin is BackendMargin
+  assert npcc.RosenblattVinedist is RosenblattVinedist

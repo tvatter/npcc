@@ -137,10 +137,10 @@ device-aware and overridable model-wide
 | `as_bicop(x_row=None)` | A `pyvinecopulib`-compatible adapter (`var_types = ["c", "c"]`, `pdf(uv)`). |
 | `plot(*, x_row=None, plot_type="contour", margin_type="norm", ...)` | Contour/surface plot via `pyvinecopulib`'s plotter (lazy-imports `matplotlib`). |
 
-Exported names: `RosenblattBicop`, `RosenblattVinecop`, the abstract `ConditionalDistribution1D`
-and `QuantileTableDistribution1D` base classes, `QuantileGridConfig`, the
-`TabPFNCriterionBackend` / `TabPFNQuantileBackend` leaves, and the registry
-helpers `create_backend` / `register_backend` / `available_backends`.
+Exported names: `RosenblattBicop`, `RosenblattVinecop`, `RosenblattVinedist`, `BackendMargin`,
+the abstract `ConditionalDistribution1D` and `QuantileTableDistribution1D` base classes, 
+`QuantileGridConfig`, the `TabPFNCriterionBackend` / `TabPFNQuantileBackend` leaves, 
+and the registry helpers `create_backend` / `register_backend` / `available_backends`.
 
 ### Quick start
 
@@ -284,11 +284,10 @@ density = vine.pdf(u_query, x=x_query)
 independent = vine.rosenblatt(u_query, x=x_query)
 recovered = vine.inverse_rosenblatt(independent, x=x_query)
 
-# sample() has no input array from which to infer an output namespace, so it
-# returns a float64 torch tensor on the configured device. Its covariates must
-# therefore also be torch tensors on that device.
-x_sample = torch.as_tensor(x_query, dtype=torch.float64)
-samples = vine.sample(2, x=x_sample, seeds=[42])
+# Conditional sample() preserves the covariate array type. Unconditional
+# sample() returns a float64 torch tensor on the configured device.
+samples = vine.sample(2, x=x_query, seeds=[42])
+unconditional_samples = vine.sample(2, seeds=[42])
 
 # With order [1, 2, 3], a one-column conditioning matrix conditions on
 # variable 3, the current order tail.
@@ -307,6 +306,74 @@ be torch tensors. A joint CDF with external covariates is not currently
 available because it would require a separate Monte Carlo sample for every
 covariate row. For non-simplified vines, `sample_conditional()` can condition
 only on variables already forming the tail of the structure order.
+
+---
+
+## Original-scale vine distribution
+
+`BackendMargin` adapts any registered distributional-regression backend to
+pyvinecopulib's `MarginBase` interface. `RosenblattVinedist` fits one independent
+backend margin per response column, transforms the observations through their
+conditional marginal CDFs, and fits a `RosenblattVinecop` to the resulting
+pseudo observations.
+
+For observations \(Y=(Y_1,\ldots,Y_d)\) and optional covariates \(X\), the
+
+\[
+   U_j = F_j(X_j),
+\]
+
+and the resulting conditional joint density is
+
+\[
+   f(y_1,\ldots,y_d)
+   =
+   c\!\left(
+      F_1(y_1\mid x),\ldots.F_d(y_d\mid x)
+      \mid x
+   \right)
+   \prod_{j=1}^d f_j(y_j\mid x)
+\]
+
+```python
+import numpy as np
+import pyvinecopulib as pv
+
+from npcc import RosenblattVinedist
+
+rng = np.random.default_rng(42)
+y_train = rng.normal(size=(500, 3))
+x_train = rng.normal(size=(500, 2))
+
+structure = pv.RVineStructure.from_order([1, 2, 3])
+
+dist = Rosenblatt.from_data(
+   y_train,
+   x=x_train,
+   structure=structure,
+   margin_backend="tabpfn-criterion",
+   pair_backend="tabpfn-criterion",
+   device="cpu",
+)
+
+y_query = rng.normal(size=(5, 3))
+x_query = rng.normal(size=(5, 2))
+
+density = dist.pdf(y_query, x=x_query)
+independent = dist.rosenblatt(y_query, x=x_query)
+recovered = dist.inverse_rosenblatt(independent, x=x_query)
+samples = dist.samples(5, x=x_query, seeds=[42])
+```
+
+Margin and pair-copula backends are configured independently through
+`margin_backend` / `margin_backend_kwargs` and
+`pair_backend` / `pair_backend_kwargs`.
+
+The initial implementation supports continuous real-valued margins only.
+Every margin uses the identity target transform, while pair copulas default to
+the logit transform on the unit interval. A fixed `RVineStructure` is required.
+Custom margins, observation weights, automatic structure selection, and
+variable names are not currently supported.
 
 ---
 
