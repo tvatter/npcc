@@ -272,6 +272,35 @@ class RosenblattVinecop(VinecopBase[TensorLike]):
     assert isinstance(out, torch.Tensor)
     return _wrap_output(out, return_as_torch=return_as_torch)
 
+  def sample(
+    self,
+    n: int,
+    *,
+    qrng: bool = False,
+    num_threads: int = 1,
+    seeds: list[int] | None = None,
+    x: TensorLike | None = None,
+    batched: bool | None = None,
+  ) -> TensorLike:
+    """Sample while preserving the covariate array type when supplied.
+
+    Unconditional sampling returns a torch tensor on the vine device.
+    Conditional sampling returns the same array type as ``x``.
+    """
+    return_as_torch = x is None or is_torch_array(x)
+    x_t = None if x is None else _to_tensor(x, device=self._device)
+
+    out = super().sample(
+      n,
+      qrng=qrng,
+      num_threads=num_threads,
+      seeds=seeds,
+      x=x_t,
+      batched=batched,
+    )
+    assert isinstance(out, torch.Tensor)
+    return _wrap_output(out, return_as_torch=return_as_torch)
+
   def sample_conditional(
     self,
     u_cond: TensorLike,
