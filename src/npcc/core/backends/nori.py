@@ -79,7 +79,7 @@ class NoriBackend(QuantileTableDistribution1D):
       x.detach()
       .to(
         device="cpu",
-        dtype=torch.float64,
+        dtype=torch.float32,
       )
       .numpy()
     )
@@ -108,7 +108,7 @@ class NoriBackend(QuantileTableDistribution1D):
       x.detach()
       .to(
         device="cpu",
-        dtype=torch.float32,
+        dtype=torch.float64,
       )
       .numpy()
     )

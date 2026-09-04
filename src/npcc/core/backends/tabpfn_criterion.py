@@ -231,7 +231,7 @@ class TabPFNCriterionBackend(ConditionalDistribution1D):
       logits, criterion = self._predict_full(x_t[start:end])
 
       parts.append(
-        self._criterion_cdf_z(
+        self._criterion_cdf(
           logits,
           criterion,
           z[start:end],
@@ -243,7 +243,7 @@ class TabPFNCriterionBackend(ConditionalDistribution1D):
       if parts
       else torch.empty(
         0,
-        device=y_t._device,
+        device=y_t.device,
         dtype=y_t.dtype,
       )
     )

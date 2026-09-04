@@ -386,8 +386,8 @@ class RosenblattBicop(BicopBase[TensorLike]):
     """
     u_t, v_t, x_t = self._prepare_joint_inputs(uv, x)
 
-    self.v_given_ux_.fit(self._features(u_t, x_t), v_t)
-    self.u_given_vx_.fit(self._features(v_t, x_t), u_t)
+    self.v_given_ux_.fit(v_t, x=self._features(u_t, x_t))
+    self.u_given_vx_.fit(u_t, x=self._features(v_t, x_t))
 
     # Cache grid borders for Sinkhorn projection (if enabled)
     if self.sinkhorn_iters is not None:
@@ -515,13 +515,12 @@ class RosenblattBicop(BicopBase[TensorLike]):
     batch_size: int,
   ) -> torch.Tensor:
     c_v_given_u = self.v_given_ux_.pdf(
-      self._features(u, x), v, batch_size=batch_size
+      v, x=self._features(u, x), batch_size=batch_size
     )
     c_u_given_v = self.u_given_vx_.pdf(
-      self._features(v, x), u, batch_size=batch_size
+      u, x=self._features(v, x), batch_size=batch_size
     )
-    assert isinstance(c_v_given_u, torch.Tensor)
-    assert isinstance(c_u_given_v, torch.Tensor)
+
     return 0.5 * (c_v_given_u + c_u_given_v)
 
   def _raw_pdf_grid_torch(
@@ -569,9 +568,8 @@ class RosenblattBicop(BicopBase[TensorLike]):
     first_vu = u_grid.repeat_interleave(n_x)
     x_vu = x_unique.repeat(n_u, 1)
     grid_vu = self.v_given_ux_.pdf_grid(
-      self._features(first_vu, x_vu), v_grid, batch_size=batch_size
+      v_grid, x=self._features(first_vu, x_vu), batch_size=batch_size
     )
-    assert isinstance(grid_vu, torch.Tensor)
     grid_vu = grid_vu.reshape(n_u, n_x, n_v)
 
     # U|V: conditioning rows (v_j, x_k) -> [v, x, u]; permute to [u, x, v]
@@ -579,9 +577,8 @@ class RosenblattBicop(BicopBase[TensorLike]):
     first_uv = v_grid.repeat_interleave(n_x)
     x_uv = x_unique.repeat(n_v, 1)
     grid_uv = self.u_given_vx_.pdf_grid(
-      self._features(first_uv, x_uv), u_grid, batch_size=batch_size
+      u_grid, x=self._features(first_uv, x_uv), batch_size=batch_size
     )
-    assert isinstance(grid_uv, torch.Tensor)
     grid_uv = grid_uv.reshape(n_v, n_x, n_u).permute(2, 1, 0)
 
     return 0.5 * (grid_vu + grid_uv)
@@ -698,8 +695,8 @@ class RosenblattBicop(BicopBase[TensorLike]):
     return_as_torch = is_torch_array(u)
     u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
 
-    out = self.v_given_ux_.cdf(self._features(u_t, x_t), v_t)
-    assert isinstance(out, torch.Tensor)
+    out = self.v_given_ux_.cdf(v_t, x=self._features(u_t, x_t))
+
     out = torch.clamp(
       out,
       self.quantile_config.eps,
@@ -722,8 +719,8 @@ class RosenblattBicop(BicopBase[TensorLike]):
     return_as_torch = is_torch_array(u)
     u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
 
-    out = self.u_given_vx_.cdf(self._features(v_t, x_t), u_t)
-    assert isinstance(out, torch.Tensor)
+    out = self.u_given_vx_.cdf(u_t, x=self._features(v_t, x_t))
+
     out = torch.clamp(
       out,
       self.quantile_config.eps,
@@ -739,8 +736,8 @@ class RosenblattBicop(BicopBase[TensorLike]):
     """Invert :meth:`hfunc1` using the V|U backend's native quantiles."""
     return_as_torch = is_torch_array(u)
     u_t, alpha_t, x_t = self._prepare_joint_inputs(u, x)
-    out = self.v_given_ux_.icdf(self._features(u_t, x_t), alpha_t)
-    assert isinstance(out, torch.Tensor)
+    out = self.v_given_ux_.icdf(alpha_t, x=self._features(u_t, x_t))
+
     return _wrap_output(out, return_as_torch=return_as_torch)
 
   def hinv2(
@@ -751,8 +748,8 @@ class RosenblattBicop(BicopBase[TensorLike]):
     """Invert :meth:`hfunc2` using the U|V backend's native quantiles."""
     return_as_torch = is_torch_array(u)
     alpha_t, v_t, x_t = self._prepare_joint_inputs(u, x)
-    out = self.u_given_vx_.icdf(self._features(v_t, x_t), alpha_t)
-    assert isinstance(out, torch.Tensor)
+    out = self.u_given_vx_.icdf(alpha_t, x=self._features(v_t, x_t))
+
     return _wrap_output(out, return_as_torch=return_as_torch)
 
   def _sample_uniform(
@@ -857,14 +854,13 @@ class RosenblattBicop(BicopBase[TensorLike]):
     cond_flat = conditioned.repeat_interleave(n_int + 1)
     x_flat = x.repeat_interleave(n_int + 1, dim=0)
 
-    feats = self._features(s_flat, x_flat)
-    F_flat = module.cdf(feats, cond_flat, batch_size=batch_size)
-    assert isinstance(F_flat, torch.Tensor)
-    F_grid = F_flat.reshape(n, n_int + 1)
+    features = self._features(s_flat, x_flat)
+    cdf_flat = module.cdf(cond_flat, x=features, batch_size=batch_size)
+    cdf_grid = cdf_flat.reshape(n, n_int + 1)
 
     # Per-row trapezoidal integral over the s axis.
     ds = torch.diff(s_grids, dim=1)
-    avgs = 0.5 * (F_grid[:, :-1] + F_grid[:, 1:])
+    avgs = 0.5 * (cdf_grid[:, :-1] + cdf_grid[:, 1:])
     return torch.sum(avgs * ds, dim=1)
 
   def cdf_grid(
@@ -933,13 +929,12 @@ class RosenblattBicop(BicopBase[TensorLike]):
     )
 
     x_for_s = x_row.repeat_interleave(s_fine.shape[0], dim=0)
-    feats = self._features(s_fine, x_for_s)
-    F_table = module.cdf_grid(feats, conditioned_grid)
-    assert isinstance(F_table, torch.Tensor)
+    features = self._features(s_fine, x_for_s)
+    cdf_table = module.cdf_grid(conditioned_grid, x=features)
 
     # Cumulative trapezoid along axis=0.
     ds = torch.diff(s_fine)
-    avgs = 0.5 * (F_table[:-1] + F_table[1:])
+    avgs = 0.5 * (cdf_table[:-1] + cdf_table[1:])
     cum = torch.zeros((s_fine.shape[0], n_v), device=self._device)
     cum[1:] = torch.cumsum(avgs * ds.unsqueeze(1), dim=0)
 
@@ -1012,8 +1007,7 @@ class RosenblattBicop(BicopBase[TensorLike]):
       x_t = x_row_t.repeat_interleave(n, dim=0)
 
     # Inverse Rosenblatt: v = F_{V | U, X}^{-1}(alpha | u, x).
-    v_t = self.v_given_ux_.icdf(self._features(u_t, x_t), alpha_t)
-    assert isinstance(v_t, torch.Tensor)
+    v_t = self.v_given_ux_.icdf(alpha_t, x=self._features(u_t, x_t))
 
     return float(wdm(u_np, v_t.detach().cpu().numpy(), "tau"))
 

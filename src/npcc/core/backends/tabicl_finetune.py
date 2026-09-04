@@ -61,7 +61,7 @@ class FinetunedTabICLBackend(TabICLBackend):
     self.learning_rate = learning_rate
     self.finetune_kwargs = dict(finetune_kwargs)
 
-  def _fit_model(self, w: torch.Tensor, z: torch.Tensor) -> None:
+  def _fit_model(self, x: torch.Tensor, z: torch.Tensor) -> None:
     from tabicl import FinetunedTabICLRegressor
 
     model = FinetunedTabICLRegressor(
@@ -70,5 +70,5 @@ class FinetunedTabICLBackend(TabICLBackend):
       learning_rate=self.learning_rate,
       **self.finetune_kwargs,
     )
-    model.fit(w.detach().cpu().numpy(), z.detach().cpu().numpy())
+    model.fit(x.detach().cpu().numpy(), z.detach().cpu().numpy())
     self.model_ = model
