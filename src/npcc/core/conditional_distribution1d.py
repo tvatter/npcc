@@ -110,29 +110,10 @@ class ConditionalDistribution1D(MarginBase[torch.Tensor], ABC):
     values: torch.Tensor,
     x: torch.Tensor | None,
   ) -> torch.Tensor:
-    """Prepare conditioning features for fitting or evaluation.
-
-    When no covariates are supplied, a constant feature is created because
-    distributional-regression backends generally require at least one feature.
-
-    Parameters
-    ----------
-    values
-      Response values or probabilities. Only the leading dimension is needed
-      to construct unconditional features.
-    x
-      Optional conditioning features.
-
-    Returns
-    -------
-    torch.Tensor
-      Two-dimensional float64 features on ``self._device``.
-    """
-    n = values.shape[0]
-
+    """Prepare conditioning features."""
     if x is None:
       return torch.zeros(
-        (n, 1),
+        (values.shape[0], 1),
         dtype=torch.float64,
         device=self._device,
       )
@@ -140,10 +121,7 @@ class ConditionalDistribution1D(MarginBase[torch.Tensor], ABC):
     if x.ndim == 1:
       x = x.reshape(-1, 1)
 
-    return x.to(
-      device=self._device,
-      dtype=torch.float64,
-    )
+    return x
 
   def _transform_y(self, y: torch.Tensor) -> torch.Tensor:
     """Transform responses to the backend's modeled scale."""
@@ -198,16 +176,10 @@ class ConditionalDistribution1D(MarginBase[torch.Tensor], ABC):
     x: torch.Tensor | None = None,
     weights: torch.Tensor | None = None,
   ) -> Self:
-    """Fit the backend to responses and optional conditioning features.
+    """Fit the backend to responses and optional conditioning features."""
+    del weights
 
-    Inputs are normalized to float64 tensors on ``self._device``. A backend
-    requiring CPU or NumPy data must perform that conversion privately inside
-    :meth:`_fit_model`.
-    """
-    y_t = y.to(
-      device=self._device,
-      dtype=torch.float64,
-    ).reshape(-1)
+    y_t = y.reshape(-1)
 
     x_t = self._conditioning(y_t, x=x)
     z_t = self._transform_y(y_t)
@@ -219,7 +191,7 @@ class ConditionalDistribution1D(MarginBase[torch.Tensor], ABC):
     return self
 
   @abstractmethod
-  def _fit_model(self, w: torch.Tensor, z: torch.Tensor) -> None:
+  def _fit_model(self, x: torch.Tensor, z: torch.Tensor) -> None:
     """Train the backend using tensors on the configured device.
 
     A third-party backend that requires host-side inputs is responsible for

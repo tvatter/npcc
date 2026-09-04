@@ -1,30 +1,24 @@
 """
-nori.py — Synthefy Nori foundation-model backend (extra).
+Synthefy Nori quantile conditional margin.
 
-Nori is a tabular foundation model for regression via in-context learning; its
-regressor exposes conditional quantiles directly
-(``predict(X, output_type="quantiles", quantiles=[...])``), mapping onto
-:class:`~npcc.core.quantile_table_distribution1d.QuantileTableDistribution1D`
-via the single ``_predict_quantiles`` hook.
+Nori is an in-context tabular foundation model whose regressor exposes
+conditional quantiles directly. It predicts every requested probability level
+in a single call.
 
-Install (until the torch-uncapping fix reaches PyPI, use the fork; ``uv``
-cannot lock it because its packaging pins the torch cu128 index — see the note
-in ``pyproject.toml``)::
+PDF, CDF, inverse CDF, and grid evaluation are inherited from
+:class:`QuantileTableDistribution1D`.
 
-    uv sync --extra cu128 --extra backends
-    uv pip install "synthefy-nori @ \
-git+https://github.com/tvatter/synthefy-nori.git@allow-newer-torch-cuda"
+Nori uses a NumPy-facing estimator interface. Input conversion is isolated
+inside this adapter, and predictions are immediately converted back to torch
+tensors on the input device and with the input dtype.
 
-Package: ``synthefy-nori``.  Reference: Synthefy Nori model card
-(https://huggingface.co/Synthefy/Nori); no peer-reviewed paper at time of
-writing.
+This backend requires the ``synthefy-nori`` optional dependency.
 """
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
-import numpy as np
 import torch
 from synthefy_nori import NoriRegressor
 
@@ -35,15 +29,21 @@ from npcc.core.quantile_table_distribution1d import (
 
 
 class NoriBackend(QuantileTableDistribution1D):
-  """Conditional predictive distribution via Synthefy Nori's quantile head.
+  """Conditional margin using Synthefy Nori's quantile output.
 
   Parameters
   ----------
-  transform, config, device, batch_size
-      Forwarded to :class:`QuantileTableDistribution1D`.
+  transform
+    Response transformation inherited from
+    :class:`QuantileTableDistribution1D`.
+  config
+    Quantile-grid configuration.
+  device
+    Device used by Nori and returned tensors.
+  batch_size
+    Maximum number of conditioning rows evaluated in one prediction call.
   **nori_kwargs
-      Extra keyword arguments for ``NoriRegressor`` (e.g. ``model_path``,
-      ``augmentations``).  ``device`` defaults to the resolved backend device.
+    Additional arguments passed to ``NoriRegressor``.
   """
 
   model_: NoriRegressor | None
@@ -55,7 +55,7 @@ class NoriBackend(QuantileTableDistribution1D):
     config: QuantileGridConfig | None = None,
     device: str | torch.device | None = None,
     batch_size: int | None = None,
-    **nori_kwargs: Any,  # noqa: ANN401 - passthrough to NoriRegressor
+    **nori_kwargs: Any,  # noqa: ANN401 - forwarded to NoriRegressor
   ) -> None:
     super().__init__(
       transform=transform,
@@ -67,34 +67,80 @@ class NoriBackend(QuantileTableDistribution1D):
     self.nori_kwargs.setdefault("device", str(self._device))
     self.model_ = None
 
-  def _fit_model(self, w: torch.Tensor, z: torch.Tensor) -> None:
+  def _fit_model(
+    self,
+    x: torch.Tensor,
+    z: torch.Tensor,
+  ) -> None:
+    """Prepare Nori for conditional prediction."""
     model = NoriRegressor(**self.nori_kwargs)
-    model.fit(
-      w.detach().cpu().numpy().astype(np.float32),
-      z.detach().cpu().numpy().astype(np.float64),
+
+    x_host = (
+      x.detach()
+      .to(
+        device="cpu",
+        dtype=torch.float64,
+      )
+      .numpy()
     )
+    z_host = (
+      z.detach()
+      .to(
+        device="cpu",
+        dtype=torch.float64,
+      )
+      .numpy()
+    )
+
+    model.fit(x_host, z_host)
+
     self.model_ = model
 
   def _predict_quantiles(
-    self, w: torch.Tensor, alphas: np.ndarray
+    self,
+    x: torch.Tensor,
+    alphas: torch.Tensor,
   ) -> torch.Tensor:
+    """Predict one quantile table for a chunk of conditioning rows."""
     assert self.model_ is not None
-    q = np.asarray(
-      self.model_.predict(
-        w.detach().cpu().numpy().astype(np.float32),
-        output_type="quantiles",
-        quantiles=alphas.tolist(),
-      ),
-      dtype=float,
-    )
-    n_chunk, n_alphas = w.shape[0], len(alphas)
-    if q.ndim == 1:
-      q = q.reshape(n_chunk, n_alphas)
-    elif q.shape == (n_alphas, n_chunk):
-      q = q.T
-    if q.shape != (n_chunk, n_alphas):
-      raise RuntimeError(
-        "Unexpected Nori quantile output shape. "
-        f"Got {q.shape}, expected {(n_chunk, n_alphas)}."
+
+    x_host = (
+      x.detach()
+      .to(
+        device="cpu",
+        dtype=torch.float32,
       )
-    return torch.as_tensor(q, dtype=torch.float64, device=self._device)
+      .numpy()
+    )
+
+    predicted = self.model_.predict(
+      x_host,
+      output_type="quantiles",
+      quantiles=alphas.detach().cpu().tolist(),
+    )
+
+    quantiles = torch.as_tensor(
+      predicted,
+      dtype=x.dtype,
+      device=x.device,
+    )
+
+    n_chunk = x.shape[0]
+    n_alphas = alphas.shape[0]
+    expected_shape = (n_chunk, n_alphas)
+    nori_shape = (n_alphas, n_chunk)
+
+    if quantiles.ndim == 1:
+      quantiles = quantiles.reshape(nori_shape)
+
+    if quantiles.shape == nori_shape:
+      return quantiles.T
+
+    if quantiles.shape == expected_shape:
+      return quantiles
+
+    raise RuntimeError(
+      "Unexpected Nori quantile output shape. "
+      f"Got {quantiles.shape}, expected {nori_shape} "
+      f"or {expected_shape}."
+    )

@@ -1,24 +1,20 @@
 """
-tabpfn_quantile.py — quantile-based TabPFN backend.
+Quantile-based TabPFN conditional margin.
 
-Reads TabPFN's ``output_type="quantiles"`` API into the universal
-:class:`~npcc.core.quantile_table_distribution1d.QuantileTableDistribution1D`
-machinery: it only implements :py:meth:`_predict_quantiles`; the chunked
-table prediction, monotone sort, and pdf/cdf/icdf/grid inversion are
-inherited.
+This backend reads TabPFN's ``output_type="quantiles"`` result into the
+quantile-table reconstruction machinery. It implements model fitting and
+quantile prediction; PDF, CDF, inverse CDF, and grid evaluation are inherited
+from :class:`QuantileTableDistribution1D`.
 
-The quantile read-out is model-agnostic but, for TabPFN, is slower than
-the native ``criterion`` head (see
-:class:`~npcc.core.backends.tabpfn_criterion.TabPFNCriterionBackend`,
-the default).  It exists mainly as the shared path that the non-TabPFN
-quantile backends reuse.
+TabPFN receives host-side input tensors. These conversions are isolated in this
+adapter, while all outputs are returned as torch tensors on the configured
+model device.
 """
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
-import numpy as np
 import torch
 
 from npcc.core.backends.tabpfn_common import (
@@ -33,16 +29,23 @@ from npcc.core.quantile_table_distribution1d import (
 
 
 class TabPFNQuantileBackend(QuantileTableDistribution1D):
-  """Conditional predictive distribution via TabPFN's quantile output.
+  """Conditional margin using TabPFN's predicted quantiles.
 
   Parameters
   ----------
-  transform, config, device, batch_size
-      Forwarded to :class:`QuantileTableDistribution1D`.
+  transform
+    Response transformation inherited from
+    :class:`QuantileTableDistribution1D`.
+  config
+    Quantile-grid configuration.
+  device
+    Device used by the TabPFN model and returned tensors.
+  batch_size
+    Maximum number of conditioning rows evaluated in one prediction call.
   model_kwargs
-      Forwarded to the ``TabPFNRegressor`` constructor.
+    Additional arguments passed to ``TabPFNRegressor``.
   model_version
-      TabPFN model version (default: v3).
+    TabPFN model version. The default is the shared current version.
   """
 
   model_: Any | None
@@ -68,38 +71,61 @@ class TabPFNQuantileBackend(QuantileTableDistribution1D):
     self.model_version = model_version
     self.model_ = None
 
-  def _fit_model(self, w: torch.Tensor, z: torch.Tensor) -> None:
-    self.model_ = make_tabpfn_regressor(self.model_version, self.model_kwargs)
-    self.model_.fit(w, z)
+  def _fit_model(self, x: torch.Tensor, z: torch.Tensor) -> None:
+    """Fit TabPFN."""
+    self.model_ = make_tabpfn_regressor(
+      self.model_version,
+      self.model_kwargs,
+    )
+
+    # TabPFN converts inputs to NumPy internally
+    # CUDA inputs cannot be converted
+    self.model_.fit(
+      x.detach().cpu(),
+      z.detach().cpu(),
+    )
 
   def _predict_quantiles(
-    self, w: torch.Tensor, alphas: np.ndarray
+    self,
+    x: torch.Tensor,
+    alphas: torch.Tensor,
   ) -> torch.Tensor:
-    """One ``output_type="quantiles"`` forward pass for a chunk of rows.
+    """Predict one quantile table for a chunk of conditioning rows.
 
-    TabPFN's predict input must be on CPU.  Its quantile output may be
-    ``(n_chunk, n_alphas)`` or its transpose depending on the version;
-    prefer the documented ``(n_chunk, n_alphas)`` layout so a square
-    chunk is never spuriously transposed.
+    TabPFN receives host-side conditioning rows and a Python list of
+    probability levels. Its output is converted back to a torch tensor on the
+    configured device.
+
+    Depending on the TabPFN version, the output may have shape
+    ``(n_chunk, n_alphas)`` or ``(n_alphas, n_chunk)``.
     """
     assert self.model_ is not None
-    q_pred = self.model_.predict(
-      w.detach().cpu(),
-      output_type="quantiles",
-      quantiles=alphas.tolist(),
-    )
-    q = np.asarray(q_pred, dtype=float)
-    n_chunk = w.shape[0]
-    n_alphas = len(alphas)
 
-    if q.shape == (n_chunk, n_alphas):
-      pass
-    elif q.shape == (n_alphas, n_chunk):
-      q = q.T
-    else:
-      raise RuntimeError(
-        "Unexpected quantile output shape. "
-        f"Got {q.shape}, expected {(n_chunk, n_alphas)} "
-        f"or {(n_alphas, n_chunk)}."
-      )
-    return torch.as_tensor(q, dtype=torch.float64, device=self._device)
+    predicted = self.model_.predict(
+      x.detach().cpu(),
+      output_type="quantiles",
+      quantiles=alphas.detach().cpu().tolist(),
+    )
+
+    quantiles = torch.as_tensor(
+      predicted,
+      dtype=x.dtype,
+      device=x.device,
+    )
+
+    n_chunk = x.shape[0]
+    n_alphas = alphas.shape[0]
+    expected_shape = (n_chunk, n_alphas)
+    transposed_shape = (n_alphas, n_chunk)
+
+    if quantiles.shape == expected_shape:
+      return quantiles
+
+    if quantiles.shape == transposed_shape:
+      return quantiles.T
+
+    raise RuntimeError(
+      "Unexpected quantile output shape. "
+      f"Got {tuple(quantiles.shape)}, expected {expected_shape} "
+      f"or {transposed_shape}."
+    )
