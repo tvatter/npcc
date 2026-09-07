@@ -105,27 +105,23 @@ def _as_2d(
 
 
 def _check_uv(
-  u: TensorLike,
-  v: TensorLike,
+  u: torch.Tensor,
+  v: torch.Tensor,
   eps: float,
-  *,
-  device: torch.device | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-  """Validate copula coordinates and clip them away from ``{0, 1}``.
+  """Validate copula coordinates and clip them away from ``{0, 1}``."""
 
-  Copulas live on the open unit square, so any input on or outside the
-  boundary is a user error.  The valid points are then clipped into
-  ``[eps, 1 - eps]`` so downstream logit transforms cannot blow up.
-  """
-  dev = _resolve_device(device)
-  u_t = _to_tensor(u, device=dev).reshape(-1)
-  v_t = _to_tensor(v, device=dev).reshape(-1)
+  u_t = u.reshape(-1)
+  v_t = v.reshape(-1)
+
   if u_t.shape != v_t.shape:
     raise ValueError("u and v must have the same shape.")
+
   if torch.any((u_t <= 0.0) | (u_t >= 1.0)) or torch.any(
     (v_t <= 0.0) | (v_t >= 1.0)
   ):
     raise ValueError("u and v must lie strictly inside (0, 1).")
+
   return (
     torch.clamp(u_t, eps, 1.0 - eps),
     torch.clamp(v_t, eps, 1.0 - eps),
