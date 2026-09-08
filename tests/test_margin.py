@@ -36,10 +36,11 @@ def test_conditional_margin_subclasses_margin_base(
   assert margin.supports_covariates is True
   assert margin.supports_controls is False
   assert margin.supports_weights is False
-  assert margin.supported_var_types == ("c",)
   assert margin.var_type == "c"
   assert margin.support == (float("-inf"), float("inf"))
   assert margin.is_fitted is False
+  assert margin.nobs is None
+  assert margin.n_parameters == 0.0
 
 
 @pytest.mark.parametrize(
@@ -71,6 +72,8 @@ def test_fit_constructs_expected_feature_matrix(
 
   assert result is margin
   assert margin.is_fitted is True
+  assert margin.nobs == 8
+  assert margin.n_parameters == 0.0
   assert observed_shapes == [(8, expected_width)]
 
 

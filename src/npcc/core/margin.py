@@ -52,7 +52,6 @@ class ConditionalMargin(MarginBase[torch.Tensor], ABC):
 
   supports_covariates: bool = True
   supports_weights: bool = False
-  supported_var_types: tuple[str, ...] = ("c",)
   supports_controls: bool = False
 
   transform: Literal["identity", "logit", "probit"]
@@ -195,6 +194,7 @@ class ConditionalMargin(MarginBase[torch.Tensor], ABC):
 
     self._fitted = False
     self._fit_model(x_t, z_t)
+    self._nobs = y_t.shape[0]
     self._fitted = True
 
     return self
