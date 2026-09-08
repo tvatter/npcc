@@ -13,7 +13,7 @@ from npcc.core.errors import (
   UnknownBackendError,
 )
 from npcc.core.quantile_table_distribution1d import (
-  QuantileGridConfig,
+  QuantileTableConfig,
   QuantileTableDistribution1D,
 )
 from npcc.core.registry import (
@@ -33,7 +33,7 @@ __all__ = [
   "InvalidBackendKwargsError",
   "MissingBackendDependencyError",
   "NpccError",
-  "QuantileGridConfig",
+  "QuantileTableConfig",
   "QuantileTableDistribution1D",
   "RosenblattBicop",
   "RosenblattVinecop",

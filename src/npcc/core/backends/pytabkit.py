@@ -23,7 +23,7 @@ from typing import Any, Literal
 import torch
 
 from npcc.core.quantile_table_distribution1d import (
-  QuantileGridConfig,
+  QuantileTableConfig,
   QuantileTableDistribution1D,
 )
 
@@ -37,7 +37,8 @@ class _PyTabKitBackend(QuantileTableDistribution1D):
     self,
     *,
     transform: Literal["identity", "logit", "probit"] = "logit",
-    config: QuantileGridConfig | None = None,
+    quantile_table_config: QuantileTableConfig | None = None,
+    eps: float = 1e-6,
     device: str | torch.device | None = None,
     batch_size: int | None = None,
     hpo: bool = False,
@@ -45,7 +46,8 @@ class _PyTabKitBackend(QuantileTableDistribution1D):
   ) -> None:
     super().__init__(
       transform=transform,
-      config=config,
+      quantile_table_config=quantile_table_config,
+      eps=eps,
       device=device,
       batch_size=batch_size,
     )
@@ -63,7 +65,7 @@ class _PyTabKitBackend(QuantileTableDistribution1D):
     z: torch.Tensor,
   ) -> None:
     """Fit a PyTabKit model using the fixed probability grid."""
-    alphas = self.config.alphas(
+    alphas = self.quantile_table_config.alphas(
       device="cpu",
       dtype=torch.float64,
     )

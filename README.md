@@ -84,9 +84,9 @@ your own.
 ### Two base classes
 
 Every backend implements the abstract
-`ConditionalDistribution1D` interface — `fit(w, y)`, `pdf(w, y)`,
-`cdf(w, y)`, `icdf(w, alphas)`, plus the Cartesian-grid fast paths
-`pdf_grid(w, y_grid)` / `cdf_grid(w, y_grid)`.  There are two ways to
+`ConditionalMargin` interface — `fit(y, x=w)`, `pdf(y, x=w)`,
+`cdf(y, x=w)`, `icdf(alphas, x=w)`, plus the Cartesian-grid fast paths
+`pdf_grid(y_grid, x=w)` / `cdf_grid(y_grid, x=w)`. There are two ways to
 implement it:
 
 - **Quantile-table backends** subclass `QuantileTableDistribution1D` and
@@ -99,7 +99,7 @@ implement it:
   linear interpolation in the sorted quantile table; $Q'$ floored to a
   positive constant for stability.
 
-- **Native-evaluation backends** subclass `ConditionalDistribution1D`
+- **Native-evaluation backends** subclass `ConditionalMargin`
   directly and evaluate the predictive distribution at arbitrary points.
   `tabpfn-criterion` reads TabPFN's `criterion` head
   (`predict(W, output_type="full")` → logits + `pdf`/`cdf`/`icdf`); it is
@@ -137,9 +137,9 @@ device-aware and overridable model-wide
 | `as_bicop(x_row=None)` | A `pyvinecopulib`-compatible adapter (`var_types = ["c", "c"]`, `pdf(uv)`). |
 | `plot(*, x_row=None, plot_type="contour", margin_type="norm", ...)` | Contour/surface plot via `pyvinecopulib`'s plotter (lazy-imports `matplotlib`). |
 
-Exported names: `RosenblattBicop`, `RosenblattVinecop`, `RosenblattVinedist`, `BackendMargin`,
-the abstract `ConditionalDistribution1D` and `QuantileTableDistribution1D` base classes, 
-`QuantileGridConfig`, the `TabPFNCriterionBackend` / `TabPFNQuantileBackend` leaves, 
+Exported names: `RosenblattBicop`, `RosenblattVinecop`, `RosenblattVinedist`,
+the abstract `ConditionalMargin` and `QuantileTableDistribution1D` base classes,
+`QuantileTableConfig`, the `TabPFNCriterionBackend` / `TabPFNQuantileBackend` leaves,
 and the registry helpers `create_backend` / `register_backend` / `available_backends`.
 
 ### Quick start
@@ -311,11 +311,10 @@ only on variables already forming the tail of the structure order.
 
 ## Original-scale vine distribution
 
-`BackendMargin` adapts any registered distributional-regression backend to
-pyvinecopulib's `MarginBase` interface. `RosenblattVinedist` fits one independent
-backend margin per response column, transforms the observations through their
-conditional marginal CDFs, and fits a `RosenblattVinecop` to the resulting
-pseudo observations.
+`ConditionalMargin` adapts registered distributional-regression backends to
+pyvinecopulib's `MarginBase` interface. `RosenblattVinedist` combines fitted
+conditional margins with a `RosenblattVinecop` on the resulting pseudo
+observations.
 
 For observations \(Y=(Y_1,\ldots,Y_d)\) and optional covariates \(X\), the
 
@@ -336,38 +335,50 @@ and the resulting conditional joint density is
 \]
 
 ```python
-import numpy as np
 import pyvinecopulib as pv
+import torch
 
-from npcc import RosenblattVinedist
+from npcc import QuantileTableConfig, RosenblattVinedist, create_backend
+from npcc.core.controls import FitControlsRosenblattVinecop
+from npcc.core.vinecop import RosenblattVinecop
 
-rng = np.random.default_rng(42)
-y_train = rng.normal(size=(500, 3))
-x_train = rng.normal(size=(500, 2))
+generator = torch.Generator().manual_seed(42)
+y_train = torch.randn((500, 3), generator=generator, dtype=torch.float64)
+x_train = torch.randn((500, 2), generator=generator, dtype=torch.float64)
 
 structure = pv.RVineStructure.from_order([1, 2, 3])
-
-dist = Rosenblatt.from_data(
-   y_train,
-   x=x_train,
-   structure=structure,
-   margin_backend="tabpfn-criterion",
-   pair_backend="tabpfn-criterion",
+table_config = QuantileTableConfig()
+controls = FitControlsRosenblattVinecop(
+   backend="tabpfn-criterion",
+   quantile_table_config=table_config,
    device="cpu",
 )
+margins = [
+   create_backend(
+      controls.backend,
+      transform="identity",
+      quantile_table_config=table_config,
+      eps=controls.eps,
+      device=controls.device,
+      batch_size=controls.batch_size,
+      backend_kwargs=controls.backend_kwargs,
+   )
+   for _ in range(structure.dim)
+]
+vinecop = RosenblattVinecop(None, structure, device=controls.device)
+dist = RosenblattVinedist(vinecop, margins).fit(y_train, controls, x=x_train)
 
-y_query = rng.normal(size=(5, 3))
-x_query = rng.normal(size=(5, 2))
+y_query = torch.randn((5, 3), generator=generator, dtype=torch.float64)
+x_query = torch.randn((5, 2), generator=generator, dtype=torch.float64)
 
 density = dist.pdf(y_query, x=x_query)
 independent = dist.rosenblatt(y_query, x=x_query)
 recovered = dist.inverse_rosenblatt(independent, x=x_query)
-samples = dist.samples(5, x=x_query, seeds=[42])
+samples = dist.sample(5, x=x_query, seeds=[42])
 ```
 
-Margin and pair-copula backends are configured independently through
-`margin_backend` / `margin_backend_kwargs` and
-`pair_backend` / `pair_backend_kwargs`.
+One `FitControlsRosenblattVinecop` configures the backend family used by the
+margins and pair copulas.
 
 The initial implementation supports continuous real-valued margins only.
 Every margin uses the identity target transform, while pair copulas default to

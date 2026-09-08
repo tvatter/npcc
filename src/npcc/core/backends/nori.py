@@ -23,7 +23,7 @@ import torch
 from synthefy_nori import NoriRegressor
 
 from npcc.core.quantile_table_distribution1d import (
-  QuantileGridConfig,
+  QuantileTableConfig,
   QuantileTableDistribution1D,
 )
 
@@ -52,14 +52,16 @@ class NoriBackend(QuantileTableDistribution1D):
     self,
     *,
     transform: Literal["identity", "logit", "probit"] = "logit",
-    config: QuantileGridConfig | None = None,
+    quantile_table_config: QuantileTableConfig | None = None,
+    eps: float = 1e-6,
     device: str | torch.device | None = None,
     batch_size: int | None = None,
     **nori_kwargs: Any,  # noqa: ANN401 - forwarded to NoriRegressor
   ) -> None:
     super().__init__(
       transform=transform,
-      config=config,
+      quantile_table_config=quantile_table_config,
+      eps=eps,
       device=device,
       batch_size=batch_size,
     )

@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 import torch
 
-from npcc.core.quantile_table_distribution1d import QuantileGridConfig
+from npcc.core.quantile_table_distribution1d import QuantileTableConfig
 from npcc.experiments import runner as runner_mod
 from npcc.experiments.config import EstimatorSpec, GridConfig, RunConfig
 from npcc.experiments.runner import (
@@ -395,7 +395,8 @@ def test_run_study_forwards_backend_kwargs(tmp_path: Path) -> None:
   def _factory(
     *,
     transform: Literal["identity", "logit", "probit"],
-    config: QuantileGridConfig,
+    quantile_table_config: QuantileTableConfig,
+    eps: float,
     device: str | torch.device | None,
     batch_size: int | None,
     **kw: object,
@@ -403,7 +404,8 @@ def test_run_study_forwards_backend_kwargs(tmp_path: Path) -> None:
     captured.append(dict(kw))
     return _UniformQuantileBackend(
       transform=transform,
-      config=config,
+      quantile_table_config=quantile_table_config,
+      eps=eps,
       device=device,
       batch_size=batch_size,
     )

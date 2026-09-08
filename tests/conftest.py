@@ -293,10 +293,11 @@ def register_uniform_backends() -> Iterator[None]:
 
   registry.register_backend(
     "uniform-quantile",
-    lambda *, transform, config, device, batch_size, **kw: (
+    lambda *, transform, quantile_table_config, eps, device, batch_size, **kw: (
       _UniformQuantileBackend(
         transform=transform,
-        config=config,
+        quantile_table_config=quantile_table_config,
+        eps=eps,
         device=device,
         batch_size=batch_size,
       )
@@ -304,10 +305,10 @@ def register_uniform_backends() -> Iterator[None]:
   )
   registry.register_backend(
     "uniform-native",
-    lambda *, transform, config, device, batch_size, **kw: (
+    lambda *, transform, quantile_table_config, eps, device, batch_size, **kw: (
       _UniformNativeBackend(
         transform=transform,
-        eps=config.eps,
+        eps=eps,
         device=device,
         batch_size=batch_size,
       )

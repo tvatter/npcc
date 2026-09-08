@@ -81,7 +81,7 @@ from npcc.core.controls import (
   Transform,
 )
 from npcc.core.margin import ConditionalMargin
-from npcc.core.quantile_table_distribution1d import QuantileGridConfig
+from npcc.core.quantile_table_distribution1d import QuantileTableConfig
 from npcc.core.registry import create_backend
 
 
@@ -166,10 +166,12 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
       TabPFN's native head; ``"tabpfn-quantiles"`` inverts TabPFN's
       quantile output; optional extras include ``"ngboost"``, ``"gbm"``,
       and ``"tabicl"``.
-  quantile_config
-      :class:`QuantileGridConfig` instance.  Its ``eps`` field controls
-      boundary clipping used by the estimator (and quantile-based
-      backends); its alpha grid configures quantile backends.
+  quantile_table_config
+      :class:`QuantileTableConfig` instance configuring quantile-table
+      reconstruction for quantile-based backends.
+  eps
+      Boundary clipping distance used throughout copula and transformed-margin
+      computations.
   transform
       Support transform used by the inner backend.  ``"logit"`` (default)
       maps copula values in ``(0, 1)`` to ``R`` before fitting;
@@ -207,7 +209,8 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     self,
     *,
     backend: str = "tabpfn-criterion",
-    quantile_config: QuantileGridConfig | None = None,
+    quantile_table_config: QuantileTableConfig | None = None,
+    eps: float = 1e-6,
     transform: Transform = "logit",
     device: str | torch.device | None = None,
     batch_size: int | None = None,
@@ -217,7 +220,8 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
   ) -> None:
     initial_controls = FitControlsRosenblattBicop(
       backend=backend,
-      quantile_config=quantile_config or QuantileGridConfig(),
+      quantile_table_config=quantile_table_config or QuantileTableConfig(),
+      eps=eps,
       transform=transform,
       device=device,
       batch_size=batch_size,
@@ -233,7 +237,8 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
   ) -> None:
     """Apply fit controls and create fresh conditional estimators."""
     self.backend = controls.backend
-    self.quantile_config = controls.quantile_config
+    self.quantile_table_config = controls.quantile_table_config
+    self.eps = controls.eps
     self.transform = controls.transform
     self._device = _resolve_device(controls.device)
 
@@ -258,7 +263,8 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     return create_backend(
       self.backend,
       transform=self.transform,
-      config=self.quantile_config,
+      quantile_table_config=self.quantile_table_config,
+      eps=self.eps,
       device=self._device,
       batch_size=self.batch_size,
       backend_kwargs=self.backend_kwargs,
@@ -272,7 +278,7 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     ``pdf_grid`` fast path evaluates the density there in a single
     forward pass per grid row.
     """
-    eps = self.quantile_config.eps
+    eps = self.eps
     borders = torch.linspace(
       eps,
       1 - eps,
@@ -320,7 +326,7 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     if uv_t.ndim != 2 or uv_t.shape[1] != 2:
       raise ValueError("uv must have shape (n, 2).")
 
-    u_t, v_t = _check_uv(uv_t[:, 0], uv_t[:, 1], self.quantile_config.eps)
+    u_t, v_t = _check_uv(uv_t[:, 0], uv_t[:, 1], self.eps)
 
     if x is None:
       x_t = uv_t.new_empty((uv_t.shape[0], 0))
@@ -348,7 +354,7 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     if torch.any((u <= 0.0) | (u >= 1.0)) or torch.any((v <= 0.0) | (v >= 1.0)):
       raise ValueError("u_grid and v_grid must lie strictly inside (0, 1).")
 
-    eps = self.quantile_config.eps
+    eps = self.eps
     u = torch.clamp(u, eps, 1.0 - eps)
     v = torch.clamp(v, eps, 1.0 - eps)
 
@@ -721,8 +727,8 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
 
     return torch.clamp(
       out,
-      self.quantile_config.eps,
-      1.0 - self.quantile_config.eps,
+      self.eps,
+      1.0 - self.eps,
     )
 
   def hfunc2(
@@ -744,8 +750,8 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
 
     return torch.clamp(
       out,
-      self.quantile_config.eps,
-      1.0 - self.quantile_config.eps,
+      self.eps,
+      1.0 - self.eps,
     )
 
   def hinv1(
@@ -854,7 +860,7 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     batch_size: int,
   ) -> torch.Tensor:
     """Compute int_eps^{upper_i} F(conditioned_i | s, x_i) ds for each row."""
-    eps = self.quantile_config.eps
+    eps = self.eps
     n = upper.shape[0]
     upper_safe = torch.clamp(upper, min=eps + 1e-12)
 
@@ -926,7 +932,7 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
 
     Returns shape ``(len(upper_grid), len(conditioned_grid))``.
     """
-    eps = self.quantile_config.eps
+    eps = self.eps
     n_u, n_v = upper_grid.shape[0], conditioned_grid.shape[0]
 
     # Shared fine s-grid covering [eps, max(upper_grid)].
@@ -1002,7 +1008,7 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
       device=self._device,
     )
 
-    eps = self.quantile_config.eps
+    eps = self.eps
     u_t = torch.clamp(quasi[:, 0], eps, 1.0 - eps)
     alpha_t = torch.clamp(quasi[:, 1], eps, 1.0 - eps)
 

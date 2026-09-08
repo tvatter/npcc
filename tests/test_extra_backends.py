@@ -15,7 +15,7 @@ import pytest
 import torch
 
 from npcc.core.bicop import RosenblattBicop
-from npcc.core.quantile_table_distribution1d import QuantileGridConfig
+from npcc.core.quantile_table_distribution1d import QuantileTableConfig
 
 
 def _gaussian_copula_sample(
@@ -53,7 +53,7 @@ def test_gbm_backend_smoke() -> None:
   u, v = _gaussian_copula_sample(80, rho=0.6, seed=0)
   m = RosenblattBicop(
     backend="gbm",
-    quantile_config=QuantileGridConfig(n_quantiles=11),
+    quantile_table_config=QuantileTableConfig(n_quantiles=11),
     backend_kwargs={"n_estimators": 20, "max_depth": 2},
   ).fit(torch.column_stack([u, v]))
   _check_fitted_model(m)
@@ -75,7 +75,7 @@ def test_catboost_backend_smoke() -> None:
   m = RosenblattBicop(
     backend="catboost",
     backend_kwargs={"iterations": 100},
-    quantile_config=QuantileGridConfig(n_quantiles=21),
+    quantile_table_config=QuantileTableConfig(n_quantiles=21),
   ).fit(torch.column_stack([u, v]))
   _check_fitted_model(m)
 
@@ -86,7 +86,7 @@ def test_pytabkit_realmlp_backend_smoke() -> None:
   m = RosenblattBicop(
     backend="pytabkit-realmlp",
     backend_kwargs={"n_epochs": 8},
-    quantile_config=QuantileGridConfig(n_quantiles=21),
+    quantile_table_config=QuantileTableConfig(n_quantiles=21),
   ).fit(torch.column_stack([u, v]))
   _check_fitted_model(m)
 
@@ -97,7 +97,7 @@ def test_nori_backend_smoke() -> None:
   try:
     m = RosenblattBicop(
       backend="nori",
-      quantile_config=QuantileGridConfig(n_quantiles=41),
+      quantile_table_config=QuantileTableConfig(n_quantiles=41),
     ).fit(torch.column_stack([u, v]))
   except Exception as exc:  # noqa: BLE001 - weight download / runtime issues
     pytest.skip(f"Nori unavailable at runtime: {exc}")

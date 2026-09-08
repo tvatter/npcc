@@ -49,7 +49,8 @@ def make_distribution(
     create_backend(
       controls.backend,
       transform="identity",
-      config=controls.quantile_config,
+      quantile_table_config=controls.quantile_table_config,
+      eps=controls.eps,
       device=controls.device,
       batch_size=controls.batch_size,
       backend_kwargs=controls.backend_kwargs,

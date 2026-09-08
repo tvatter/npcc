@@ -68,6 +68,9 @@ class ConditionalMargin(MarginBase[torch.Tensor], ABC):
     device: str | torch.device | None = None,
     batch_size: int | None = None,
   ) -> None:
+    if not 0.0 < eps < 0.5:
+      raise ValueError("eps must lie strictly between 0 and 0.5.")
+
     self.transform = transform
     self.eps = eps
     self._device = _resolve_device(device)

@@ -23,6 +23,7 @@ def test_bicop_controls_defaults() -> None:
   controls = FitControlsRosenblattBicop()
 
   assert controls.backend == "tabpfn-criterion"
+  assert controls.eps == 1e-6
   assert controls.transform == "logit"
   assert controls.device is None
   assert controls.batch_size is None
@@ -95,7 +96,8 @@ def test_to_dict_contains_all_settings() -> None:
 
   assert settings == {
     "backend": "tabpfn-criterion",
-    "quantile_config": controls.quantile_config,
+    "quantile_table_config": controls.quantile_table_config,
+    "eps": 1e-6,
     "transform": "probit",
     "device": torch.device("cpu"),
     "batch_size": 64,
@@ -110,6 +112,12 @@ def test_invalid_transform_is_rejected() -> None:
     FitControlsRosenblattBicop(
       transform=cast(Transform, "invalid"),
     )
+
+
+@pytest.mark.parametrize("eps", [0.0, 0.5, -1e-6])
+def test_invalid_eps_is_rejected(eps: float) -> None:
+  with pytest.raises(ValueError, match="eps must lie"):
+    FitControlsRosenblattBicop(eps=eps)
 
 
 def test_nonpositive_batch_size_is_rejected() -> None:

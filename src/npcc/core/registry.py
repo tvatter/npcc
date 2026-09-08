@@ -3,8 +3,8 @@ registry.py — name -> backend-factory registry for the inner
 conditional distribution used by :class:`~npcc.core.bicop.RosenblattBicop`.
 
 A *factory* is any callable that accepts the common construction kwargs
-(``transform``, ``config``, ``device``, ``batch_size``) plus arbitrary
-backend-specific keyword arguments, and returns a
+(``transform``, ``quantile_table_config``, ``eps``, ``device``,
+``batch_size``) plus arbitrary backend-specific keyword arguments, and returns a
 :class:`~npcc.core.margin.ConditionalMargin`.
 
 Built-in backends are registered lazily: the factory imports its backend
@@ -28,7 +28,7 @@ from npcc.core.errors import (
   MissingBackendDependencyError,
   UnknownBackendError,
 )
-from npcc.core.quantile_table_distribution1d import QuantileGridConfig
+from npcc.core.quantile_table_distribution1d import QuantileTableConfig
 
 _Transform = Literal["identity", "logit", "probit"]
 
@@ -153,7 +153,8 @@ def create_backend(
   name: str,
   *,
   transform: _Transform,
-  config: QuantileGridConfig,
+  quantile_table_config: QuantileTableConfig,
+  eps: float,
   device: str | torch.device | None,
   batch_size: int | None,
   backend_kwargs: Mapping[str, Any] | None = None,
@@ -169,7 +170,8 @@ def create_backend(
   validate_backend_kwargs(name, kwargs)
   return spec.factory(
     transform=transform,
-    config=config,
+    quantile_table_config=quantile_table_config,
+    eps=eps,
     device=device,
     batch_size=batch_size,
     **kwargs,
@@ -202,17 +204,19 @@ def _coerce_model_version(kw: dict[str, Any]) -> None:
 def _tabpfn_criterion_factory(
   *,
   transform: _Transform,
-  config: QuantileGridConfig,
+  quantile_table_config: QuantileTableConfig,
+  eps: float,
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
 ) -> ConditionalMargin:
   from npcc.core.backends.tabpfn_criterion import TabPFNCriterionBackend
 
+  del quantile_table_config
   _coerce_model_version(kw)
   return TabPFNCriterionBackend(
     transform=transform,
-    eps=config.eps,
+    eps=eps,
     device=device,
     batch_size=batch_size,
     **kw,
@@ -222,7 +226,8 @@ def _tabpfn_criterion_factory(
 def _tabpfn_quantiles_factory(
   *,
   transform: _Transform,
-  config: QuantileGridConfig,
+  quantile_table_config: QuantileTableConfig,
+  eps: float,
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
@@ -232,7 +237,8 @@ def _tabpfn_quantiles_factory(
   _coerce_model_version(kw)
   return TabPFNQuantileBackend(
     transform=transform,
-    config=config,
+    quantile_table_config=quantile_table_config,
+    eps=eps,
     device=device,
     batch_size=batch_size,
     **kw,
@@ -242,7 +248,8 @@ def _tabpfn_quantiles_factory(
 def _ngboost_factory(
   *,
   transform: _Transform,
-  config: QuantileGridConfig,
+  quantile_table_config: QuantileTableConfig,
+  eps: float,
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
@@ -252,9 +259,10 @@ def _ngboost_factory(
   except ImportError as exc:
     raise _missing_extra("ngboost", "ngboost") from exc
 
+  del quantile_table_config
   return NGBoostBackend(
     transform=transform,
-    eps=config.eps,
+    eps=eps,
     device=device,
     batch_size=batch_size,
     **kw,
@@ -264,7 +272,8 @@ def _ngboost_factory(
 def _quantile_gbm_factory(
   *,
   transform: _Transform,
-  config: QuantileGridConfig,
+  quantile_table_config: QuantileTableConfig,
+  eps: float,
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
@@ -276,7 +285,8 @@ def _quantile_gbm_factory(
 
   return QuantileGBMBackend(
     transform=transform,
-    config=config,
+    quantile_table_config=quantile_table_config,
+    eps=eps,
     device=device,
     batch_size=batch_size,
     **kw,
@@ -286,7 +296,8 @@ def _quantile_gbm_factory(
 def _tabicl_factory(
   *,
   transform: _Transform,
-  config: QuantileGridConfig,
+  quantile_table_config: QuantileTableConfig,
+  eps: float,
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
@@ -298,7 +309,8 @@ def _tabicl_factory(
 
   return TabICLBackend(
     transform=transform,
-    config=config,
+    quantile_table_config=quantile_table_config,
+    eps=eps,
     device=device,
     batch_size=batch_size,
     **kw,
@@ -308,7 +320,8 @@ def _tabicl_factory(
 def _catboost_factory(
   *,
   transform: _Transform,
-  config: QuantileGridConfig,
+  quantile_table_config: QuantileTableConfig,
+  eps: float,
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
@@ -320,7 +333,8 @@ def _catboost_factory(
 
   return CatBoostBackend(
     transform=transform,
-    config=config,
+    quantile_table_config=quantile_table_config,
+    eps=eps,
     device=device,
     batch_size=batch_size,
     **kw,
@@ -330,7 +344,8 @@ def _catboost_factory(
 def _xgb_quantile_factory(
   *,
   transform: _Transform,
-  config: QuantileGridConfig,
+  quantile_table_config: QuantileTableConfig,
+  eps: float,
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
@@ -342,7 +357,8 @@ def _xgb_quantile_factory(
 
   return XGBQuantileBackend(
     transform=transform,
-    config=config,
+    quantile_table_config=quantile_table_config,
+    eps=eps,
     device=device,
     batch_size=batch_size,
     **kw,
@@ -352,7 +368,8 @@ def _xgb_quantile_factory(
 def _pytabkit_realmlp_factory(
   *,
   transform: _Transform,
-  config: QuantileGridConfig,
+  quantile_table_config: QuantileTableConfig,
+  eps: float,
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
@@ -364,7 +381,8 @@ def _pytabkit_realmlp_factory(
 
   return PyTabKitRealMLPBackend(
     transform=transform,
-    config=config,
+    quantile_table_config=quantile_table_config,
+    eps=eps,
     device=device,
     batch_size=batch_size,
     **kw,
@@ -374,7 +392,8 @@ def _pytabkit_realmlp_factory(
 def _pytabkit_tabm_factory(
   *,
   transform: _Transform,
-  config: QuantileGridConfig,
+  quantile_table_config: QuantileTableConfig,
+  eps: float,
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
@@ -386,7 +405,8 @@ def _pytabkit_tabm_factory(
 
   return PyTabKitTabMBackend(
     transform=transform,
-    config=config,
+    quantile_table_config=quantile_table_config,
+    eps=eps,
     device=device,
     batch_size=batch_size,
     **kw,
@@ -396,7 +416,8 @@ def _pytabkit_tabm_factory(
 def _tabpfn_finetune_factory(
   *,
   transform: _Transform,
-  config: QuantileGridConfig,
+  quantile_table_config: QuantileTableConfig,
+  eps: float,
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
@@ -406,9 +427,10 @@ def _tabpfn_finetune_factory(
     FinetunedTabPFNCriterionBackend,
   )
 
+  del quantile_table_config
   return FinetunedTabPFNCriterionBackend(
     transform=transform,
-    eps=config.eps,
+    eps=eps,
     device=device,
     batch_size=batch_size,
     **kw,
@@ -418,7 +440,8 @@ def _tabpfn_finetune_factory(
 def _tabicl_finetune_factory(
   *,
   transform: _Transform,
-  config: QuantileGridConfig,
+  quantile_table_config: QuantileTableConfig,
+  eps: float,
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
@@ -430,7 +453,8 @@ def _tabicl_finetune_factory(
 
   return FinetunedTabICLBackend(
     transform=transform,
-    config=config,
+    quantile_table_config=quantile_table_config,
+    eps=eps,
     device=device,
     batch_size=batch_size,
     **kw,
@@ -440,7 +464,8 @@ def _tabicl_finetune_factory(
 def _nori_factory(
   *,
   transform: _Transform,
-  config: QuantileGridConfig,
+  quantile_table_config: QuantileTableConfig,
+  eps: float,
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
@@ -457,7 +482,8 @@ def _nori_factory(
 
   return NoriBackend(
     transform=transform,
-    config=config,
+    quantile_table_config=quantile_table_config,
+    eps=eps,
     device=device,
     batch_size=batch_size,
     **kw,

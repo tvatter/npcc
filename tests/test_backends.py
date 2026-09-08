@@ -24,7 +24,7 @@ from npcc.core.errors import (
   MissingBackendDependencyError,
   UnknownBackendError,
 )
-from npcc.core.quantile_table_distribution1d import QuantileGridConfig
+from npcc.core.quantile_table_distribution1d import QuantileTableConfig
 from npcc.core.registry import (
   available_backends,
   create_backend,
@@ -58,7 +58,8 @@ class TestRegistry:
       create_backend(
         "does-not-exist",
         transform="logit",
-        config=QuantileGridConfig(),
+        quantile_table_config=QuantileTableConfig(),
+        eps=1e-6,
         device="cpu",
         batch_size=None,
       )
@@ -77,7 +78,8 @@ class TestRegistry:
       create_backend(
         "ngboost",
         transform="logit",
-        config=QuantileGridConfig(),
+        quantile_table_config=QuantileTableConfig(),
+        eps=1e-6,
         device="cpu",
         batch_size=None,
       )
@@ -89,7 +91,8 @@ class TestRegistry:
       create_backend(
         "tabpfn-criterion",
         transform="logit",
-        config=QuantileGridConfig(),
+        quantile_table_config=QuantileTableConfig(),
+        eps=1e-6,
         device="cpu",
         batch_size=None,
         backend_kwargs={"not_a_real_kwarg": 123},
@@ -311,6 +314,7 @@ def test_bicop_from_data_accepts_fit_controls(
   controls = FitControlsRosenblattBicop(
     backend="uniform-native",
     transform="logit",
+    eps=2e-5,
     device="cpu",
     batch_size=17,
   )
@@ -325,6 +329,9 @@ def test_bicop_from_data_accepts_fit_controls(
 
   assert pair.backend == "uniform-native"
   assert pair.transform == "logit"
+  assert pair.eps == 2e-5
+  assert pair.v_given_ux_.eps == 2e-5
+  assert pair.u_given_vx_.eps == 2e-5
   assert pair._device == torch.device("cpu")
   assert pair.batch_size == 17
   assert pair.v_given_ux_.is_fitted

@@ -23,7 +23,7 @@ from typing import Any, Literal
 import torch
 
 from npcc.core.backends.tabicl import TabICLBackend
-from npcc.core.quantile_table_distribution1d import QuantileGridConfig
+from npcc.core.quantile_table_distribution1d import QuantileTableConfig
 
 
 class FinetunedTabICLBackend(TabICLBackend):
@@ -44,7 +44,8 @@ class FinetunedTabICLBackend(TabICLBackend):
     self,
     *,
     transform: Literal["identity", "logit", "probit"] = "logit",
-    config: QuantileGridConfig | None = None,
+    quantile_table_config: QuantileTableConfig | None = None,
+    eps: float = 1e-6,
     device: str | torch.device | None = None,
     batch_size: int | None = None,
     epochs: int = 30,
@@ -53,7 +54,8 @@ class FinetunedTabICLBackend(TabICLBackend):
   ) -> None:
     super().__init__(
       transform=transform,
-      config=config,
+      quantile_table_config=quantile_table_config,
+      eps=eps,
       device=device,
       batch_size=batch_size,
     )

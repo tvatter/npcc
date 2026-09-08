@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from typing import Literal, cast
 
 import pytest
 import torch
 
 from npcc.core.backends.tabpfn_quantile import TabPFNQuantileBackend
-from npcc.core.quantile_table_distribution1d import QuantileGridConfig
+from npcc.core.quantile_table_distribution1d import QuantileTableConfig
 
 
 def make_fitted_backend(
@@ -39,14 +40,14 @@ def standard_normal_icdf(p: torch.Tensor) -> torch.Tensor:
   return math.sqrt(2.0) * torch.erfinv(2.0 * p - 1.0)
 
 
-class TestQuantileGridConfig:
+class TestQuantileTableConfig:
   def test_default_alphas_shape(self) -> None:
-    config = QuantileGridConfig()
+    config = QuantileTableConfig()
 
     assert config.alphas().shape == (101,)
 
   def test_alphas_endpoints(self) -> None:
-    config = QuantileGridConfig(
+    config = QuantileTableConfig(
       n_quantiles=11,
       alpha_min=0.1,
       alpha_max=0.9,
@@ -55,21 +56,28 @@ class TestQuantileGridConfig:
     expected = torch.tensor([0.1, 0.9], dtype=torch.float64)
     torch.testing.assert_close(config.alphas()[[0, -1]], expected)
 
+  def test_configuration_is_immutable(self) -> None:
+    config = QuantileTableConfig()
+
+    with pytest.raises(AttributeError):
+      setattr(config, "n_quantiles", 11)
+
   @pytest.mark.parametrize(
-    "config",
+    "factory",
     [
-      QuantileGridConfig(alpha_min=0.9, alpha_max=0.1),
-      QuantileGridConfig(alpha_min=0.0),
-      QuantileGridConfig(alpha_max=1.0),
-      QuantileGridConfig(n_quantiles=4),
+      lambda: QuantileTableConfig(alpha_min=0.9, alpha_max=0.1),
+      lambda: QuantileTableConfig(alpha_min=0.0),
+      lambda: QuantileTableConfig(alpha_max=1.0),
+      lambda: QuantileTableConfig(n_quantiles=4),
+      lambda: QuantileTableConfig(min_qprime=0.0),
     ],
   )
   def test_rejects_invalid_configuration(
     self,
-    config: QuantileGridConfig,
+    factory: Callable[[], QuantileTableConfig],
   ) -> None:
     with pytest.raises(ValueError):
-      config.alphas()
+      factory()
 
 
 class TestQuantileDistribution1D:
@@ -278,7 +286,10 @@ class TestQuantileDistribution1D:
       x=torch.zeros((len(y), 1), dtype=torch.float64),
     )
     expected = torch.tensor(
-      [backend.config.alpha_min, backend.config.alpha_max],
+      [
+        backend.quantile_table_config.alpha_min,
+        backend.quantile_table_config.alpha_max,
+      ],
       dtype=torch.float64,
     )
 

@@ -8,7 +8,7 @@ from typing import Literal
 
 import torch
 
-from npcc.core.quantile_table_distribution1d import QuantileGridConfig
+from npcc.core.quantile_table_distribution1d import QuantileTableConfig
 from npcc.core.registry import validate_backend_kwargs
 
 Transform = Literal["identity", "logit", "probit"]
@@ -26,8 +26,11 @@ class FitControlsRosenblattBicop:
   ----------
   backend
     Registered conditional-margin backend.
-  quantile_config
-    Quantile-grid and boundary configuration.
+  quantile_table_config
+    Quantile-table reconstruction configuration.
+  eps
+    Boundary clipping distance used throughout copula and transformed-margin
+    computations.
   transform
     Transformation applied to copula-scale responses before backend fitting.
   device
@@ -44,9 +47,10 @@ class FitControlsRosenblattBicop:
   """
 
   backend: str = "tabpfn-criterion"
-  quantile_config: QuantileGridConfig = field(
-    default_factory=QuantileGridConfig
+  quantile_table_config: QuantileTableConfig = field(
+    default_factory=QuantileTableConfig
   )
+  eps: float = 1e-6
   transform: Transform = "logit"
   device: str | torch.device | None = None
   batch_size: int | None = None
@@ -58,6 +62,9 @@ class FitControlsRosenblattBicop:
     """Validate and normalize the controls."""
     if self.transform not in ("identity", "logit", "probit"):
       raise ValueError("transform must be 'identity', 'logit', or 'probit'.")
+
+    if not 0.0 < self.eps < 0.5:
+      raise ValueError("eps must lie strictly between 0 and 0.5.")
 
     if self.device is not None:
       self.device = torch.device(self.device)
@@ -78,7 +85,8 @@ class FitControlsRosenblattBicop:
     """Return the settings as a plain dictionary."""
     return {
       "backend": self.backend,
-      "quantile_config": self.quantile_config,
+      "quantile_table_config": self.quantile_table_config,
+      "eps": self.eps,
       "transform": self.transform,
       "device": self.device,
       "batch_size": self.batch_size,

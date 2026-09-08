@@ -32,8 +32,8 @@ from npcc.core._common import (
 from npcc.core.margin import ConditionalMargin
 
 
-@dataclass
-class QuantileGridConfig:
+@dataclass(frozen=True)
+class QuantileTableConfig:
   """Configuration for the quantile-table reconstruction.
 
   Attributes
@@ -46,15 +46,23 @@ class QuantileGridConfig:
     Largest predicted probability level.
   min_qprime
     Lower bound for the estimated quantile derivative.
-  eps
-    Boundary clipping distance used by logit and probit transforms.
   """
 
   n_quantiles: int = 101
   alpha_min: float = 1e-3
   alpha_max: float = 1.0 - 1e-3
   min_qprime: float = 1e-6
-  eps: float = 1e-6
+
+  def __post_init__(self) -> None:
+    """Validate the quantile-table configuration."""
+    if not (0.0 < self.alpha_min < self.alpha_max < 1.0):
+      raise ValueError("Require 0 < alpha_min < alpha_max < 1.")
+
+    if self.n_quantiles < 5:
+      raise ValueError("n_quantiles must be at least 5.")
+
+    if not self.min_qprime > 0.0:
+      raise ValueError("min_qprime must be positive.")
 
   def alphas(
     self,
@@ -63,12 +71,6 @@ class QuantileGridConfig:
     dtype: torch.dtype = torch.float64,
   ) -> torch.Tensor:
     """Return the validated probability grid."""
-    if not (0.0 < self.alpha_min < self.alpha_max < 1.0):
-      raise ValueError("Require 0 < alpha_min < alpha_max < 1.")
-
-    if self.n_quantiles < 5:
-      raise ValueError("n_quantiles must be at least 5.")
-
     return torch.linspace(
       self.alpha_min,
       self.alpha_max,
@@ -85,26 +87,27 @@ class QuantileTableDistribution1D(ConditionalMargin):
   complete quantile table for every conditioning row.
   """
 
-  config: QuantileGridConfig
+  quantile_table_config: QuantileTableConfig
 
   def __init__(
     self,
     *,
     transform: Literal["identity", "logit", "probit"] = "logit",
-    config: QuantileGridConfig | None = None,
+    quantile_table_config: QuantileTableConfig | None = None,
+    eps: float = 1e-6,
     device: str | torch.device | None = None,
     batch_size: int | None = None,
   ) -> None:
-    cfg = config or QuantileGridConfig()
+    cfg = quantile_table_config or QuantileTableConfig()
 
     super().__init__(
       transform=transform,
-      eps=cfg.eps,
+      eps=eps,
       device=device,
       batch_size=batch_size,
     )
 
-    self.config = cfg
+    self.quantile_table_config = cfg
 
   @abstractmethod
   def _predict_quantiles(
@@ -139,7 +142,7 @@ class QuantileTableDistribution1D(ConditionalMargin):
     self._check_fitted()
     effective_batch_size = self._resolve_batch_size(batch_size)
 
-    alphas = self.config.alphas(
+    alphas = self.quantile_table_config.alphas(
       device=x.device,
       dtype=x.dtype,
     )
@@ -210,7 +213,7 @@ class QuantileTableDistribution1D(ConditionalMargin):
     )
     quantile_derivative = torch.clamp(
       quantile_derivative,
-      min=self.config.min_qprime,
+      min=self.quantile_table_config.min_qprime,
     )
 
     density_at_quantiles = 1.0 / quantile_derivative
@@ -274,7 +277,7 @@ class QuantileTableDistribution1D(ConditionalMargin):
 
       quantile_derivative = torch.clamp(
         _torch_gradient_1d(sorted_quantiles, alphas),
-        min=self.config.min_qprime,
+        min=self.quantile_table_config.min_qprime,
       )
       density_at_quantiles = 1.0 / quantile_derivative
 

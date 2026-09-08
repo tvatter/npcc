@@ -10,7 +10,7 @@ import torch
 from pyvinecopulib.core import MarginBase
 
 from npcc.core.margin import ConditionalMargin
-from npcc.core.quantile_table_distribution1d import QuantileGridConfig
+from npcc.core.quantile_table_distribution1d import QuantileTableConfig
 from npcc.core.registry import create_backend
 
 
@@ -21,7 +21,8 @@ def make_margin(
   return create_backend(
     "uniform-native",
     transform="identity",
-    config=QuantileGridConfig(),
+    quantile_table_config=QuantileTableConfig(),
+    eps=1e-6,
     device="cpu",
     batch_size=None,
   )
@@ -41,6 +42,22 @@ def test_conditional_margin_subclasses_margin_base(
   assert margin.is_fitted is False
   assert margin.nobs is None
   assert margin.n_parameters == 0.0
+
+
+@pytest.mark.parametrize("eps", [0.0, 0.5, -1e-6])
+def test_invalid_eps_is_rejected(
+  register_uniform_backends: None,
+  eps: float,
+) -> None:
+  with pytest.raises(ValueError, match="eps must lie"):
+    create_backend(
+      "uniform-native",
+      transform="identity",
+      quantile_table_config=QuantileTableConfig(),
+      eps=eps,
+      device="cpu",
+      batch_size=None,
+    )
 
 
 @pytest.mark.parametrize(
