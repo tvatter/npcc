@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-import numpy as np
-import torch
 import pytest
+import torch
 from pyvinecopulib import RVineStructure
-from pyvinecopulib.core import Vinedist
+from pyvinecopulib.core import VinedistBase
 
-from npcc.core._common import TensorLike
-from npcc.core.margin import BackendMargin
+from npcc.core.controls import FitControlsRosenblattVinecop
+from npcc.core.margin import ConditionalMargin
+from npcc.core.registry import create_backend
+from npcc.core.vinecop import RosenblattVinecop
 from npcc.core.vinedist import RosenblattVinedist
 
 
@@ -17,315 +18,261 @@ def make_structure() -> RVineStructure:
   return RVineStructure.from_order([1, 2, 3])
 
 
-def make_data() -> np.ndarray:
-  rng = np.random.default_rng(42)
-  return rng.uniform(-1.0, 1.0, size=(40, 3))
+def make_data() -> torch.Tensor:
+  generator = torch.Generator(device="cpu")
+  generator.manual_seed(42)
+  return (
+    2.0
+    * torch.rand(
+      (40, 3),
+      generator=generator,
+      dtype=torch.float64,
+    )
+    - 1.0
+  )
+
+
+def make_controls(
+  backend: str = "uniform-native",
+) -> FitControlsRosenblattVinecop:
+  return FitControlsRosenblattVinecop(
+    backend=backend,
+    device="cpu",
+  )
+
+
+def make_distribution(
+  controls: FitControlsRosenblattVinecop,
+) -> RosenblattVinedist:
+  structure = make_structure()
+  margins = [
+    create_backend(
+      controls.backend,
+      transform="identity",
+      config=controls.quantile_config,
+      device=controls.device,
+      batch_size=controls.batch_size,
+      backend_kwargs=controls.backend_kwargs,
+    )
+    for _ in range(structure.dim)
+  ]
+  vinecop = RosenblattVinecop(
+    None,
+    structure,
+    device=controls.device,
+  )
+  return RosenblattVinedist(vinecop, margins)
 
 
 def fit_distribution(
   register_uniform_backends: None,
   *,
-  pair_backend: str = "uniform-native",
+  backend: str = "uniform-native",
+  x: torch.Tensor | None = None,
 ) -> RosenblattVinedist:
-  return RosenblattVinedist.from_data(
-    make_data(),
-    structure=make_structure(),
-    margin_backend="uniform-native",
-    pair_backend=pair_backend,
-    device="cpu",
-  )
+  controls = make_controls(backend)
+  distribution = make_distribution(controls)
+  return distribution.fit(make_data(), controls, x=x)
 
 
-def test_rosenblatt_vine_dist_subclasses_vinedist() -> None:
-  assert issubclass(RosenblattVinedist, Vinedist)
+def test_rosenblatt_vinedist_subclasses_vinedist_base() -> None:
+  assert issubclass(RosenblattVinedist, VinedistBase)
 
 
-def test_from_data_fits_one_independent_backend_margin_per_column(
+def test_constructor_binds_fixed_parts(
   register_uniform_backends: None,
 ) -> None:
-  dist = fit_distribution(register_uniform_backends)
+  controls = make_controls()
+  distribution = make_distribution(controls)
 
-  assert dist.dim == 3
-  assert len(dist.margins) == 3
+  assert distribution.dim == 3
+  assert len(distribution.margins) == 3
+  assert isinstance(distribution.vinecop, RosenblattVinecop)
+  assert distribution.vinecop.structure == make_structure()
+
+
+def test_fit_fits_one_independent_margin_per_column(
+  register_uniform_backends: None,
+) -> None:
+  distribution = fit_distribution(register_uniform_backends)
+
   assert all(
-    isinstance(margin, BackendMargin) and margin.is_fitted
-    for margin in dist.margins
+    isinstance(margin, ConditionalMargin) and margin.is_fitted
+    for margin in distribution.margins
+  )
+  assert len({id(margin) for margin in distribution.margins}) == 3
+
+
+def test_fit_uses_one_backend_for_margins_and_pairs(
+  register_uniform_backends: None,
+) -> None:
+  distribution = fit_distribution(
+    register_uniform_backends,
+    backend="uniform-quantile",
   )
 
-  assert len({id(margin) for margin in dist.margins}) == 3
-  assert (
-    len(
-      {
-        id(margin._distribution)
-        for margin in dist.margins
-        if isinstance(margin, BackendMargin)
-      }
-    )
-    == 3
+  for margin in distribution.margins:
+    assert isinstance(margin, ConditionalMargin)
+    assert margin.family_name == "_UniformQuantileBackend"
+
+  vinecop = distribution.vinecop
+  assert isinstance(vinecop, RosenblattVinecop)
+  assert all(
+    pair.backend == "uniform-quantile"
+    for row in vinecop.pair_copulas
+    for pair in row
   )
 
 
 def test_marginal_cdf_is_probability_integral_transform(
   register_uniform_backends: None,
 ) -> None:
-  dist = fit_distribution(register_uniform_backends)
-  y = np.array(
+  distribution = fit_distribution(register_uniform_backends)
+  y = torch.tensor(
     [
       [-1.0, 0.0, 1.0],
       [0.5, -0.5, 0.0],
-    ]
+    ],
+    dtype=torch.float64,
   )
 
-  result = dist.marginal_cdf(y)
+  result = distribution.marginal_cdf(y)
   expected = (y + 2.0) / 4.0
 
-  assert isinstance(result, np.ndarray)
-  np.testing.assert_allclose(result, expected)
-
-
-def test_margin_and_pair_backends_are_independent_settings(
-  register_uniform_backends: None,
-) -> None:
-  dist = fit_distribution(
-    register_uniform_backends,
-    pair_backend="uniform-quantile",
-  )
-
-  assert all(
-    isinstance(margin, BackendMargin) and margin.backend == "uniform-native"
-    for margin in dist.margins
-  )
-  assert all(
-    pair.backend == "uniform-quantile"
-    for row in dist.copula.pair_copulas
-    for pair in row
-  )
-
-
-def test_from_data_requires_structure(
-  register_uniform_backends: None,
-) -> None:
-  with pytest.raises(ValueError, match="structure is required"):
-    RosenblattVinedist.from_data(
-      make_data(),
-      margin_backend="uniform-native",
-      pair_backend="uniform-native",
-      device="cpu",
-    )
-
-
-def test_from_data_rejects_custom_margins(
-  register_uniform_backends: None,
-) -> None:
-  with pytest.raises(NotImplementedError, match="Custom margins"):
-    RosenblattVinedist.from_data(
-      make_data(),
-      structure=make_structure(),
-      margins=BackendMargin(
-        backend="uniform-native",
-        device="cpu",
-      ),
-      margin_backend="uniform-native",
-      pair_backend="uniform-native",
-      device="cpu",
-    )
-
-
-def test_from_data_rejects_controls(
-  register_uniform_backends: None,
-) -> None:
-  with pytest.raises(NotImplementedError, match="controls"):
-    RosenblattVinedist.from_data(
-      make_data(),
-      structure=make_structure(),
-      controls=object(),
-      margin_backend="uniform-native",
-      pair_backend="uniform-native",
-      device="cpu",
-    )
-
-
-def test_from_data_rejects_weights(
-  register_uniform_backends: None,
-) -> None:
-  with pytest.raises(NotImplementedError, match="weights"):
-    RosenblattVinedist.from_data(
-      make_data(),
-      structure=make_structure(),
-      weights=np.ones(40),
-      margin_backend="uniform-native",
-      pair_backend="uniform-native",
-      device="cpu",
-    )
-
-
-def test_from_data_rejects_names(
-  register_uniform_backends: None,
-) -> None:
-  with pytest.raises(NotImplementedError, match="Variable names"):
-    RosenblattVinedist.from_data(
-      make_data(),
-      structure=make_structure(),
-      names=["a", "b", "c"],
-      margin_backend="uniform-native",
-      pair_backend="uniform-native",
-      device="cpu",
-    )
+  torch.testing.assert_close(result, expected)
 
 
 def test_joint_pdf_matches_sklar_factorization(
   register_uniform_backends: None,
 ) -> None:
-  dist = fit_distribution(register_uniform_backends)
-  y = np.array(
+  distribution = fit_distribution(register_uniform_backends)
+  y = torch.tensor(
     [
       [-0.5, 0.0, 0.5],
       [0.5, -0.5, 0.0],
-    ]
+    ],
+    dtype=torch.float64,
   )
 
-  u = dist.marginal_cdf(y)
-  copula_density = dist.copula.pdf(u)
+  u = distribution.marginal_cdf(y)
+  copula_density = distribution.vinecop.pdf(u)
   expected = copula_density * 0.25**3
 
-  np.testing.assert_allclose(dist.pdf(y), expected)
+  torch.testing.assert_close(distribution.pdf(y), expected)
 
 
-@pytest.mark.parametrize("array_type", ["numpy", "torch"])
-def test_conditional_fit_and_pdf_preserve_array_namespace(
+def test_conditional_fit_and_pdf_return_tensors(
   register_uniform_backends: None,
-  array_type: str,
 ) -> None:
-  y_np = make_data()
-  x_np = np.random.default_rng(43).normal(size=(40, 2))
-
-  if array_type == "torch":
-    y: TensorLike = torch.as_tensor(y_np)
-    x: TensorLike = torch.as_tensor(x_np)
-  else:
-    y = y_np
-    x = x_np
-
-  dist = RosenblattVinedist.from_data(
-    y,
-    structure=make_structure(),
-    x=x,
-    margin_backend="uniform-native",
-    pair_backend="uniform-native",
-    device="cpu",
+  generator = torch.Generator(device="cpu")
+  generator.manual_seed(43)
+  x = torch.randn(
+    (40, 2),
+    generator=generator,
+    dtype=torch.float64,
   )
-  result = dist.pdf(y[:5], x=x[:5])
+  distribution = fit_distribution(register_uniform_backends, x=x)
 
-  if array_type == "torch":
-    assert isinstance(result, torch.Tensor)
-  else:
-    assert isinstance(result, np.ndarray)
+  result = distribution.pdf(make_data()[:5], x=x[:5])
 
   assert result.shape == (5,)
+  assert result.dtype == torch.float64
+  assert result.device.type == "cpu"
 
 
 def test_rosenblatt_round_trip(
   register_uniform_backends: None,
 ) -> None:
-  dist = fit_distribution(register_uniform_backends)
+  distribution = fit_distribution(register_uniform_backends)
   y = make_data()[:5]
 
-  transformed = dist.rosenblatt(y)
-  recovered = dist.inverse_rosenblatt(transformed)
+  transformed = distribution.rosenblatt(y)
+  recovered = distribution.inverse_rosenblatt(transformed)
 
-  np.testing.assert_allclose(recovered, y, atol=1e-8, rtol=1e-8)
+  torch.testing.assert_close(recovered, y, atol=1e-8, rtol=1e-8)
 
 
-def test_unconditional_sample_returns_original_scale_torch_data(
+def test_unconditional_sample_returns_original_scale_tensor(
   register_uniform_backends: None,
 ) -> None:
-  dist = fit_distribution(register_uniform_backends)
+  distribution = fit_distribution(register_uniform_backends)
 
-  first = dist.sample(8, seeds=[42])
-  second = dist.sample(8, seeds=[42])
+  first = distribution.sample(8, seeds=[42])
+  second = distribution.sample(8, seeds=[42])
 
-  assert isinstance(first, torch.Tensor)
   assert first.shape == (8, 3)
+  assert first.dtype == torch.float64
+  assert first.device.type == "cpu"
   torch.testing.assert_close(first, second)
   assert torch.all((first >= -2.0) & (first <= 2.0))
 
 
-def test_from_data_rejects_structure_dimension_mismatch(
+def test_fit_rejects_non_tensor_data(
   register_uniform_backends: None,
 ) -> None:
-  with pytest.raises(ValueError, match="structure has dimension 3"):
-    RosenblattVinedist.from_data(
-      np.ones((10, 2)),
-      structure=make_structure(),
-      margin_backend="uniform-native",
-      pair_backend="uniform-native",
-      device="cpu",
-    )
+  controls = make_controls()
+  distribution = make_distribution(controls)
+
+  with pytest.raises(TypeError, match="y must be a torch tensor"):
+    distribution.fit([[0.0, 0.0, 0.0]], controls)
 
 
-def test_from_data_rejects_covariate_row_mismatch(
+def test_fit_rejects_dimension_mismatch(
   register_uniform_backends: None,
 ) -> None:
-  with pytest.raises(ValueError, match="same number of rows"):
-    RosenblattVinedist.from_data(
-      np.ones((10, 3)),
-      structure=make_structure(),
-      x=np.ones((9, 2)),
-      margin_backend="uniform-native",
-      pair_backend="uniform-native",
-      device="cpu",
-    )
+  controls = make_controls()
+  distribution = make_distribution(controls)
+  y = torch.ones((10, 2), dtype=torch.float64)
+
+  with pytest.raises(ValueError, match="has 3 variables"):
+    distribution.fit(y, controls)
 
 
-def test_from_data_rejects_mixed_array_namespaces(
+def test_fit_rejects_covariate_row_mismatch(
   register_uniform_backends: None,
 ) -> None:
-  with pytest.raises(TypeError, match="same array namespace"):
-    RosenblattVinedist.from_data(
-      torch.ones((10, 3)),
-      structure=make_structure(),
-      x=np.ones((10, 2)),
-      margin_backend="uniform-native",
-      pair_backend="uniform-native",
-      device="cpu",
-    )
+  controls = make_controls()
+  distribution = make_distribution(controls)
+  y = torch.ones((10, 3), dtype=torch.float64)
+  x = torch.ones((9, 2), dtype=torch.float64)
+
+  with pytest.raises(ValueError, match="x must have one row per observation"):
+    distribution.fit(y, controls, x=x)
 
 
-@pytest.mark.parametrize("array_type", ["numpy", "torch"])
-def test_conditional_sample_preserves_covariate_array_type(
+def test_fit_rejects_weights(
   register_uniform_backends: None,
-  array_type: str,
 ) -> None:
-  y_np = make_data()
-  x_np = np.random.default_rng(43).normal(size=(40, 2))
+  controls = make_controls()
+  distribution = make_distribution(controls)
+  y = make_data()
+  weights = torch.ones(y.shape[0], dtype=torch.float64)
 
-  if array_type == "torch":
-    y: TensorLike = torch.as_tensor(y_np)
-    x: TensorLike = torch.as_tensor(x_np)
-  else:
-    y = y_np
-    x = x_np
+  with pytest.raises(ValueError, match="cannot weight the copula half"):
+    distribution.fit(y, controls, weights=weights)
 
-  dist = RosenblattVinedist.from_data(
-    y,
-    structure=make_structure(),
-    x=x,
-    margin_backend="uniform-native",
-    pair_backend="uniform-native",
-    device="cpu",
+
+def test_conditional_sample_returns_tensor(
+  register_uniform_backends: None,
+) -> None:
+  generator = torch.Generator(device="cpu")
+  generator.manual_seed(43)
+  x = torch.randn(
+    (40, 2),
+    generator=generator,
+    dtype=torch.float64,
   )
-  result = dist.sample(5, x=x[:5], seeds=[42])
+  distribution = fit_distribution(register_uniform_backends, x=x)
 
-  if array_type == "torch":
-    assert isinstance(result, torch.Tensor)
-  else:
-    assert isinstance(result, np.ndarray)
+  result = distribution.sample(5, x=x[:5], seeds=[42])
 
   assert result.shape == (5, 3)
+  assert result.dtype == torch.float64
+  assert result.device.type == "cpu"
 
 
 def test_vinedist_types_are_publicly_exported() -> None:
   import npcc
 
-  assert npcc.BackendMargin is BackendMargin
+  assert npcc.ConditionalMargin is ConditionalMargin
   assert npcc.RosenblattVinedist is RosenblattVinedist

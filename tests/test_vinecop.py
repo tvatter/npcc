@@ -1,26 +1,28 @@
-import numpy as np
 import pytest
 import torch
 
 from pyvinecopulib import RVineStructure
-from pyvinecopulib.core import VinecopBase
+from pyvinecopulib.core import NonSimplifiedContext, VinecopBase
 
 from npcc import RosenblattBicop, RosenblattVinecop
-from npcc.core._common import TensorLike
+from npcc.core.controls import (
+  FitControlsRosenblattBicop,
+  FitControlsRosenblattVinecop,
+)
 
 
-@pytest.fixture
-def fitted_vine(
-  register_uniform_backends: None,
-) -> RosenblattVinecop:
-  rng = np.random.default_rng(42)
-  u = rng.uniform(0.1, 0.9, size=(40, 3))
-  return RosenblattVinecop.from_data(
-    u,
-    make_structure(),
-    backend="uniform-native",
-    device="cpu",
-  )
+def random_tensor(
+  shape: tuple[int, ...],
+  *,
+  low: float,
+  high: float,
+  seed: int,
+) -> torch.Tensor:
+  """Return reproducible float64 data without changing global RNG state."""
+  generator = torch.Generator(device="cpu")
+  generator.manual_seed(seed)
+  values = torch.rand(shape, generator=generator, dtype=torch.float64)
+  return low + (high - low) * values
 
 
 def make_structure() -> RVineStructure:
@@ -32,6 +34,30 @@ def make_pairs() -> list[list[RosenblattBicop]]:
     [RosenblattBicop(device="cpu"), RosenblattBicop(device="cpu")],
     [RosenblattBicop(device="cpu")],
   ]
+
+
+def make_controls() -> FitControlsRosenblattVinecop:
+  return FitControlsRosenblattVinecop(
+    backend="uniform-native",
+    device="cpu",
+  )
+
+
+def fit_vine(
+  u: torch.Tensor,
+  *,
+  x: torch.Tensor | None = None,
+) -> RosenblattVinecop:
+  vine = RosenblattVinecop(None, make_structure(), device="cpu")
+  return vine.fit(u, make_controls(), x=x)
+
+
+@pytest.fixture
+def fitted_vine(
+  register_uniform_backends: None,
+) -> RosenblattVinecop:
+  u = random_tensor((40, 3), low=0.1, high=0.9, seed=42)
+  return fit_vine(u)
 
 
 def test_rosenblatt_vinecop_subclass_vinecop_base() -> None:
@@ -48,8 +74,17 @@ def test_constructor_binds_structure_and_pairs() -> None:
   assert vine.trunc_lvl == 2
   assert vine.order == (1, 2, 3)
   assert vine.supports_covariates is True
+  assert isinstance(vine._context, NonSimplifiedContext)
   assert vine.get_pair_copula(0, 1) is pairs[0][1]
   assert vine.get_pair_copula(1, 0) is pairs[1][0]
+
+
+def test_constructor_creates_unfitted_vine() -> None:
+  vine = RosenblattVinecop(None, make_structure(), device="cpu")
+
+  assert vine.pair_copulas == []
+  assert vine._device == torch.device("cpu")
+  assert isinstance(vine._context, NonSimplifiedContext)
 
 
 def test_constructor_rejects_wrong_tree_count() -> None:
@@ -71,55 +106,6 @@ def test_constructor_copies_pair_rows() -> None:
   pairs[0].clear()
 
   assert len(vine.pair_copulas[0]) == 2
-
-
-def test_from_data_fits_fixed_structure(
-  register_uniform_backends: None,
-) -> None:
-  rng = np.random.default_rng(42)
-  u = rng.uniform(0.1, 0.9, size=(40, 3))
-
-  vine = RosenblattVinecop.from_data(
-    u,
-    make_structure(),
-    backend="uniform-native",
-    device="cpu",
-  )
-
-  assert [len(row) for row in vine.pair_copulas] == [2, 1]
-  for row in vine.pair_copulas:
-    for pair in row:
-      assert pair.v_given_ux_._fitted is True
-      assert pair.u_given_vx_._fitted is True
-
-
-def test_from_data_assembles_non_simplified_context(
-  register_uniform_backends: None,
-  monkeypatch: pytest.MonkeyPatch,
-) -> None:
-  rng = np.random.default_rng(42)
-  u = rng.uniform(0.1, 0.9, size=(40, 3))
-  x = rng.normal(size=(40, 2))
-  context_widths: list[int | None] = []
-
-  original_fit = RosenblattBicop.fit
-
-  def record_fit(
-    self: RosenblattBicop,
-    uv: TensorLike,
-    x_edge: TensorLike | None = None,
-  ) -> RosenblattBicop:
-    width = None if x_edge is None else int(x_edge.shape[1])
-    context_widths.append(width)
-    return original_fit(self, uv, x_edge)
-
-  monkeypatch.setattr(RosenblattBicop, "fit", record_fit)
-
-  RosenblattVinecop.from_data(
-    u, make_structure(), x=x, backend="uniform-native", device="cpu"
-  )
-
-  assert context_widths == [2, 2, 3]
 
 
 def test_constructor_infers_pair_device() -> None:
@@ -145,20 +131,64 @@ def test_constructor_rejects_explicit_device_mismatch() -> None:
     )
 
 
-def test_sample_is_seeded_and_on_configured_device(
+def test_fit_installs_pair_copulas(
   register_uniform_backends: None,
 ) -> None:
-  rng = np.random.default_rng(42)
-  u = rng.uniform(0.1, 0.9, size=(40, 3))
-  vine = RosenblattVinecop.from_data(
-    u, make_structure(), backend="uniform-native", device="cpu"
-  )
+  u = random_tensor((40, 3), low=0.1, high=0.9, seed=42)
 
-  first = vine.sample(8, seeds=[42])
-  second = vine.sample(8, seeds=[42])
+  vine = fit_vine(u)
 
-  assert isinstance(first, torch.Tensor)
-  assert isinstance(second, torch.Tensor)
+  assert [len(row) for row in vine.pair_copulas] == [2, 1]
+  assert vine._device == torch.device("cpu")
+
+  for row in vine.pair_copulas:
+    for pair in row:
+      assert pair.v_given_ux_._fitted is True
+      assert pair.u_given_vx_._fitted is True
+
+
+def test_fit_assembles_non_simplified_context(
+  register_uniform_backends: None,
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  u = random_tensor((40, 3), low=0.1, high=0.9, seed=42)
+  x = random_tensor((40, 2), low=-1.0, high=1.0, seed=43)
+  context_widths: list[int | None] = []
+
+  original_fit = RosenblattBicop.fit
+
+  def record_fit(
+    self: RosenblattBicop,
+    uv: torch.Tensor,
+    /,
+    controls: FitControlsRosenblattBicop | None = None,
+    *,
+    var_types: list[str] | None = None,
+    x: torch.Tensor | None = None,
+  ) -> RosenblattBicop:
+    width = None if x is None else int(x.shape[1])
+    context_widths.append(width)
+    return original_fit(
+      self,
+      uv,
+      controls,
+      var_types=var_types,
+      x=x,
+    )
+
+  monkeypatch.setattr(RosenblattBicop, "fit", record_fit)
+
+  fit_vine(u, x=x)
+
+  assert context_widths == [2, 2, 3]
+
+
+def test_sample_is_seeded_and_on_configured_device(
+  fitted_vine: RosenblattVinecop,
+) -> None:
+  first = fitted_vine.sample(8, seeds=[42])
+  second = fitted_vine.sample(8, seeds=[42])
+
   assert first.shape == (8, 3)
   assert first.dtype == torch.float64
   assert first.device.type == "cpu"
@@ -167,48 +197,24 @@ def test_sample_is_seeded_and_on_configured_device(
 
 
 def test_sample_qrng_is_reproducible(
-  register_uniform_backends: None,
+  fitted_vine: RosenblattVinecop,
 ) -> None:
-  rng = np.random.default_rng(42)
-  u = rng.uniform(0.1, 0.9, size=(40, 3))
-  vine = RosenblattVinecop.from_data(
-    u,
-    make_structure(),
-    backend="uniform-native",
-    device="cpu",
-  )
+  first = fitted_vine.sample(8, qrng=True, seeds=[42])
+  second = fitted_vine.sample(8, qrng=True, seeds=[42])
 
-  first = vine.sample(8, qrng=True, seeds=[42])
-  second = vine.sample(8, qrng=True, seeds=[42])
-
-  assert isinstance(first, torch.Tensor)
-  assert isinstance(second, torch.Tensor)
+  assert first.shape == (8, 3)
+  assert first.dtype == torch.float64
+  assert first.device.type == "cpu"
   assert torch.equal(first, second)
 
 
-def test_pdf_preserves_numpy(
+def test_pdf_returns_torch_tensor(
   fitted_vine: RosenblattVinecop,
 ) -> None:
-  rng = np.random.default_rng(42)
-  u = rng.uniform(0.2, 0.8, size=(5, 3))
+  u = random_tensor((5, 3), low=0.2, high=0.8, seed=42)
 
   result = fitted_vine.pdf(u)
 
-  assert isinstance(result, np.ndarray)
-  assert result.shape == (5,)
-  assert np.isfinite(result).all()
-  assert (result > 0.0).all()
-
-
-def test_pdf_preserves_torch(
-  fitted_vine: RosenblattVinecop,
-) -> None:
-  rng = np.random.default_rng(42)
-  u = torch.as_tensor(rng.uniform(0.2, 0.8, size=(5, 3)))
-
-  result = fitted_vine.pdf(u)
-
-  assert isinstance(result, torch.Tensor)
   assert result.shape == (5,)
   assert result.dtype == torch.float64
   assert result.device.type == "cpu"
@@ -216,165 +222,100 @@ def test_pdf_preserves_torch(
   assert torch.all(result > 0.0)
 
 
-@pytest.mark.parametrize("array_type", ["numpy", "torch"])
 def test_rosenblatt_inverse_round_trip(
   fitted_vine: RosenblattVinecop,
-  array_type: str,
 ) -> None:
-  rng = np.random.default_rng(42)
-  u_np = rng.uniform(0.2, 0.8, size=(5, 3))
-  u: TensorLike = (
-    torch.as_tensor(u_np.copy()) if array_type == "torch" else u_np.copy()
-  )
+  u = random_tensor((5, 3), low=0.2, high=0.8, seed=42)
 
   transformed = fitted_vine.rosenblatt(u)
   recovered = fitted_vine.inverse_rosenblatt(transformed)
 
-  if array_type == "torch":
-    assert isinstance(recovered, torch.Tensor)
-    torch.testing.assert_close(
-      recovered,
-      torch.as_tensor(u_np),
-      atol=1e-8,
-      rtol=1e-8,
-    )
-  else:
-    assert isinstance(recovered, np.ndarray)
-    np.testing.assert_allclose(recovered, u_np, atol=1e-8, rtol=1e-8)
+  torch.testing.assert_close(recovered, u, atol=1e-8, rtol=1e-8)
 
 
 def test_loglik_matches_summed_log_pdf(
   fitted_vine: RosenblattVinecop,
 ) -> None:
-  rng = np.random.default_rng(42)
-  u = rng.uniform(0.2, 0.8, size=(5, 3))
+  u = random_tensor((5, 3), low=0.2, high=0.8, seed=42)
 
   density = fitted_vine.pdf(u)
   result = fitted_vine.loglik(u)
+  expected = torch.log(density).sum()
 
-  assert isinstance(density, np.ndarray)
-  assert isinstance(result, np.floating)
-  assert result == pytest.approx(np.log(np.clip(density, 1e-20, None)).sum())
+  torch.testing.assert_close(result, expected)
 
 
-@pytest.mark.parametrize("array_type", ["numpy", "torch"])
-def test_pdf_with_same_namespace_covariates(
+def test_pdf_with_covariates(
   register_uniform_backends: None,
-  array_type: str,
 ) -> None:
-  rng = np.random.default_rng(42)
-  train_u_np = rng.uniform(0.1, 0.9, size=(40, 3))
-  train_x_np = rng.normal(size=(40, 2))
-  query_u_np = rng.uniform(0.2, 0.8, size=(5, 3))
-  query_x_np = rng.normal(size=(5, 2))
+  train_u = random_tensor((40, 3), low=0.1, high=0.9, seed=42)
+  train_x = random_tensor((40, 2), low=-1.0, high=1.0, seed=43)
+  query_u = random_tensor((5, 3), low=0.2, high=0.8, seed=44)
+  query_x = random_tensor((5, 2), low=-1.0, high=1.0, seed=45)
+  vine = fit_vine(train_u, x=train_x)
 
-  if array_type == "torch":
-    train_u: TensorLike = torch.as_tensor(train_u_np)
-    train_x: TensorLike = torch.as_tensor(train_x_np)
-    query_u: TensorLike = torch.as_tensor(query_u_np)
-    query_x: TensorLike = torch.as_tensor(query_x_np)
-  else:
-    train_u = train_u_np
-    train_x = train_x_np
-    query_u = query_u_np
-    query_x = query_x_np
-
-  vine = RosenblattVinecop.from_data(
-    train_u,
-    make_structure(),
-    x=train_x,
-    backend="uniform-native",
-    device="cpu",
-  )
   result = vine.pdf(query_u, x=query_x)
 
-  if array_type == "torch":
-    assert isinstance(result, torch.Tensor)
-  else:
-    assert isinstance(result, np.ndarray)
-
   assert result.shape == (5,)
+  assert result.dtype == torch.float64
+  assert result.device.type == "cpu"
 
 
-@pytest.mark.parametrize("array_type", ["numpy", "torch"])
-def test_cdf_preserves_input_type(
+def test_cdf_returns_torch_tensor(
   fitted_vine: RosenblattVinecop,
-  array_type: str,
 ) -> None:
-  rng = np.random.default_rng(42)
-  query_np = rng.uniform(0.2, 0.8, size=(3, 3))
-  query: TensorLike = (
-    torch.as_tensor(query_np) if array_type == "torch" else query_np
-  )
+  query = random_tensor((3, 3), low=0.2, high=0.8, seed=42)
 
   result = fitted_vine.cdf(query, N=64, seeds=[42])
 
-  if array_type == "torch":
-    assert isinstance(result, torch.Tensor)
-    assert torch.all((result >= 0.0) & (result <= 1.0))
-  else:
-    assert isinstance(result, np.ndarray)
-    assert ((result >= 0.0) & (result <= 1.0)).all()
-
   assert result.shape == (3,)
+  assert result.dtype == torch.float64
+  assert result.device.type == "cpu"
+  assert torch.all((result >= 0.0) & (result <= 1.0))
 
 
-@pytest.mark.parametrize("array_type", ["numpy", "torch"])
-def test_sample_conditional_preserves_input_type(
+def test_sample_conditional_returns_torch_tensor(
   fitted_vine: RosenblattVinecop,
-  array_type: str,
 ) -> None:
-  u_cond_np = np.array([[0.3], [0.5], [0.7]])
-  u_cond: TensorLike = (
-    torch.as_tensor(u_cond_np) if array_type == "torch" else u_cond_np
-  )
+  u_cond = torch.tensor([[0.3], [0.5], [0.7]], dtype=torch.float64)
 
-  result = fitted_vine.sample_conditional(
-    u_cond,
-    seeds=[42],
-  )
-
-  if array_type == "torch":
-    assert isinstance(result, torch.Tensor)
-    torch.testing.assert_close(result[:, 2], torch.as_tensor(u_cond_np[:, 0]))
-  else:
-    assert isinstance(result, np.ndarray)
-    np.testing.assert_allclose(result[:, 2], u_cond_np[:, 0])
+  result = fitted_vine.sample_conditional(u_cond, seeds=[42])
 
   assert result.shape == (3, 3)
+  assert result.dtype == torch.float64
+  assert result.device.type == "cpu"
+  torch.testing.assert_close(result[:, 2], u_cond[:, 0])
 
 
-def test_from_data_rejects_structure_dimension_mismatch(
+def test_fit_rejects_structure_dimension_mismatch(
   register_uniform_backends: None,
 ) -> None:
-  u = np.full((10, 2), 0.5)
+  u = torch.full((10, 2), 0.5, dtype=torch.float64)
+  vine = RosenblattVinecop(None, make_structure(), device="cpu")
 
   with pytest.raises(ValueError, match=r"u must have shape \(n, 3\)"):
-    RosenblattVinecop.from_data(
-      u, make_structure(), backend="uniform-native", device="cpu"
-    )
+    vine.fit(u, make_controls())
 
 
-def test_from_data_rejects_covariate_row_mismatch(
+def test_fit_rejects_covariate_row_mismatch(
   register_uniform_backends: None,
 ) -> None:
-  u = np.full((10, 3), 0.5)
-  x = np.full((9, 1), 0.5)
+  u = torch.full((10, 3), 0.5, dtype=torch.float64)
+  x = torch.full((9, 1), 0.5, dtype=torch.float64)
+  vine = RosenblattVinecop(None, make_structure(), device="cpu")
 
   with pytest.raises(
     ValueError,
-    match="x and uv must have the same number of observations",
+    match="x must have one row per observation",
   ):
-    RosenblattVinecop.from_data(
-      u, make_structure(), x=x, backend="uniform-native", device="cpu"
-    )
+    vine.fit(u, make_controls(), x=x)
 
 
 def test_cdf_rejects_external_covariates(
   fitted_vine: RosenblattVinecop,
 ) -> None:
-  u = np.full((10, 3), 0.5)
-  x = np.full((10, 1), 0.5)
+  u = torch.full((10, 3), 0.5, dtype=torch.float64)
+  x = torch.full((10, 1), 0.5, dtype=torch.float64)
 
   with pytest.raises(NotImplementedError, match="Conditional cdf"):
     fitted_vine.cdf(u, x=x, N=32)
@@ -383,7 +324,7 @@ def test_cdf_rejects_external_covariates(
 def test_sample_conditional_rejects_reorientation(
   fitted_vine: RosenblattVinecop,
 ) -> None:
-  u_cond = np.array([[0.4], [0.6]])
+  u_cond = torch.tensor([[0.4], [0.6]], dtype=torch.float64)
 
   with pytest.raises(NotImplementedError, match="non-simplified"):
     fitted_vine.sample_conditional(
@@ -393,37 +334,16 @@ def test_sample_conditional_rejects_reorientation(
     )
 
 
-@pytest.mark.parametrize("array_type", ["numpy", "torch"])
-def test_sample_with_covariates_preserves_array_type(
+def test_sample_with_covariates_returns_torch_tensor(
   register_uniform_backends: None,
-  array_type: str,
 ) -> None:
-  rng = np.random.default_rng(42)
-  train_u_np = rng.uniform(0.1, 0.9, size=(40, 3))
-  train_x_np = rng.normal(size=(40, 2))
-  query_x_np = rng.normal(size=(5, 2))
+  train_u = random_tensor((40, 3), low=0.1, high=0.9, seed=42)
+  train_x = random_tensor((40, 2), low=-1.0, high=1.0, seed=43)
+  query_x = random_tensor((5, 2), low=-1.0, high=1.0, seed=44)
+  vine = fit_vine(train_u, x=train_x)
 
-  if array_type == "torch":
-    train_u: TensorLike = torch.as_tensor(train_u_np)
-    train_x: TensorLike = torch.as_tensor(train_x_np)
-    query_x: TensorLike = torch.as_tensor(query_x_np)
-  else:
-    train_u = train_u_np
-    train_x = train_x_np
-    query_x = query_x_np
-
-  vine = RosenblattVinecop.from_data(
-    train_u,
-    make_structure(),
-    x=train_x,
-    backend="uniform-native",
-    device="cpu",
-  )
   result = vine.sample(5, x=query_x, seeds=[42])
 
-  if array_type == "torch":
-    assert isinstance(result, torch.Tensor)
-  else:
-    assert isinstance(result, np.ndarray)
-
   assert result.shape == (5, 3)
+  assert result.dtype == torch.float64
+  assert result.device.type == "cpu"

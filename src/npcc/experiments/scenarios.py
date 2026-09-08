@@ -23,8 +23,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-import numpy as np
 import pyvinecopulib as pv
+import torch
 
 # Families restricted to the single-parameter set, for which
 # ``tau_to_parameters`` is an unambiguous scalar map. Resolved via getattr
@@ -63,21 +63,21 @@ class ScenarioSpec:
 
   name: str
   conditional: bool
-  tau_of_x: Callable[[np.ndarray], np.ndarray] | None = None
+  tau_of_x: Callable[[torch.Tensor], torch.Tensor] | None = None
   tau: float | None = None
 
 
-def _clip_tau(tau: np.ndarray) -> np.ndarray:
-  return np.clip(tau, TAU_LO, TAU_HI)
+def _clip_tau(tau: torch.Tensor) -> torch.Tensor:
+  return tau.clamp(TAU_LO, TAU_HI)
 
 
 TAU_SCENARIOS: dict[str, ScenarioSpec] = {
   "linear": ScenarioSpec(
     "linear", True, lambda x: _clip_tau(TAU_LO + (TAU_HI - TAU_LO) * x)
   ),
-  "constant": ScenarioSpec("constant", True, lambda x: np.full_like(x, 0.5)),
+  "constant": ScenarioSpec("constant", True, lambda x: torch.full_like(x, 0.5)),
   "sin": ScenarioSpec(
-    "sin", True, lambda x: _clip_tau(0.5 + 0.4 * np.sin(2.0 * np.pi * x))
+    "sin", True, lambda x: _clip_tau(0.5 + 0.4 * torch.sin(2.0 * torch.pi * x))
   ),
   "quadratic": ScenarioSpec(
     "quadratic",
@@ -101,34 +101,34 @@ class EvalGrid:
   predictions consistently.
   """
 
-  u_flat: np.ndarray
-  v_flat: np.ndarray
-  x_flat: np.ndarray | None
+  u_flat: torch.Tensor
+  v_flat: torch.Tensor
+  x_flat: torch.Tensor | None
   shape: tuple[int, ...]
   conditional: bool
-  x_axis: np.ndarray | None
-  u_axis: np.ndarray
-  v_axis: np.ndarray
+  x_axis: torch.Tensor | None
+  u_axis: torch.Tensor
+  v_axis: torch.Tensor
 
 
-def interior_axis(n: int) -> np.ndarray:
+def interior_axis(n: int) -> torch.Tensor:
   """Midpoint grid on ``(0, 1)`` with boundaries excluded."""
   if n < 2:
     raise ValueError("n must be >= 2.")
-  return (np.arange(n, dtype=np.float64) + 0.5) / n
+  return (torch.arange(n, dtype=torch.float64) + 0.5) / n
 
 
-def conditional_x_axis(n: int) -> np.ndarray:
+def conditional_x_axis(n: int) -> torch.Tensor:
   """Conditional evaluation grid over the configured covariate support."""
   if n < 1:
     raise ValueError("n must be >= 1.")
-  return np.linspace(X_MIN, X_MAX, n, dtype=np.float64)
+  return torch.linspace(X_MIN, X_MAX, n, dtype=torch.float64)
 
 
 def _bicop(family: pv.BicopFamily, tau: float) -> pv.Bicop:
   """Bicop of ``family`` whose Kendall's tau equals ``tau``."""
   proto = pv.Bicop(family=family)
-  params = np.asarray(proto.tau_to_parameters(float(tau)), dtype=np.float64)
+  params = proto.tau_to_parameters(float(tau))
   return pv.Bicop(family=family, parameters=params)
 
 
@@ -147,15 +147,15 @@ def eval_grid(
   if spec.conditional:
     u_axis = interior_axis(conditional_uv_grid_n)
     v_axis = interior_axis(conditional_uv_grid_n)
-    uu, vv = np.meshgrid(u_axis, v_axis, indexing="ij")
+    uu, vv = torch.meshgrid(u_axis, v_axis, indexing="ij")
     u_pairs = uu.reshape(-1)
     v_pairs = vv.reshape(-1)
     x_axis = conditional_x_axis(conditional_x_grid_n)
     n_pairs = u_pairs.shape[0]
     return EvalGrid(
-      u_flat=np.repeat(u_pairs, conditional_x_grid_n),
-      v_flat=np.repeat(v_pairs, conditional_x_grid_n),
-      x_flat=np.tile(x_axis, n_pairs),
+      u_flat=u_pairs.repeat_interleave(conditional_x_grid_n),
+      v_flat=v_pairs.repeat_interleave(conditional_x_grid_n),
+      x_flat=x_axis.repeat(n_pairs),
       shape=(n_pairs, conditional_x_grid_n),
       conditional=True,
       x_axis=x_axis,
@@ -163,7 +163,7 @@ def eval_grid(
       v_axis=v_axis,
     )
   axis = interior_axis(UV_GRID_N)
-  uu, vv = np.meshgrid(axis, axis, indexing="ij")
+  uu, vv = torch.meshgrid(axis, axis, indexing="ij")
   u_flat = uu.reshape(-1)
   v_flat = vv.reshape(-1)
   return EvalGrid(
@@ -179,22 +179,22 @@ def eval_grid(
 
 
 def eval_grid_for_x(
-  scenario: str, x_axis: np.ndarray, *, conditional_uv_grid_n: int
+  scenario: str, x_axis: torch.Tensor, *, conditional_uv_grid_n: int
 ) -> EvalGrid:
   """Conditional evaluation grid at caller-selected ``x`` values."""
   if not TAU_SCENARIOS[scenario].conditional:
     raise ValueError("eval_grid_for_x is only valid for conditional scenarios.")
-  x_axis = np.asarray(x_axis, dtype=np.float64)
+  x_axis = x_axis.to(dtype=torch.float64)
   u_axis = interior_axis(conditional_uv_grid_n)
   v_axis = interior_axis(conditional_uv_grid_n)
-  uu, vv = np.meshgrid(u_axis, v_axis, indexing="ij")
+  uu, vv = torch.meshgrid(u_axis, v_axis, indexing="ij")
   u_pairs = uu.reshape(-1)
   v_pairs = vv.reshape(-1)
   n_pairs = u_pairs.shape[0]
   return EvalGrid(
-    u_flat=np.repeat(u_pairs, x_axis.shape[0]),
-    v_flat=np.repeat(v_pairs, x_axis.shape[0]),
-    x_flat=np.tile(x_axis, n_pairs),
+    u_flat=u_pairs.repeat_interleave(x_axis.shape[0]),
+    v_flat=v_pairs.repeat_interleave(x_axis.shape[0]),
+    x_flat=x_axis.repeat(n_pairs),
     shape=(n_pairs, x_axis.shape[0]),
     conditional=True,
     x_axis=x_axis,
@@ -205,7 +205,7 @@ def eval_grid_for_x(
 
 def ground_truth(
   family: str, scenario: str, grid: EvalGrid | None = None
-) -> dict[str, np.ndarray]:
+) -> dict[str, torch.Tensor]:
   """Exact pdf/cdf/hfunc1/hfunc2 on :func:`eval_grid` for ``(family, scenario)``.
 
   Conditional: one ``Bicop`` per evaluation ``x`` (50), evaluated at the 25 uv
@@ -221,30 +221,31 @@ def ground_truth(
     tau_x = spec.tau_of_x(grid.x_axis)
     u_grid = grid.u_flat.reshape(grid.shape)
     v_grid = grid.v_flat.reshape(grid.shape)
-    uv = np.column_stack([u_grid[:, 0], v_grid[:, 0]])
-    cols: dict[str, list[np.ndarray]] = {q: [] for q in QUANTITIES}
+    uv = torch.column_stack([u_grid[:, 0], v_grid[:, 0]])
+    uv_host = uv.numpy()
+    cols: dict[str, list[torch.Tensor]] = {q: [] for q in QUANTITIES}
     for tau in tau_x:
       cop = _bicop(fam, float(tau))
-      cols["pdf"].append(np.asarray(cop.pdf(uv), dtype=np.float64))
-      cols["cdf"].append(np.asarray(cop.cdf(uv), dtype=np.float64))
-      cols["hfunc1"].append(np.asarray(cop.hfunc1(uv), dtype=np.float64))
-      cols["hfunc2"].append(np.asarray(cop.hfunc2(uv), dtype=np.float64))
-    return {q: np.stack(cols[q], axis=1) for q in QUANTITIES}
+      cols["pdf"].append(torch.from_numpy(cop.pdf(uv_host)))
+      cols["cdf"].append(torch.from_numpy(cop.cdf(uv_host)))
+      cols["hfunc1"].append(torch.from_numpy(cop.hfunc1(uv_host)))
+      cols["hfunc2"].append(torch.from_numpy(cop.hfunc2(uv_host)))
+    return {q: torch.stack(cols[q], dim=1) for q in QUANTITIES}
 
   assert spec.tau is not None
   cop = _bicop(fam, spec.tau)
-  uv = np.column_stack([grid.u_flat, grid.v_flat])
+  uv = torch.column_stack([grid.u_flat, grid.v_flat]).numpy()
   return {
-    "pdf": np.asarray(cop.pdf(uv), dtype=np.float64),
-    "cdf": np.asarray(cop.cdf(uv), dtype=np.float64),
-    "hfunc1": np.asarray(cop.hfunc1(uv), dtype=np.float64),
-    "hfunc2": np.asarray(cop.hfunc2(uv), dtype=np.float64),
+    "pdf": torch.from_numpy(cop.pdf(uv)),
+    "cdf": torch.from_numpy(cop.cdf(uv)),
+    "hfunc1": torch.from_numpy(cop.hfunc1(uv)),
+    "hfunc2": torch.from_numpy(cop.hfunc2(uv)),
   }
 
 
 def sample(
   family: str, scenario: str, n: int, seed: int
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
   """Draw ``n`` training points ``(u, v[, x])`` from the true copula.
 
   Conditional: ``x`` is a deterministic ``linspace`` and each row is sampled by
@@ -253,27 +254,32 @@ def sample(
   """
   fam = FAMILIES[family]
   spec = TAU_SCENARIOS[scenario]
-  rng = np.random.default_rng(seed)
+  generator = torch.Generator().manual_seed(seed)
 
   if not spec.conditional:
     assert spec.tau is not None
     cop = _bicop(fam, spec.tau)
-    uv = np.asarray(
-      cop.sample(n, seeds=[int(s) for s in rng.integers(1, 2**31 - 1, 3)]),
-      dtype=np.float64,
+    seeds = torch.randint(1, 2**31 - 1, (3,), generator=generator).tolist()
+    uv = torch.from_numpy(
+      cop.sample(n, seeds=[int(s) for s in seeds]),
     )
     return uv[:, 0], uv[:, 1], None
 
   assert spec.tau_of_x is not None
-  x = np.linspace(X_MIN, X_MAX, n, dtype=np.float64)
+  x = torch.linspace(X_MIN, X_MAX, n, dtype=torch.float64)
   tau_x = spec.tau_of_x(x)
-  u = rng.uniform(_EPS, 1.0 - _EPS, size=n)
-  w = rng.uniform(_EPS, 1.0 - _EPS, size=n)
-  v = np.empty(n, dtype=np.float64)
+  u = torch.rand(n, generator=generator, dtype=torch.float64).clamp(
+    _EPS, 1.0 - _EPS
+  )
+  w = torch.rand(n, generator=generator, dtype=torch.float64).clamp(
+    _EPS, 1.0 - _EPS
+  )
+  v = torch.empty(n, dtype=torch.float64)
   # ponytail: one Bicop per row because tau(x) is continuous and pyvinecopulib
   # does not vectorise hinv1 over row-specific parameters. O(n) Bicop builds is
   # negligible next to the TabPFN fit; if it ever bites, group by rounded tau.
   for i in range(n):
     cop = _bicop(fam, float(tau_x[i]))
-    v[i] = float(np.asarray(cop.hinv1(np.array([[u[i], w[i]]]))).ravel()[0])
+    uv_host = torch.stack([u[i], w[i]]).reshape(1, 2).numpy()
+    v[i] = float(cop.hinv1(uv_host).item())
   return u, v, x

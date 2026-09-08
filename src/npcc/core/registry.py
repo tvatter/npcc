@@ -5,7 +5,7 @@ conditional distribution used by :class:`~npcc.core.bicop.RosenblattBicop`.
 A *factory* is any callable that accepts the common construction kwargs
 (``transform``, ``config``, ``device``, ``batch_size``) plus arbitrary
 backend-specific keyword arguments, and returns a
-:class:`~npcc.core.conditional_distribution1d.ConditionalDistribution1D`.
+:class:`~npcc.core.margin.ConditionalMargin`.
 
 Built-in backends are registered lazily: the factory imports its backend
 module (and, for the optional-extra backends, its third-party
@@ -22,7 +22,7 @@ from typing import Any, Literal
 
 import torch
 
-from npcc.core.conditional_distribution1d import ConditionalDistribution1D
+from npcc.core.margin import ConditionalMargin
 from npcc.core.errors import (
   InvalidBackendKwargsError,
   MissingBackendDependencyError,
@@ -32,7 +32,7 @@ from npcc.core.quantile_table_distribution1d import QuantileGridConfig
 
 _Transform = Literal["identity", "logit", "probit"]
 
-BackendFactory = Callable[..., ConditionalDistribution1D]
+BackendFactory = Callable[..., ConditionalMargin]
 
 _JSON_SCALARS = (bool, int, float, str)
 
@@ -157,7 +157,7 @@ def create_backend(
   device: str | torch.device | None,
   batch_size: int | None,
   backend_kwargs: Mapping[str, Any] | None = None,
-) -> ConditionalDistribution1D:
+) -> ConditionalMargin:
   """Instantiate the backend registered under ``name``.
 
   ``backend_kwargs`` are validated against the backend's :class:`BackendSpec`
@@ -206,7 +206,7 @@ def _tabpfn_criterion_factory(
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
-) -> ConditionalDistribution1D:
+) -> ConditionalMargin:
   from npcc.core.backends.tabpfn_criterion import TabPFNCriterionBackend
 
   _coerce_model_version(kw)
@@ -226,7 +226,7 @@ def _tabpfn_quantiles_factory(
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
-) -> ConditionalDistribution1D:
+) -> ConditionalMargin:
   from npcc.core.backends.tabpfn_quantile import TabPFNQuantileBackend
 
   _coerce_model_version(kw)
@@ -246,7 +246,7 @@ def _ngboost_factory(
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
-) -> ConditionalDistribution1D:
+) -> ConditionalMargin:
   try:
     from npcc.core.backends.ngboost import NGBoostBackend
   except ImportError as exc:
@@ -268,7 +268,7 @@ def _quantile_gbm_factory(
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
-) -> ConditionalDistribution1D:
+) -> ConditionalMargin:
   try:
     from npcc.core.backends.quantile_gbm import QuantileGBMBackend
   except ImportError as exc:
@@ -290,7 +290,7 @@ def _tabicl_factory(
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
-) -> ConditionalDistribution1D:
+) -> ConditionalMargin:
   try:
     from npcc.core.backends.tabicl import TabICLBackend
   except ImportError as exc:
@@ -312,7 +312,7 @@ def _catboost_factory(
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
-) -> ConditionalDistribution1D:
+) -> ConditionalMargin:
   try:
     from npcc.core.backends.catboost import CatBoostBackend
   except ImportError as exc:
@@ -334,7 +334,7 @@ def _xgb_quantile_factory(
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
-) -> ConditionalDistribution1D:
+) -> ConditionalMargin:
   try:
     from npcc.core.backends.xgboost_quantile import XGBQuantileBackend
   except ImportError as exc:
@@ -356,7 +356,7 @@ def _pytabkit_realmlp_factory(
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
-) -> ConditionalDistribution1D:
+) -> ConditionalMargin:
   try:
     from npcc.core.backends.pytabkit import PyTabKitRealMLPBackend
   except ImportError as exc:
@@ -378,7 +378,7 @@ def _pytabkit_tabm_factory(
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
-) -> ConditionalDistribution1D:
+) -> ConditionalMargin:
   try:
     from npcc.core.backends.pytabkit import PyTabKitTabMBackend
   except ImportError as exc:
@@ -400,7 +400,7 @@ def _tabpfn_finetune_factory(
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
-) -> ConditionalDistribution1D:
+) -> ConditionalMargin:
   # Fine-tuning is native to the core `tabpfn` package (no extra).
   from npcc.core.backends.tabpfn_finetune import (
     FinetunedTabPFNCriterionBackend,
@@ -422,7 +422,7 @@ def _tabicl_finetune_factory(
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
-) -> ConditionalDistribution1D:
+) -> ConditionalMargin:
   try:
     from npcc.core.backends.tabicl_finetune import FinetunedTabICLBackend
   except ImportError as exc:
@@ -444,7 +444,7 @@ def _nori_factory(
   device: str | torch.device | None,
   batch_size: int | None,
   **kw: Any,  # noqa: ANN401 - heterogeneous backend kwargs
-) -> ConditionalDistribution1D:
+) -> ConditionalMargin:
   try:
     from npcc.core.backends.nori import NoriBackend
   except ImportError as exc:

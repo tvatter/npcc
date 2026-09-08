@@ -11,7 +11,7 @@ uniform-margin property of the copula scale ``U``::
 
 So estimating a *conditional bivariate copula density* reduces to
 estimating a *univariate conditional density*, which is exactly what a
-:class:`~npcc.core.conditional_distribution1d.ConditionalDistribution1D`
+:class:`~npcc.core.margin.ConditionalMargin`
 backend provides.  The features fed to the inner regressor are::
 
     W = [u, x]    (when predicting V | U, X)
@@ -65,7 +65,8 @@ is what plotting always produces) automatically take the fast
 
 from __future__ import annotations
 
-from typing import Any, Literal, Self
+from collections.abc import Mapping
+from typing import Self
 
 import torch
 from pyvinecopulib.core import BicopBase
@@ -75,7 +76,11 @@ from npcc.core._common import (
   _resolve_device,
   _torch_interp,
 )
-from npcc.core.conditional_distribution1d import ConditionalDistribution1D
+from npcc.core.controls import (
+  FitControlsRosenblattBicop,
+  Transform,
+)
+from npcc.core.margin import ConditionalMargin
 from npcc.core.quantile_table_distribution1d import QuantileGridConfig
 from npcc.core.registry import create_backend
 
@@ -193,9 +198,9 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
   -----
   - The estimator fits both Rosenblatt directions and averages them to
     reduce directional bias (see the module docstring).
-  - Public methods accept either NumPy arrays or torch tensors.  A NumPy
-    ``uv`` produces NumPy output; a torch ``uv`` produces torch output on
-    ``device``.  The type of an optional ``x`` does not change that routing.
+  - Public numerical methods accept and return torch tensors. The inherited
+  plotting implementation may construct a NumPy evaluation grid, which is
+  converted to the model's device at that boundary.
   """
 
   def __init__(
@@ -203,40 +208,53 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     *,
     backend: str = "tabpfn-criterion",
     quantile_config: QuantileGridConfig | None = None,
-    transform: Literal["identity", "logit", "probit"] = "logit",
+    transform: Transform = "logit",
     device: str | torch.device | None = None,
     batch_size: int | None = None,
-    backend_kwargs: dict[str, Any] | None = None,
+    backend_kwargs: Mapping[str, object] | None = None,
     sinkhorn_iters: int | None = None,
     projection_grid_size: int = 101,
   ) -> None:
-    if sinkhorn_iters is not None and sinkhorn_iters <= 0:
-      raise ValueError("sinkhorn_iters must be None or a positive integer.")
+    initial_controls = FitControlsRosenblattBicop(
+      backend=backend,
+      quantile_config=quantile_config or QuantileGridConfig(),
+      transform=transform,
+      device=device,
+      batch_size=batch_size,
+      backend_kwargs=backend_kwargs or {},
+      sinkhorn_iters=sinkhorn_iters,
+      projection_grid_size=projection_grid_size,
+    )
+    self._apply_controls(initial_controls)
 
-    self.backend = backend
-    self.quantile_config = quantile_config or QuantileGridConfig()
-    self.transform = transform
-    self._device = _resolve_device(device)
-    if batch_size is None:
+  def _apply_controls(
+    self,
+    controls: FitControlsRosenblattBicop,
+  ) -> None:
+    """Apply fit controls and create fresh conditional estimators."""
+    self.backend = controls.backend
+    self.quantile_config = controls.quantile_config
+    self.transform = controls.transform
+    self._device = _resolve_device(controls.device)
+
+    if controls.batch_size is None:
       self.batch_size = 2000 if self._device.type == "cuda" else 400
     else:
-      if batch_size <= 0:
-        raise ValueError("batch_size must be positive.")
-      self.batch_size = batch_size
-    self.backend_kwargs = dict(backend_kwargs or {})
-    self.sinkhorn_iters = sinkhorn_iters
-    if projection_grid_size < 2:
-      raise ValueError("projection_grid_size must be at least 2.")
-    self.projection_grid_size = projection_grid_size
+      self.batch_size = controls.batch_size
 
-    self.v_given_ux_: ConditionalDistribution1D = self._make_distribution()
-    self.u_given_vx_: ConditionalDistribution1D = self._make_distribution()
+    self.backend_kwargs = dict(controls.backend_kwargs)
+    self.sinkhorn_iters = controls.sinkhorn_iters
+    self.projection_grid_size = controls.projection_grid_size
+
+    self.v_given_ux_: ConditionalMargin = self._make_distribution()
+    self.u_given_vx_: ConditionalMargin = self._make_distribution()
 
     # Grid borders (cached after fit)
     self._v_grid_borders_: torch.Tensor | None = None
     self._u_grid_borders_: torch.Tensor | None = None
 
-  def _make_distribution(self) -> ConditionalDistribution1D:
+  def _make_distribution(self) -> ConditionalMargin:
+    """Construct one conditional estimator from the active controls."""
     return create_backend(
       self.backend,
       transform=self.transform,
@@ -305,7 +323,7 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     u_t, v_t = _check_uv(uv_t[:, 0], uv_t[:, 1], self.quantile_config.eps)
 
     if x is None:
-      x_t = uv.new_empty((uv_t.shape[0], 0))
+      x_t = uv_t.new_empty((uv_t.shape[0], 0))
     else:
       x_t = x.reshape(-1, 1) if x.ndim == 1 else x
 
@@ -369,20 +387,34 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
 
   def fit(
     self,
-    uv: torch.Tensor,
+    u: torch.Tensor,
+    /,
+    controls: FitControlsRosenblattBicop | None = None,
+    *,
+    var_types: list[str] | None = None,
     x: torch.Tensor | None = None,
   ) -> Self:
-    """Fit the inner conditional density estimators.
+    """Fit both Rosenblatt directions.
 
-    Fits both Rosenblatt directions, ``f(V | U, X)`` and
-    ``f(U | V, X)``.  ``x=None`` is shorthand for the unconditional case
-    (an empty covariate matrix).
-
-    When ``self.sinkhorn_iters`` is not ``None``, the uniform 1-D grid
-    used for the optional Sinkhorn projection is initialized and cached
-    during fit.
+    Parameters
+    ----------
+    u
+      Continuous bivariate pseudo-observations with shape ``(n, 2)``.
+    controls
+      Backend and numerical configuration. When omitted, the configuration
+      currently stored on the object is retained.
+    var_types
+      Variable types supplied by pyvinecopulib. RosenblattBicop currently models
+      continuous pairs, so no type-specific fitting is required.
+    x
+      Optional external covariates with shape ``(n, p)``.
     """
-    u_t, v_t, x_t = self._prepare_joint_inputs(uv, x)
+    del var_types
+
+    if controls is not None:
+      self._apply_controls(controls)
+
+    u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
 
     self.v_given_ux_.fit(v_t, x=self._features(u_t, x_t))
     self.u_given_vx_.fit(u_t, x=self._features(v_t, x_t))
@@ -817,7 +849,7 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     upper: torch.Tensor,
     conditioned: torch.Tensor,
     x: torch.Tensor,
-    module: ConditionalDistribution1D,
+    module: ConditionalMargin,
     n_int: int,
     batch_size: int,
   ) -> torch.Tensor:
@@ -887,7 +919,7 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     upper_grid: torch.Tensor,
     conditioned_grid: torch.Tensor,
     x_row: torch.Tensor,
-    module: ConditionalDistribution1D,
+    module: ConditionalMargin,
     n_int: int,
   ) -> torch.Tensor:
     """Compute int_0^{upper_grid[i]} F(conditioned_grid[j] | s, x_row) ds.

@@ -22,17 +22,17 @@ import torch
 from ngboost import NGBRegressor
 from ngboost.distns import Normal
 
-from npcc.core.conditional_distribution1d import ConditionalDistribution1D
+from npcc.core.margin import ConditionalMargin
 
 
-class NGBoostBackend(ConditionalDistribution1D):
+class NGBoostBackend(ConditionalMargin):
   """Conditional margin using an NGBoost parametric distribution.
 
   Parameters
   ----------
   transform
     Response transformation inherited from
-    :class:`ConditionalDistribution1D`.
+    :class:`~npcc.core.margin.ConditionalMargin`.
   eps
     Boundary clipping distance for logit and probit transformations.
   device
@@ -128,7 +128,7 @@ class NGBoostBackend(ConditionalDistribution1D):
     for start in range(0, y_t.shape[0], effective_batch_size):
       end = min(start + effective_batch_size, y_t.shape[0])
 
-      frozen = self._frozen(y_t[start:end])
+      frozen = self._frozen(x_t[start:end])
       density = frozen.pdf(
         z[start:end].detach().cpu().numpy(),
       )
@@ -247,7 +247,7 @@ class NGBoostBackend(ConditionalDistribution1D):
 
       density_tensor = self._to_tensor(density, like=y_grid_t)
 
-      chunks.append(density * jacobian.unsqueeze(0))
+      chunks.append(density_tensor * jacobian.unsqueeze(0))
 
     return (
       torch.cat(chunks, dim=0)
@@ -284,7 +284,7 @@ class NGBoostBackend(ConditionalDistribution1D):
       end = min(start + effective_batch_size, x_t.shape[0])
 
       frozen = self._frozen(x_t[start:end])
-      probabilities = frozen.cdf(z_host[start:end]).T
+      probabilities = frozen.cdf(z_host[:, None]).T
 
       chunks.append(self._to_tensor(probabilities, like=y_grid_t))
 

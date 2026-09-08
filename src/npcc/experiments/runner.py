@@ -20,7 +20,6 @@ from pathlib import Path
 from time import perf_counter
 from typing import Literal, cast
 
-import numpy as np
 import pandas as pd
 import torch
 
@@ -186,18 +185,18 @@ def _guard_manifest(
 
 
 def _nan_quantile(s: pd.Series, q: float) -> float:
-  values = s.to_numpy(dtype=np.float64)
-  if np.isnan(values).all():
-    return np.nan
-  return float(np.nanquantile(values, q))
+  values = torch.tensor(s.to_numpy(), dtype=torch.float64)
+  if torch.isnan(values).all():
+    return float("nan")
+  return float(torch.nanquantile(values, q))
 
 
 def _cell_seed(base_seed: int, cell: Cell) -> int:
   """Deterministic, axis-decorrelated seed for a data cell."""
   fam_idx = list(scenarios.FAMILIES).index(cell.family)
   scn_idx = list(scenarios.TAU_SCENARIOS).index(cell.tau_scenario)
-  seq = np.random.SeedSequence([base_seed, fam_idx, scn_idx, cell.n, cell.rep])
-  return int(seq.generate_state(1)[0])
+  payload = f"{base_seed}:{fam_idx}:{scn_idx}:{cell.n}:{cell.rep}".encode()
+  return int.from_bytes(hashlib.sha256(payload).digest()[:4], "big")
 
 
 def _base_row(cell: Cell, est: EstimatorSpec, seed: int) -> dict[str, object]:
@@ -224,14 +223,14 @@ def _estimator_seed(cell_seed: int, estimator_id: str) -> int:
   return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
 
 
-def _tau_values(scenario: str, x_axis: np.ndarray | None) -> np.ndarray:
+def _tau_values(scenario: str, x_axis: torch.Tensor | None) -> torch.Tensor:
   spec = scenarios.TAU_SCENARIOS[scenario]
   if spec.conditional:
     assert spec.tau_of_x is not None
     assert x_axis is not None
     return spec.tau_of_x(x_axis)
   assert spec.tau is not None
-  return np.array([spec.tau], dtype=np.float64)
+  return torch.tensor([spec.tau], dtype=torch.float64)
 
 
 def _metric_rows_for_quantity(
@@ -239,8 +238,8 @@ def _metric_rows_for_quantity(
   est: EstimatorSpec,
   seed: int,
   quantity: str,
-  truth: np.ndarray,
-  pred: np.ndarray,
+  truth: torch.Tensor,
+  pred: torch.Tensor,
   grid: EvalGrid,
   *,
   normalize: str,
@@ -260,18 +259,18 @@ def _metric_rows_for_quantity(
       y_true = truth_grid[:, x_idx]
       y_hat = pred_grid[:, x_idx]
       err = y_hat - y_true
-      kl = np.nan
+      kl = float("nan")
       if include_kl:
-        y_true_pos = np.clip(y_true, _EPS, None)
-        y_hat_pos = np.clip(y_hat, _EPS, None)
-        kl = float(np.mean(y_true_pos * np.log(y_true_pos / y_hat_pos)))
+        y_true_pos = y_true.clamp_min(_EPS)
+        y_hat_pos = y_hat.clamp_min(_EPS)
+        kl = float((y_true_pos * torch.log(y_true_pos / y_hat_pos)).mean())
       rows.append(
         {
           **base,
           "x": float(x_val),
           "tau_true": float(tau_x[x_idx]),
-          "IAE": float(np.mean(np.abs(err))),
-          "ISE": float(np.mean(err**2)),
+          "IAE": float(err.abs().mean()),
+          "ISE": float(err.square().mean()),
           "KL": kl,
         }
       )
@@ -279,7 +278,7 @@ def _metric_rows_for_quantity(
 
   stats = metrics.grid_metrics(truth, pred, include_kl=include_kl)
   tau = _tau_values(cell.tau_scenario, None)[0]
-  return [{**base, "x": np.nan, "tau_true": float(tau), **stats}]
+  return [{**base, "x": float("nan"), "tau_true": float(tau), **stats}]
 
 
 def _surface_x_rows(scenario: str, tau_levels: list[float]) -> list[dict]:
@@ -288,17 +287,25 @@ def _surface_x_rows(scenario: str, tau_levels: list[float]) -> list[dict]:
   if not spec.conditional:
     assert spec.tau is not None
     return [
-      {"target_tau": float(spec.tau), "x": np.nan, "tau_true": float(spec.tau)}
+      {
+        "target_tau": float(spec.tau),
+        "x": float("nan"),
+        "tau_true": float(spec.tau),
+      }
     ]
 
   assert spec.tau_of_x is not None
-  x_dense = np.linspace(scenarios.X_MIN, scenarios.X_MAX, 2001)
+  x_dense = torch.linspace(
+    scenarios.X_MIN, scenarios.X_MAX, 2001, dtype=torch.float64
+  )
   tau_dense = spec.tau_of_x(x_dense)
   rows: list[dict] = []
   for target in tau_levels:
     roots: list[float] = []
     delta = tau_dense - target
-    exact = np.flatnonzero(np.isclose(delta, 0.0, atol=1e-6))
+    exact = torch.where(
+      torch.isclose(delta, torch.zeros_like(delta), atol=1e-6)
+    )[0]
     roots.extend(float(x_dense[i]) for i in exact)
     for i in range(x_dense.shape[0] - 1):
       if delta[i] == 0.0 or delta[i] * delta[i + 1] > 0.0:
@@ -307,22 +314,22 @@ def _surface_x_rows(scenario: str, tau_levels: list[float]) -> list[dict]:
       hi = float(x_dense[i + 1])
       for _ in range(40):
         mid = (lo + hi) / 2.0
-        if (float(spec.tau_of_x(np.array([lo]))[0]) - target) * (
-          float(spec.tau_of_x(np.array([mid]))[0]) - target
+        if (float(spec.tau_of_x(torch.tensor([lo]))[0]) - target) * (
+          float(spec.tau_of_x(torch.tensor([mid]))[0]) - target
         ) <= 0.0:
           hi = mid
         else:
           lo = mid
       roots.append((lo + hi) / 2.0)
     if not roots:
-      roots.append(float(x_dense[int(np.argmin(np.abs(delta)))]))
+      roots.append(float(x_dense[int(delta.abs().argmin())]))
 
     unique_roots: list[float] = []
     for root in sorted(roots):
       if not unique_roots or abs(root - unique_roots[-1]) > 1e-4:
         unique_roots.append(root)
     for root in unique_roots:
-      tau_true = float(spec.tau_of_x(np.array([root]))[0])
+      tau_true = float(spec.tau_of_x(torch.tensor([root]))[0])
       rows.append(
         {"target_tau": float(target), "x": root, "tau_true": tau_true}
       )
@@ -334,13 +341,13 @@ def _quantity_rows(
   est: EstimatorSpec,
   seed: int,
   quantity: str,
-  truth: np.ndarray,
-  pred: np.ndarray,
+  truth: torch.Tensor,
+  pred: torch.Tensor,
   grid: EvalGrid,
   *,
   normalize: str,
-  target_tau: np.ndarray,
-  tau_true: np.ndarray,
+  target_tau: torch.Tensor,
+  tau_true: torch.Tensor,
 ) -> list[dict[str, object]]:
   base = _base_row(cell, est, seed)
   truth_grid = truth.reshape(grid.shape)
@@ -376,7 +383,7 @@ def _diagnostic_rows(
   est: EstimatorSpec,
   seed: int,
   model: RosenblattBicop,
-  pdf_by_norm: dict[str, np.ndarray],
+  pdf_by_norm: dict[str, torch.Tensor],
   grid: EvalGrid,
   *,
   enable_tau_diagnostics: bool,
@@ -391,7 +398,7 @@ def _diagnostic_rows(
       c = pdf_hat.reshape((grid.u_axis.shape[0], grid.v_axis.shape[0]))
       diag = metrics.marginal_diagnostics(c, grid.u_axis, grid.v_axis)
       tau_true = float(_tau_values(cell.tau_scenario, None)[0])
-      tau_hat = np.nan
+      tau_hat = float("nan")
       if enable_tau_diagnostics:
         t0 = perf_counter()
         tau_hat = model.tau(n=tau_diagnostic_n)
@@ -400,7 +407,7 @@ def _diagnostic_rows(
         {
           **base,
           "normalize": norm,
-          "x": np.nan,
+          "x": float("nan"),
           "tau_true": tau_true,
           "tau_hat": tau_hat,
           "tau_abs_err": abs(tau_hat - tau_true),
@@ -416,7 +423,7 @@ def _diagnostic_rows(
     for idx, x_val in enumerate(grid.x_axis):
       t0 = perf_counter()
       tau_hat_by_x[idx] = model.tau(
-        x_row=np.array([[float(x_val)]], dtype=np.float64),
+        x_row=torch.tensor([[float(x_val)]], dtype=grid.x_axis.dtype),
         n=tau_diagnostic_n,
       )
       tau_time += perf_counter() - t0
@@ -427,7 +434,7 @@ def _diagnostic_rows(
         (grid.u_axis.shape[0], grid.v_axis.shape[0])
       )
       diag = metrics.marginal_diagnostics(c, grid.u_axis, grid.v_axis)
-      tau_hat = tau_hat_by_x[x_idx] if enable_tau_diagnostics else np.nan
+      tau_hat = tau_hat_by_x[x_idx] if enable_tau_diagnostics else float("nan")
       tau_true = float(tau_x[x_idx])
       rows.append(
         {
@@ -471,22 +478,24 @@ def summarize_one_cell(
 
   surface_rows = _surface_x_rows(cell.tau_scenario, surface_tau_levels)
   surface_grid: EvalGrid | None = None
-  surface_truth: dict[str, np.ndarray] | None = None
-  surface_target_tau: np.ndarray | None = None
-  surface_tau_true: np.ndarray | None = None
+  surface_truth: dict[str, torch.Tensor] | None = None
+  surface_target_tau: torch.Tensor | None = None
+  surface_tau_true: torch.Tensor | None = None
   if cell.family in surface_families and metric_grid.conditional:
-    surface_x = np.array([row["x"] for row in surface_rows], dtype=np.float64)
+    surface_x = torch.tensor(
+      [row["x"] for row in surface_rows], dtype=torch.float64
+    )
     surface_grid = scenarios.eval_grid_for_x(
       cell.tau_scenario, surface_x, conditional_uv_grid_n=conditional_uv_grid_n
     )
     surface_truth = scenarios.ground_truth(
       cell.family, cell.tau_scenario, surface_grid
     )
-    surface_target_tau = np.array(
-      [row["target_tau"] for row in surface_rows], dtype=np.float64
+    surface_target_tau = torch.tensor(
+      [row["target_tau"] for row in surface_rows], dtype=torch.float64
     )
-    surface_tau_true = np.array(
-      [row["tau_true"] for row in surface_rows], dtype=np.float64
+    surface_tau_true = torch.tensor(
+      [row["tau_true"] for row in surface_rows], dtype=torch.float64
     )
 
   metric_rows: list[dict] = []
@@ -497,7 +506,6 @@ def summarize_one_cell(
   for est in estimator_specs:
     t0 = perf_counter()
     est_seed = _estimator_seed(seed, est.estimator_id)
-    np.random.seed(est_seed)
     torch.manual_seed(est_seed)
     if torch.cuda.is_available():
       torch.cuda.reset_peak_memory_stats()
@@ -508,30 +516,30 @@ def summarize_one_cell(
       projection_grid_size=projection_grid_size,
       backend_kwargs=dict(est.backend_kwargs),
     )
-    model.fit(np.column_stack([u, v]), x)
+    model.fit(torch.column_stack([u, v]), x=x)
     fit_time = perf_counter() - t0
 
     with torch.inference_mode():
       timings: dict[str, float] = {}
-      single_preds: dict[str, np.ndarray] = {}
+      single_preds: dict[str, torch.Tensor] = {}
       for q, fn in (
         (
           "hfunc1",
           lambda m=model: m.hfunc1(
-            np.column_stack([metric_grid.u_flat, metric_grid.v_flat]),
+            torch.column_stack([metric_grid.u_flat, metric_grid.v_flat]),
             x=metric_grid.x_flat,
           ),
         ),
         (
           "hfunc2",
           lambda m=model: m.hfunc2(
-            np.column_stack([metric_grid.u_flat, metric_grid.v_flat]),
+            torch.column_stack([metric_grid.u_flat, metric_grid.v_flat]),
             x=metric_grid.x_flat,
           ),
         ),
       ):
         t0 = perf_counter()
-        single_preds[q] = np.asarray(fn(), dtype=np.float64)
+        single_preds[q] = fn().cpu()
         timings[q] = perf_counter() - t0
 
       for q in ("hfunc1", "hfunc2"):
@@ -548,18 +556,15 @@ def summarize_one_cell(
         )
 
       pdf_time = 0.0
-      pdf_by_norm: dict[str, np.ndarray] = {}
+      pdf_by_norm: dict[str, torch.Tensor] = {}
       for norm in normalize:
         norm_label = _norm_label(norm)
         t0 = perf_counter()
-        pdf_hat = np.asarray(
-          model.pdf(
-            np.column_stack([metric_grid.u_flat, metric_grid.v_flat]),
-            x=metric_grid.x_flat,
-            sinkhorn_iters=norm,
-          ),
-          dtype=np.float64,
-        )
+        pdf_hat = model.pdf(
+          torch.column_stack([metric_grid.u_flat, metric_grid.v_flat]),
+          x=metric_grid.x_flat,
+          sinkhorn_iters=norm,
+        ).cpu()
         pdf_time += perf_counter() - t0
         pdf_by_norm[norm_label] = pdf_hat
         metric_rows += _metric_rows_for_quantity(
@@ -593,25 +598,25 @@ def summarize_one_cell(
         and surface_target_tau is not None
         and surface_tau_true is not None
       ):
-        surface_preds: dict[str, np.ndarray] = {}
+        surface_preds: dict[str, torch.Tensor] = {}
         for q, fn in (
           (
             "hfunc1",
             lambda m=model: m.hfunc1(
-              np.column_stack([surface_grid.u_flat, surface_grid.v_flat]),
+              torch.column_stack([surface_grid.u_flat, surface_grid.v_flat]),
               x=surface_grid.x_flat,
             ),
           ),
           (
             "hfunc2",
             lambda m=model: m.hfunc2(
-              np.column_stack([surface_grid.u_flat, surface_grid.v_flat]),
+              torch.column_stack([surface_grid.u_flat, surface_grid.v_flat]),
               x=surface_grid.x_flat,
             ),
           ),
         ):
           t0 = perf_counter()
-          surface_preds[q] = np.asarray(fn(), dtype=np.float64)
+          surface_preds[q] = fn().cpu()
           surface_time += perf_counter() - t0
           quantity_rows += _quantity_rows(
             cell,
@@ -629,14 +634,11 @@ def summarize_one_cell(
         for norm in normalize:
           norm_label = _norm_label(norm)
           t0 = perf_counter()
-          pdf_hat = np.asarray(
-            model.pdf(
-              np.column_stack([surface_grid.u_flat, surface_grid.v_flat]),
-              x=surface_grid.x_flat,
-              sinkhorn_iters=norm,
-            ),
-            dtype=np.float64,
-          )
+          pdf_hat = model.pdf(
+            torch.column_stack([surface_grid.u_flat, surface_grid.v_flat]),
+            x=surface_grid.x_flat,
+            sinkhorn_iters=norm,
+          ).cpu()
           surface_time += perf_counter() - t0
           quantity_rows += _quantity_rows(
             cell,
@@ -903,7 +905,7 @@ def _selection_summary(summary_over_x: pd.DataFrame) -> pd.DataFrame:
     ["rep_mean", "rep_median", "rep_p95", *_ESTIMATOR_AXES, "normalize"],
     na_position="last",
   ).reset_index(drop=True)
-  ranked.insert(0, "rank", np.arange(1, len(ranked) + 1, dtype=int))
+  ranked.insert(0, "rank", range(1, len(ranked) + 1))
   return ranked
 
 

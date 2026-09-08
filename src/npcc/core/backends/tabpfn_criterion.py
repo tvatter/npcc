@@ -24,7 +24,7 @@ from npcc.core.backends.tabpfn_common import (
   ModelVersion,
   make_tabpfn_regressor,
 )
-from npcc.core.conditional_distribution1d import ConditionalDistribution1D
+from npcc.core.margin import ConditionalMargin
 
 
 class _CriterionLike(Protocol):
@@ -50,14 +50,14 @@ def _coerce_logits_tensor(
   return torch.as_tensor(logits, dtype=torch.float32, device=device)
 
 
-class TabPFNCriterionBackend(ConditionalDistribution1D):
+class TabPFNCriterionBackend(ConditionalMargin):
   """Conditional margin using TabPFN's native predictive criterion.
 
   Parameters
   ----------
   transform
     Response transformation inherited from
-    class:`ConditionalDistribution1D`.
+    class:`~npcc.core.margin.ConditionalMargin`.
   eps
     Boundary clipping distance for logit and probit transformations.
   device

@@ -29,7 +29,7 @@ from npcc.core._common import (
   _torch_interp_batched_fp,
   _torch_interp_batched_xp,
 )
-from npcc.core.conditional_distribution1d import ConditionalDistribution1D
+from npcc.core.margin import ConditionalMargin
 
 
 @dataclass
@@ -78,7 +78,7 @@ class QuantileGridConfig:
     )
 
 
-class QuantileTableDistribution1D(ConditionalDistribution1D):
+class QuantileTableDistribution1D(ConditionalMargin):
   """Conditional margin reconstructed from predicted quantile tables.
 
   Concrete backends implement :meth:`_predict_quantiles`, which predicts one

@@ -1,95 +1,224 @@
-"""Tests for the private helpers in ``npcc._common``."""
+"""Tests for the private Torch helpers in ``npcc.core._common``."""
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 import torch
 
 from npcc.core._common import (
-  _as_2d,
   _check_uv,
   _logit,
-  _normalize_inputs,
-  is_torch_array,
+  _resolve_device,
+  _torch_gradient_1d,
+  _torch_interp,
+  _torch_interp_batched_fp,
+  _torch_interp_batched_xp,
 )
 
-_CPU = torch.device("cpu")
+
+def test_resolve_explicit_cpu_device() -> None:
+  assert _resolve_device("cpu") == torch.device("cpu")
 
 
-class TestNormalizeInputs:
-  """`return_as_torch` decides output type via array_api_compat.is_torch_array."""
+def test_resolve_device_object() -> None:
+  device = torch.device("cpu")
 
-  def test_numpy_input_flags_false(self) -> None:
-    rt, (t,) = _normalize_inputs(np.zeros(3), device=_CPU)
-    assert rt is False
-    assert isinstance(t, torch.Tensor)  # still coerced to torch for compute
-
-  def test_torch_input_flags_true(self) -> None:
-    rt, (t,) = _normalize_inputs(torch.zeros(3), device=_CPU)
-    assert rt is True
-    assert isinstance(t, torch.Tensor)
-
-  def test_mixed_flags_true_and_none_passes_through(self) -> None:
-    rt, (a, b, c) = _normalize_inputs(
-      np.zeros(2), torch.zeros(2), None, device=_CPU
-    )
-    assert rt is True
-    assert isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor)
-    assert c is None
-
-  def test_is_torch_array_predicate(self) -> None:
-    assert is_torch_array(torch.zeros(1)) is True
-    assert is_torch_array(np.zeros(1)) is False
-
-
-class TestAs2d:
-  def test_reshapes_1d(self) -> None:
-    out = _as_2d(np.arange(5, dtype=float))
-    assert out.shape == (5, 1)
-
-  def test_keeps_2d(self) -> None:
-    out = _as_2d(np.zeros((3, 4)))
-    assert out.shape == (3, 4)
-
-  def test_rejects_3d(self) -> None:
-    with pytest.raises(ValueError, match="1D or 2D"):
-      _as_2d(np.zeros((2, 3, 4)))
-
-  def test_accepts_torch_tensor(self) -> None:
-    out = _as_2d(torch.zeros(5))
-    assert out.shape == (5, 1)
-    assert isinstance(out, torch.Tensor)
+  assert _resolve_device(device) == device
 
 
 class TestCheckUv:
-  def test_rejects_outside_unit(self) -> None:
+  def test_rejects_lower_boundary(self) -> None:
+    u = torch.tensor([0.5, 0.0], dtype=torch.float64)
+    v = torch.tensor([0.5, 0.5], dtype=torch.float64)
+
     with pytest.raises(ValueError, match="strictly inside"):
-      _check_uv(np.array([0.5, 0.0]), np.array([0.5, 0.5]), 1e-6)
+      _check_uv(u, v, 1e-6)
+
+  def test_rejects_upper_boundary(self) -> None:
+    u = torch.tensor([0.5, 1.0], dtype=torch.float64)
+    v = torch.tensor([0.5, 0.5], dtype=torch.float64)
+
     with pytest.raises(ValueError, match="strictly inside"):
-      _check_uv(np.array([0.5, 1.0]), np.array([0.5, 0.5]), 1e-6)
+      _check_uv(u, v, 1e-6)
 
   def test_rejects_shape_mismatch(self) -> None:
+    u = torch.tensor([0.5], dtype=torch.float64)
+    v = torch.tensor([0.5, 0.5], dtype=torch.float64)
+
     with pytest.raises(ValueError, match="same shape"):
-      _check_uv(np.array([0.5]), np.array([0.5, 0.5]), 1e-6)
+      _check_uv(u, v, 1e-6)
 
   def test_clips_into_eps_band(self) -> None:
-    u, v = _check_uv(
-      np.array([1e-9, 0.5]), np.array([0.5, 1.0 - 1e-9]), eps=1e-6
+    u = torch.tensor([1e-9, 0.5], dtype=torch.float64)
+    v = torch.tensor(
+      [0.5, 1.0 - 1e-9],
+      dtype=torch.float64,
     )
-    assert float(u[0].item()) == pytest.approx(1e-6)
-    assert float(v[1].item()) == pytest.approx(1.0 - 1e-6)
+
+    actual_u, actual_v = _check_uv(u, v, eps=1e-6)
+
+    expected_u = torch.tensor(
+      [1e-6, 0.5],
+      dtype=torch.float64,
+    )
+    expected_v = torch.tensor(
+      [0.5, 1.0 - 1e-6],
+      dtype=torch.float64,
+    )
+
+    torch.testing.assert_close(actual_u, expected_u)
+    torch.testing.assert_close(actual_v, expected_v)
+
+  def test_flattens_coordinates(self) -> None:
+    u = torch.tensor([[0.2], [0.4]], dtype=torch.float64)
+    v = torch.tensor([[0.6], [0.8]], dtype=torch.float64)
+
+    actual_u, actual_v = _check_uv(u, v, eps=1e-6)
+
+    assert actual_u.shape == (2,)
+    assert actual_v.shape == (2,)
 
 
 class TestLogit:
   def test_logit_at_half_is_zero(self) -> None:
-    out = _logit(np.array([0.5]))
-    assert float(out[0].item()) == pytest.approx(0.0)
+    p = torch.tensor([0.5], dtype=torch.float64)
+
+    result = _logit(p)
+
+    torch.testing.assert_close(result, torch.zeros_like(p))
 
   def test_logit_is_antisymmetric(self) -> None:
-    p = np.array([0.1, 0.4])
-    np.testing.assert_allclose(
-      _logit(p).cpu().numpy(),
-      -_logit(1.0 - p).cpu().numpy(),
-      atol=1e-7,
+    p = torch.tensor([0.1, 0.4], dtype=torch.float64)
+
+    torch.testing.assert_close(
+      _logit(p),
+      -_logit(1.0 - p),
     )
+
+
+class TestTorchInterp:
+  def test_interpolates_and_clamps_boundaries(self) -> None:
+    x = torch.tensor(
+      [-0.5, 0.5, 2.5],
+      dtype=torch.float64,
+    )
+    xp = torch.tensor(
+      [0.0, 1.0, 2.0],
+      dtype=torch.float64,
+    )
+    fp = torch.tensor(
+      [0.0, 10.0, 20.0],
+      dtype=torch.float64,
+    )
+
+    result = _torch_interp(x, xp, fp)
+
+    expected = torch.tensor(
+      [0.0, 5.0, 20.0],
+      dtype=torch.float64,
+    )
+    torch.testing.assert_close(result, expected)
+
+
+class TestTorchInterpBatchedXp:
+  def test_interpolates_row_specific_coordinates(self) -> None:
+    x = torch.tensor(
+      [0.5, 3.0],
+      dtype=torch.float64,
+    )
+    xp = torch.tensor(
+      [
+        [0.0, 1.0, 2.0],
+        [0.0, 2.0, 4.0],
+      ],
+      dtype=torch.float64,
+    )
+    fp = torch.tensor(
+      [
+        [0.0, 10.0, 20.0],
+        [0.0, 20.0, 40.0],
+      ],
+      dtype=torch.float64,
+    )
+
+    result = _torch_interp_batched_xp(x, xp, fp)
+
+    expected = torch.tensor(
+      [5.0, 30.0],
+      dtype=torch.float64,
+    )
+    torch.testing.assert_close(result, expected)
+
+
+class TestTorchInterpBatchedFp:
+  def test_interpolates_row_specific_values(self) -> None:
+    x = torch.tensor(
+      [0.5, 1.5],
+      dtype=torch.float64,
+    )
+    xp = torch.tensor(
+      [0.0, 1.0, 2.0],
+      dtype=torch.float64,
+    )
+    fp = torch.tensor(
+      [
+        [0.0, 10.0, 20.0],
+        [0.0, 100.0, 200.0],
+      ],
+      dtype=torch.float64,
+    )
+
+    result = _torch_interp_batched_fp(x, xp, fp)
+
+    expected = torch.tensor(
+      [5.0, 150.0],
+      dtype=torch.float64,
+    )
+    torch.testing.assert_close(result, expected)
+
+
+class TestTorchGradient1d:
+  def test_uses_central_and_one_sided_differences(self) -> None:
+    x = torch.tensor(
+      [0.0, 1.0, 2.0],
+      dtype=torch.float64,
+    )
+    y = x.square()
+
+    result = _torch_gradient_1d(y, x)
+
+    expected = torch.tensor(
+      [1.0, 2.0, 3.0],
+      dtype=torch.float64,
+    )
+    torch.testing.assert_close(result, expected)
+
+  def test_supports_leading_dimensions(self) -> None:
+    x = torch.tensor(
+      [0.0, 1.0, 2.0],
+      dtype=torch.float64,
+    )
+    y = torch.stack(
+      [
+        x,
+        2.0 * x,
+      ]
+    )
+
+    result = _torch_gradient_1d(y, x)
+
+    expected = torch.tensor(
+      [
+        [1.0, 1.0, 1.0],
+        [2.0, 2.0, 2.0],
+      ],
+      dtype=torch.float64,
+    )
+    torch.testing.assert_close(result, expected)
+
+  def test_rejects_single_coordinate(self) -> None:
+    x = torch.tensor([0.0], dtype=torch.float64)
+    y = torch.tensor([1.0], dtype=torch.float64)
+
+    with pytest.raises(ValueError, match="at least 2 points"):
+      _torch_gradient_1d(y, x)

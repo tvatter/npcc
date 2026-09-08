@@ -1,110 +1,125 @@
-"""Backend-backed conditional margins for vine distributions."""
+"""
+Backend-neutral conditional margins.
+
+A concrete conditional margin represents the distribution of a univariate
+response ``Y`` given an optional feature matrix ``X``. It implements
+pyvinecopulib's :class:`MarginBase` contract and adds efficient Cartesian-grid
+evaluation methods used by NPCC pair copulas.
+
+Concrete backends implement:
+
+- ``_fit_model`` to train on transformed targets;
+- ``pdf`` and ``cdf`` as required by ``MarginBase``;
+- ``icdf`` when a native or table-based inverse is available;
+- ``pdf_grid`` and ``cdf_grid`` using at most one prediction per conditioning
+  row.
+
+All public numerical inputs and outputs are torch tensors.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Self
+from abc import ABC, abstractmethod
+import math
+from typing import Literal, Self
 
-import numpy as np
 import torch
-from array_api_compat import is_torch_array
 from pyvinecopulib.core import MarginBase
 
-from npcc.core._common import TensorLike, _resolve_device
-from npcc.core.conditional_distribution1d import ConditionalDistribution1D
-from npcc.core.quantile_table_distribution1d import QuantileGridConfig
-from npcc.core.registry import create_backend
+from npcc.core._common import _logit, _resolve_device
 
 
-class BackendMargin(MarginBase[TensorLike]):
-  """Continuous real-valued margin modeled by a registered NPCC backend.
+class ConditionalMargin(MarginBase[torch.Tensor], ABC):
+  """Abstract backend-powered conditional continuous margin.
 
-  The backend model ``Y | X`` when covariates are supplied. Without
-  covariates, a constant zero-valued feature is used so backends that require
-  at least one feature can still estimate an unconditional margin.
+  Parameters
+  ----------
+  transform
+    Transformation applied to the response before fitting. ``"identity"``
+    is appropriate for original-scale margins. ``"logit"`` and ``"probit"``
+    map values from ``(0, 1)`` to the real line and are appropriate for
+    copula-scale data.
+  eps
+    Distance used when clipping values away from the boundaries of ``(0, 1)``
+    before applying the logit or probit transform.
+  device
+    Device used for fitting, inference and sampling. If omitted, CUDA is
+    selected when available and CPU otherwise.
+  batch_size
+      Default inference chunk size. If omitted, 400 is used on CPU and 2000 on
+      CUDA.
   """
 
   supports_covariates: bool = True
   supports_weights: bool = False
   supported_var_types: tuple[str, ...] = ("c",)
+  supports_controls: bool = False
+
+  transform: Literal["identity", "logit", "probit"]
+  eps: float
+  batch_size: int
+  _device: torch.device
+  _fitted: bool
 
   def __init__(
     self,
     *,
-    backend: str = "tabpfn-criterion",
-    quantile_config: QuantileGridConfig | None = None,
+    transform: Literal["identity", "logit", "probit"] = "logit",
+    eps: float = 1e-6,
     device: str | torch.device | None = None,
     batch_size: int | None = None,
-    backend_kwargs: Mapping[str, object] | None = None,
   ) -> None:
-    self.backend = backend
-    self.quantile_config = quantile_config or QuantileGridConfig()
+    self.transform = transform
+    self.eps = eps
     self._device = _resolve_device(device)
-    self.batch_size = batch_size
-    self.backend_kwargs = dict(backend_kwargs or {})
-    self._is_fitted = False
 
-    self._distribution: ConditionalDistribution1D = create_backend(
-      backend,
-      transform="identity",
-      config=self.quantile_config,
-      device=self._device,
-      batch_size=self.batch_size,
-      backend_kwargs=self.backend_kwargs,
-    )
+    if batch_size is None:
+      self.batch_size = 2000 if self._device.type == "cuda" else 400
+    else:
+      if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+      self.batch_size = batch_size
+
+    self._fitted = False
 
   @property
   def is_fitted(self) -> bool:
-    """Whether the underlying backend has been fitted."""
-    return self._is_fitted
+    """Whether this margin has been fitted."""
+    return self._fitted
 
   @property
   def family_name(self) -> str:
-    """Backend identifier used in margin summaries."""
-    return self.backend
+    """Name shown in margin summaries."""
+    return type(self).__name__
+
+  def _resolve_batch_size(self, batch_size: int | None) -> int:
+    """Resolve and validate a method-level batch-size override."""
+    effective = self.batch_size if batch_size is None else batch_size
+
+    if effective <= 0:
+      raise ValueError("batch_size must be positive.")
+
+    return effective
 
   def _check_fitted(self) -> None:
-    if not self._is_fitted:
-      raise RuntimeError("The margin is not fitted.")
-
-  @staticmethod
-  def _validate_vector(values: TensorLike, *, name: str) -> int:
-    if values.ndim != 1:
-      raise ValueError(f"{name} must have shape (n,).")
-    return int(values.shape[0])
-
-  @classmethod
-  def _validate_probabilities(cls, p: TensorLike) -> None:
-    cls._validate_vector(p, name="p")
-
-    if isinstance(p, torch.Tensor):
-      invalid = ~torch.isfinite(p) | (p < 0.0) | (p > 1.0)
-      has_invalid = bool(torch.any(invalid))
-    else:
-      invalid = ~np.isfinite(p) | (p < 0.0) | (p > 1.0)
-      has_invalid = bool(np.any(invalid))
-
-    if has_invalid:
-      raise ValueError("p must contain finite values in [0, 1].")
+    """Raise if the margin has not been fitted."""
+    if not self._fitted:
+      raise RuntimeError("The model is not fitted.")
 
   def _conditioning(
     self,
-    values: TensorLike,
-    x: TensorLike | None,
-  ) -> TensorLike:
-    n = self._validate_vector(values, name="values")
+    values: torch.Tensor,
+    x: torch.Tensor | None,
+  ) -> torch.Tensor:
+    """Prepare conditioning features."""
+    n = values.shape[0]
 
     if x is None:
-      if isinstance(values, torch.Tensor):
-        return torch.zeros(
-          (n, 1),
-          dtype=torch.float64,
-          device=values.device,
-        )
-      return np.zeros((n, 1), dtype=np.float64)
-
-    if is_torch_array(values) != is_torch_array(x):
-      raise TypeError("values and x must use the same array namespace.")
+      return torch.zeros(
+        (n, 1),
+        dtype=torch.float64,
+        device=self._device,
+      )
 
     if x.ndim == 1:
       x = x.reshape(-1, 1)
@@ -116,80 +131,169 @@ class BackendMargin(MarginBase[TensorLike]):
 
     return x
 
+  def _transform_y(self, y: torch.Tensor) -> torch.Tensor:
+    """Transform responses to the backend's modeled scale."""
+    if self.transform == "identity":
+      return y
+
+    if self.transform == "logit":
+      y_clip = torch.clamp(y, self.eps, 1.0 - self.eps)
+      return _logit(y_clip)
+
+    if self.transform == "probit":
+      y_clip = torch.clamp(y, self.eps, 1.0 - self.eps)
+      return math.sqrt(2.0) * torch.erfinv(2.0 * y_clip - 1.0)
+
+    raise ValueError(f"Unknown transform: {self.transform}")
+
+  def _jacobian_inverse(self, y: torch.Tensor) -> torch.Tensor:
+    """Return the inverse-transform Jacobian evaluation on the response scale."""
+    if self.transform == "identity":
+      return torch.ones_like(y)
+
+    if self.transform == "logit":
+      y_clip = torch.clamp(y, self.eps, 1.0 - self.eps)
+      return 1.0 / (y_clip * (1.0 - y_clip))
+
+    if self.transform == "probit":
+      y_clip = torch.clamp(y, self.eps, 1.0 - self.eps)
+      z = math.sqrt(2.0) * torch.erfinv(2.0 * y_clip - 1.0)
+      phi_z = torch.exp(-0.5 * z * z) / math.sqrt(2.0 * math.pi)
+      return 1.0 / phi_z
+
+    raise ValueError(f"Unknown transform: {self.transform}")
+
+  def _inverse_transform(self, z: torch.Tensor) -> torch.Tensor:
+    """Map transformed values back to the response scale."""
+    if self.transform == "identity":
+      return z
+
+    if self.transform == "logit":
+      return torch.sigmoid(z)
+
+    if self.transform == "probit":
+      return 0.5 * (1.0 + torch.erf(z / math.sqrt(2.0)))
+
+    raise ValueError(f"Unknown transform: {self.transform}")
+
   def fit(
     self,
-    y: TensorLike,
+    y: torch.Tensor,
     /,
+    controls: object | None = None,
     *,
-    x: TensorLike | None = None,
-    weights: TensorLike | None = None,
+    x: torch.Tensor | None = None,
+    weights: torch.Tensor | None = None,
   ) -> Self:
-    """Fit the backend to a continuous response and optional covariates."""
-    if weights is not None:
-      raise TypeError("BackendMargin does not support observation weights.")
+    """Fit the backend to responses and optional conditioning features."""
+    del controls, weights
 
-    features = self._conditioning(y, x)
-    self._is_fitted = False
-    self._distribution.fit(features, y)
-    self._is_fitted = True
+    y_t = y.reshape(-1)
+
+    x_t = self._conditioning(y_t, x=x)
+    z_t = self._transform_y(y_t)
+
+    self._fitted = False
+    self._fit_model(x_t, z_t)
+    self._fitted = True
+
     return self
 
+  @abstractmethod
+  def _fit_model(self, x: torch.Tensor, z: torch.Tensor) -> None:
+    """Train the backend using tensors on the configured device.
+
+    A third-party backend that requires host-side inputs is responsible for
+    detaching and moving these tensors to CPU within its own adapter.
+    """
+
+  @abstractmethod
   def pdf(
     self,
-    y: TensorLike,
+    y: torch.Tensor,
     /,
     *,
-    x: TensorLike | None = None,
-  ) -> TensorLike:
-    """Evaluate the conditional marginal density."""
-    self._check_fitted()
-    features = self._conditioning(y, x)
-    return self._distribution.pdf(features, y)
+    x: torch.Tensor | None = None,
+    batch_size: int | None = None,
+  ) -> torch.Tensor:
+    """Evaluate the conditional density ``f(y_i | x_i)``."""
 
+  @abstractmethod
   def cdf(
     self,
-    y: TensorLike,
+    y: torch.Tensor,
     /,
     *,
-    x: TensorLike | None = None,
-  ) -> TensorLike:
-    """Evaluate the conditional marginal distribution function."""
-    self._check_fitted()
-    features = self._conditioning(y, x)
-    return self._distribution.cdf(features, y)
+    x: torch.Tensor | None = None,
+    batch_size: int | None = None,
+  ) -> torch.Tensor:
+    """Evaluate the conditional CDF ``F(y_i | x_i)``."""
 
+  @abstractmethod
   def icdf(
     self,
-    p: TensorLike,
+    p: torch.Tensor,
     /,
     *,
-    x: TensorLike | None = None,
-  ) -> TensorLike:
-    """Evaluate conditional quantiles using the backend's native inverse."""
-    self._check_fitted()
-    self._validate_probabilities(p)
-    features = self._conditioning(p, x)
-    return self._distribution.icdf(features, p)
+    x: torch.Tensor | None = None,
+    batch_size: int | None = None,
+  ) -> torch.Tensor:
+    """Evaluate the conditional quantile ``F^-1(y_i | x_i)``."""
 
-  def sample(
-    self, n: int, *, x: TensorLike | None = None, seeds: list[int] | None = None
-  ) -> TensorLike:
-    """Draw samples, preserving the covariate namespace when supplied."""
-    base_t = self._sample_uniform(n, list(seeds or []))
+  @abstractmethod
+  def pdf_grid(
+    self,
+    y_grid: torch.Tensor,
+    /,
+    *,
+    x: torch.Tensor,
+    batch_size: int | None = None,
+  ) -> torch.Tensor:
+    """Evaluate the conditional density on the Cartesian product of ``x`` and ``y_grid``.
 
-    if x is not None and not is_torch_array(x):
-      base: TensorLike = base_t.detach().cpu().numpy()
-    else:
-      base = base_t
+    Returns
+    -------
+    torch.Tensor
+      Matrix with shape ``(n_x, n_y)`` where element ``(i, j)`` is
+      ``f(y_grid[j] | x[i])``.
 
-    return self.icdf(base, x=x)
+    Notes
+    -----
+    Implementations must predict at most once per conditioning row. They must
+    not tile each row of ``x`` across the response grid before prediction.
+    """
 
-  def _sample_uniform(self, n: int, seeds: list[int]) -> torch.Tensor:
-    """Draw uniforms on the backend device for inherited sampling."""
-    if n < 0:
-      raise ValueError("n must be non-negative.")
+  @abstractmethod
+  def cdf_grid(
+    self,
+    y_grid: torch.Tensor,
+    /,
+    *,
+    x: torch.Tensor,
+    batch_size: int | None = None,
+  ) -> torch.Tensor:
+    """Evaluate the conditional CDF on the Cartesian product of ``x`` and ``y_grid``.
 
+    Returns
+    -------
+    torch.Tensor
+      Matrix with shape ``(n_x, n_y)`` where element ``(i, j)`` is
+      ``F(y_grid[j] | x[i])``.
+
+    Notes
+    -----
+    Implementations follow the same predict-once-per-conditioning-row
+    requirement as :meth:`pdf_grid`.
+    """
+
+  def _sample_uniform(
+    self,
+    n: int,
+    seeds: list[int],
+  ) -> torch.Tensor:
+    """Draw base uniforms on the configured device."""
     generator = torch.Generator(device=self._device)
+
     if seeds:
       generator.manual_seed(int(seeds[0]))
     else:

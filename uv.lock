@@ -2799,7 +2799,6 @@ name = "npcc"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "numpy" },
     { name = "pyvinecopulib" },
     { name = "tabpfn" },
     { name = "torch", version = "2.11.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'extra-4-npcc-cpu') or (extra == 'extra-4-npcc-cpu' and extra == 'extra-4-npcc-cu126') or (extra == 'extra-4-npcc-cpu' and extra == 'extra-4-npcc-cu128') or (extra == 'extra-4-npcc-cpu' and extra == 'extra-4-npcc-cu130') or (extra == 'extra-4-npcc-cpu' and extra == 'extra-4-npcc-cu132') or (extra == 'extra-4-npcc-cu126' and extra == 'extra-4-npcc-cu128') or (extra == 'extra-4-npcc-cu126' and extra == 'extra-4-npcc-cu130') or (extra == 'extra-4-npcc-cu126' and extra == 'extra-4-npcc-cu132') or (extra == 'extra-4-npcc-cu128' and extra == 'extra-4-npcc-cu130') or (extra == 'extra-4-npcc-cu128' and extra == 'extra-4-npcc-cu132') or (extra == 'extra-4-npcc-cu130' and extra == 'extra-4-npcc-cu132')" },
@@ -2894,12 +2893,11 @@ requires-dist = [
     { name = "matplotlib", marker = "extra == 'experiments'", specifier = ">=3.7" },
     { name = "ngboost", marker = "extra == 'backends'", specifier = ">=0.5.0" },
     { name = "ngboost", marker = "extra == 'ngboost'", specifier = ">=0.5.0" },
-    { name = "numpy", specifier = ">=2.0" },
     { name = "pandas", marker = "extra == 'experiments'", specifier = ">=2.0" },
     { name = "pyarrow", marker = "extra == 'experiments'", specifier = ">=15.0,<24.0" },
     { name = "pytabkit", marker = "extra == 'backends'", specifier = ">=1.5" },
     { name = "pytabkit", marker = "extra == 'pytabkit'", specifier = ">=1.5" },
-    { name = "pyvinecopulib", git = "https://github.com/vinecopulib/pyvinecopulib.git?rev=b090ba36eb23302a088de8627a8d91e985a4187c" },
+    { name = "pyvinecopulib", git = "https://github.com/vinecopulib/pyvinecopulib.git?rev=4b6eb8fcc47f6eb04761466d79ccaf6b2caed3db" },
     { name = "scikit-learn", marker = "extra == 'backends'", specifier = ">=1.3" },
     { name = "scikit-learn", marker = "extra == 'gbm'", specifier = ">=1.3" },
     { name = "synthefy-nori", marker = "extra == 'backends'", git = "https://github.com/tvatter/synthefy-nori.git?branch=allow-newer-torch-cuda" },
@@ -4477,8 +4475,8 @@ wheels = [
 
 [[package]]
 name = "pyvinecopulib"
-version = "0.8.0"
-source = { git = "https://github.com/vinecopulib/pyvinecopulib.git?rev=b090ba36eb23302a088de8627a8d91e985a4187c#b090ba36eb23302a088de8627a8d91e985a4187c" }
+version = "1.0.0"
+source = { git = "https://github.com/vinecopulib/pyvinecopulib.git?rev=4b6eb8fcc47f6eb04761466d79ccaf6b2caed3db#4b6eb8fcc47f6eb04761466d79ccaf6b2caed3db" }
 dependencies = [
     { name = "array-api-compat" },
     { name = "matplotlib" },

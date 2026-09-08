@@ -1,64 +1,72 @@
-"""Tests for the backend-backed pyvinecopulib margin."""
+"""Tests for backend-powered conditional margins."""
 
 from __future__ import annotations
 
 import copy
-import numpy as np
+import math
+
 import pytest
 import torch
 from pyvinecopulib.core import MarginBase
 
-from npcc.core.margin import BackendMargin
+from npcc.core.margin import ConditionalMargin
+from npcc.core.quantile_table_distribution1d import QuantileGridConfig
+from npcc.core.registry import create_backend
 
 
 def make_margin(
   register_uniform_backends: None,
-) -> BackendMargin:
-  return BackendMargin(
-    backend="uniform-native",
+) -> ConditionalMargin:
+  """Construct the hermetic native backend on the original scale."""
+  return create_backend(
+    "uniform-native",
+    transform="identity",
+    config=QuantileGridConfig(),
     device="cpu",
+    batch_size=None,
   )
 
 
-def test_backend_margin_subclasses_margin_base(
+def test_conditional_margin_subclasses_margin_base(
   register_uniform_backends: None,
 ) -> None:
   margin = make_margin(register_uniform_backends)
 
   assert isinstance(margin, MarginBase)
   assert margin.supports_covariates is True
+  assert margin.supports_controls is False
+  assert margin.supports_weights is False
   assert margin.supported_var_types == ("c",)
   assert margin.var_type == "c"
   assert margin.support == (float("-inf"), float("inf"))
   assert margin.is_fitted is False
-  assert margin.family_name == "uniform-native"
 
 
 @pytest.mark.parametrize(
   ("x", "expected_width"),
   [
     (None, 1),
-    (np.ones(8), 1),
-    (np.ones((8, 3)), 3),
+    (torch.ones(8), 1),
+    (torch.ones((8, 3)), 3),
   ],
 )
 def test_fit_constructs_expected_feature_matrix(
   register_uniform_backends: None,
   monkeypatch: pytest.MonkeyPatch,
-  x: np.ndarray | None,
+  x: torch.Tensor | None,
   expected_width: int,
 ) -> None:
   margin = make_margin(register_uniform_backends)
   observed_shapes: list[tuple[int, ...]] = []
-  original = margin._distribution._fit_model
+  original = margin._fit_model
 
-  def record_fit(w: torch.Tensor, z: torch.Tensor) -> None:
-    observed_shapes.append(tuple(w.shape))
-    original(w, z)
+  def record_fit(features: torch.Tensor, z: torch.Tensor) -> None:
+    observed_shapes.append(tuple(features.shape))
+    original(features, z)
 
-  monkeypatch.setattr(margin._distribution, "_fit_model", record_fit)
+  monkeypatch.setattr(margin, "_fit_model", record_fit)
 
-  y = np.linspace(-1.0, 1.0, 8)
+  y = torch.linspace(-1.0, 1.0, 8, dtype=torch.float64)
   result = margin.fit(y, x=x)
 
   assert result is margin
@@ -70,31 +78,14 @@ def test_identity_scale_distribution_operations(
   register_uniform_backends: None,
 ) -> None:
   margin = make_margin(register_uniform_backends)
-  margin.fit(np.linspace(-1.0, 1.0, 20))
+  margin.fit(torch.linspace(-1.0, 1.0, 20, dtype=torch.float64))
 
-  y = np.array([-1.0, 0.0, 1.0])
-  p = np.array([0.25, 0.5, 0.75])
+  y = torch.tensor([-1.0, 0.0, 1.0], dtype=torch.float64)
+  p = torch.tensor([0.25, 0.5, 0.75], dtype=torch.float64)
 
-  np.testing.assert_allclose(margin.pdf(y), 0.25)
-  np.testing.assert_allclose(margin.cdf(y), p)
-  np.testing.assert_allclose(margin.icdf(p), y)
-
-
-def test_torch_input_returns_torch(
-  register_uniform_backends: None,
-) -> None:
-  margin = make_margin(register_uniform_backends)
-  y = torch.linspace(-1.0, 1.0, 20, dtype=torch.float64)
-  margin.fit(y)
-
-  evaluation = torch.tensor([-1.0, 0.0, 1.0], dtype=torch.float64)
-  out = margin.cdf(evaluation)
-
-  assert isinstance(out, torch.Tensor)
-  torch.testing.assert_close(
-    out,
-    torch.tensor([0.25, 0.5, 0.75], dtype=torch.float64),
-  )
+  torch.testing.assert_close(margin.pdf(y), torch.full_like(y, 0.25))
+  torch.testing.assert_close(margin.cdf(y), p)
+  torch.testing.assert_close(margin.icdf(p), y)
 
 
 def test_evaluation_before_fit_raises(
@@ -102,8 +93,8 @@ def test_evaluation_before_fit_raises(
 ) -> None:
   margin = make_margin(register_uniform_backends)
 
-  with pytest.raises(RuntimeError, match="margin is not fitted"):
-    margin.pdf(np.array([0.0]))
+  with pytest.raises(RuntimeError, match="model is not fitted"):
+    margin.pdf(torch.tensor([0.0], dtype=torch.float64))
 
 
 def test_rejects_mismatched_rows(
@@ -113,32 +104,8 @@ def test_rejects_mismatched_rows(
 
   with pytest.raises(ValueError, match="same number of rows"):
     margin.fit(
-      np.linspace(-1.0, 1.0, 8),
-      x=np.ones((7, 2)),
-    )
-
-
-def test_rejects_mixed_array_namespaces(
-  register_uniform_backends: None,
-) -> None:
-  margin = make_margin(register_uniform_backends)
-
-  with pytest.raises(TypeError, match="same array namespace"):
-    margin.fit(
-      torch.linspace(-1.0, 1.0, 8),
-      x=np.ones((8, 2)),
-    )
-
-
-def test_rejects_weights(
-  register_uniform_backends: None,
-) -> None:
-  margin = make_margin(register_uniform_backends)
-
-  with pytest.raises(TypeError, match="does not support observation weights"):
-    margin.fit(
-      np.linspace(-1.0, 1.0, 8),
-      weights=np.ones(8),
+      torch.linspace(-1.0, 1.0, 8, dtype=torch.float64),
+      x=torch.ones((7, 2), dtype=torch.float64),
     )
 
 
@@ -146,104 +113,90 @@ def test_inherited_margin_operations(
   register_uniform_backends: None,
 ) -> None:
   margin = make_margin(register_uniform_backends)
-  margin.fit(np.linspace(-1.0, 1.0, 20))
+  margin.fit(torch.linspace(-1.0, 1.0, 20, dtype=torch.float64))
 
-  y = np.array([-1.0, 0.0, 1.0])
-  expected_logpdf = np.full(3, np.log(0.25))
+  y = torch.tensor([-1.0, 0.0, 1.0], dtype=torch.float64)
+  expected_logpdf = torch.full_like(y, math.log(0.25))
 
-  np.testing.assert_allclose(margin.logpdf(y), expected_logpdf)
-  np.testing.assert_allclose(margin.cdf_left(y), margin.cdf(y))
-  assert margin.loglik(y) == pytest.approx(expected_logpdf.sum())
+  torch.testing.assert_close(margin.logpdf(y), expected_logpdf)
+  torch.testing.assert_close(margin.cdf_left(y), margin.cdf(y))
+  torch.testing.assert_close(margin.loglik(y), expected_logpdf.sum())
 
 
 def test_cdf_icdf_round_trip_with_covariates(
   register_uniform_backends: None,
 ) -> None:
   margin = make_margin(register_uniform_backends)
-  train_y = np.linspace(-1.0, 1.0, 20)
-  train_x = np.column_stack([train_y, train_y**2])
+  train_y = torch.linspace(-1.0, 1.0, 20, dtype=torch.float64)
+  train_x = torch.column_stack((train_y, train_y.square()))
   margin.fit(train_y, x=train_x)
 
-  p = np.array([0.2, 0.5, 0.8])
-  x = np.array(
+  p = torch.tensor([0.2, 0.5, 0.8], dtype=torch.float64)
+  x = torch.tensor(
     [
       [-1.0, 1.0],
       [0.0, 0.0],
       [1.0, 1.0],
-    ]
+    ],
+    dtype=torch.float64,
   )
 
   quantiles = margin.icdf(p, x=x)
 
-  np.testing.assert_allclose(margin.cdf(quantiles, x=x), p)
+  torch.testing.assert_close(margin.cdf(quantiles, x=x), p)
 
 
-@pytest.mark.parametrize(
-  "invalid",
-  [
-    np.array([-0.1, 0.5]),
-    np.array([0.5, 1.1]),
-    np.array([0.5, np.nan]),
-    np.array([0.5, np.inf]),
-  ],
-)
-def test_icdf_rejects_invalid_probabilities(
-  register_uniform_backends: None,
-  invalid: np.ndarray,
-) -> None:
-  margin = make_margin(register_uniform_backends)
-  margin.fit(np.linspace(-1.0, 1.0, 20))
-
-  with pytest.raises(ValueError, match=r"finite values in \[0, 1\]"):
-    margin.icdf(invalid)
-
-
-def test_sample_without_covariates_returns_torch(
+def test_grid_evaluation_shapes(
   register_uniform_backends: None,
 ) -> None:
   margin = make_margin(register_uniform_backends)
-  margin.fit(np.linspace(-1.0, 1.0, 20))
+  margin.fit(torch.linspace(-1.0, 1.0, 20, dtype=torch.float64))
+  x = torch.ones((4, 2), dtype=torch.float64)
+  y_grid = torch.linspace(-1.0, 1.0, 7, dtype=torch.float64)
+
+  assert margin.pdf_grid(y_grid, x=x).shape == (4, 7)
+  assert margin.cdf_grid(y_grid, x=x).shape == (4, 7)
+
+
+def test_sample_is_reproducible(
+  register_uniform_backends: None,
+) -> None:
+  margin = make_margin(register_uniform_backends)
+  margin.fit(torch.linspace(-1.0, 1.0, 20, dtype=torch.float64))
 
   first = margin.sample(10, seeds=[42])
   second = margin.sample(10, seeds=[42])
 
-  assert isinstance(first, torch.Tensor)
   torch.testing.assert_close(first, second)
   assert torch.all((first >= -2.0) & (first <= 2.0))
 
 
-@pytest.mark.parametrize("array_type", ["numpy", "torch"])
-def test_conditional_sample_preserves_covariate_type(
+def test_conditional_sample_returns_tensor(
   register_uniform_backends: None,
-  array_type: str,
 ) -> None:
   margin = make_margin(register_uniform_backends)
-  train_y = np.linspace(-1.0, 1.0, 20)
-  train_x = np.ones((20, 2))
+  train_y = torch.linspace(-1.0, 1.0, 20, dtype=torch.float64)
+  train_x = torch.ones((20, 2), dtype=torch.float64)
   margin.fit(train_y, x=train_x)
 
-  x_np = np.ones((5, 2))
-  x = torch.as_tensor(x_np) if array_type == "torch" else x_np
-  result = margin.sample(5, x=x, seeds=[42])
-
-  if array_type == "torch":
-    assert isinstance(result, torch.Tensor)
-  else:
-    assert isinstance(result, np.ndarray)
+  result = margin.sample(
+    5,
+    x=torch.ones((5, 2), dtype=torch.float64),
+    seeds=[42],
+  )
 
   assert result.shape == (5,)
 
 
-def test_copied_prototypes_have_independent_backends(
+def test_copied_margins_are_independent(
   register_uniform_backends: None,
 ) -> None:
   first = make_margin(register_uniform_backends)
   second = copy.deepcopy(first)
 
   assert first is not second
-  assert first._distribution is not second._distribution
 
-  first.fit(np.linspace(-1.0, 1.0, 20))
+  first.fit(torch.linspace(-1.0, 1.0, 20, dtype=torch.float64))
 
   assert first.is_fitted is True
   assert second.is_fitted is False

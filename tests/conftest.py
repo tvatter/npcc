@@ -29,14 +29,8 @@ import torch
 
 pytest.importorskip("tabpfn")
 
-from npcc.core._common import (  # noqa: E402
-  TensorLike,
-  _as_2d,
-  _normalize_inputs,
-  _wrap_output,
-)
-from npcc.core.conditional_distribution1d import (  # noqa: E402
-  ConditionalDistribution1D,
+from npcc.core.margin import (  # noqa: E402
+  ConditionalMargin,
 )
 from npcc.core.quantile_table_distribution1d import (  # noqa: E402
   QuantileTableDistribution1D,
@@ -195,24 +189,23 @@ class _UniformQuantileBackend(QuantileTableDistribution1D):
   Q_LO: float = -2.0
   Q_HI: float = 2.0
 
-  def _fit_model(self, w: torch.Tensor, z: torch.Tensor) -> None:
+  def _fit_model(self, x: torch.Tensor, z: torch.Tensor) -> None:
     return None
 
   def _predict_quantiles(
-    self, w: torch.Tensor, alphas: np.ndarray
+    self, x: torch.Tensor, alphas: torch.Tensor
   ) -> torch.Tensor:
     row = self.Q_LO + (self.Q_HI - self.Q_LO) * alphas
-    q = np.broadcast_to(row[None, :], (w.shape[0], len(alphas))).copy()
-    return torch.as_tensor(q, dtype=torch.float64, device=self._device)
+    return row.unsqueeze(0).expand(x.shape[0], -1).clone()
 
 
-class _UniformNativeBackend(ConditionalDistribution1D):
+class _UniformNativeBackend(ConditionalMargin):
   """Closed-form native backend for Z ~ Uniform(-2, 2) (non-criterion path)."""
 
   Q_LO: float = -2.0
   Q_HI: float = 2.0
 
-  def _fit_model(self, w: torch.Tensor, z: torch.Tensor) -> None:
+  def _fit_model(self, x: torch.Tensor, z: torch.Tensor) -> None:
     return None
 
   def _pdf_z(self, z: torch.Tensor) -> torch.Tensor:
@@ -227,55 +220,70 @@ class _UniformNativeBackend(ConditionalDistribution1D):
     return torch.clamp((z - self.Q_LO) / (self.Q_HI - self.Q_LO), 0.0, 1.0)
 
   def pdf(
-    self, w: TensorLike, y: TensorLike, *, batch_size: int | None = None
-  ) -> TensorLike:
+    self,
+    y: torch.Tensor,
+    /,
+    *,
+    x: torch.Tensor | None = None,
+    batch_size: int | None = None,
+  ) -> torch.Tensor:
+    del x, batch_size
     self._check_fitted()
-    rt, (_, y_in) = _normalize_inputs(w, y, device=self._device)
-    assert y_in is not None
-    y_t = y_in.reshape(-1)
+    y_t = y.reshape(-1)
     out = self._pdf_z(self._transform_y(y_t)) * self._jacobian_inverse(y_t)
-    return _wrap_output(out, return_as_torch=rt)
+    return out
 
   def cdf(
-    self, w: TensorLike, y: TensorLike, *, batch_size: int | None = None
-  ) -> TensorLike:
+    self,
+    y: torch.Tensor,
+    /,
+    *,
+    x: torch.Tensor | None = None,
+    batch_size: int | None = None,
+  ) -> torch.Tensor:
+    del x, batch_size
     self._check_fitted()
-    rt, (_, y_in) = _normalize_inputs(w, y, device=self._device)
-    assert y_in is not None
-    out = self._cdf_z(self._transform_y(y_in.reshape(-1)))
-    return _wrap_output(out, return_as_torch=rt)
+    return self._cdf_z(self._transform_y(y.reshape(-1)))
 
   def icdf(
-    self, w: TensorLike, alphas: TensorLike, *, batch_size: int | None = None
-  ) -> TensorLike:
+    self,
+    p: torch.Tensor,
+    /,
+    *,
+    x: torch.Tensor | None = None,
+    batch_size: int | None = None,
+  ) -> torch.Tensor:
+    del x, batch_size
     self._check_fitted()
-    rt, (_, a_in) = _normalize_inputs(w, alphas, device=self._device)
-    assert a_in is not None
-    z = self.Q_LO + (self.Q_HI - self.Q_LO) * a_in.reshape(-1)
-    return _wrap_output(self._inverse_transform(z), return_as_torch=rt)
+    z = self.Q_LO + (self.Q_HI - self.Q_LO) * p.reshape(-1)
+    return self._inverse_transform(z)
 
   def pdf_grid(
-    self, w: TensorLike, y_grid: TensorLike, *, batch_size: int | None = None
-  ) -> TensorLike:
+    self,
+    y_grid: torch.Tensor,
+    /,
+    *,
+    x: torch.Tensor,
+    batch_size: int | None = None,
+  ) -> torch.Tensor:
+    del batch_size
     self._check_fitted()
-    rt, (w_in, y_in) = _normalize_inputs(w, y_grid, device=self._device)
-    assert w_in is not None and y_in is not None
-    w_t = _as_2d(w_in, device=self._device)
-    y_t = y_in.reshape(-1)
+    y_t = y_grid.reshape(-1)
     row = self._pdf_z(self._transform_y(y_t)) * self._jacobian_inverse(y_t)
-    out = row.unsqueeze(0).expand(w_t.shape[0], -1).clone()
-    return _wrap_output(out, return_as_torch=rt)
+    return row.unsqueeze(0).expand(x.shape[0], -1).clone()
 
   def cdf_grid(
-    self, w: TensorLike, y_grid: TensorLike, *, batch_size: int | None = None
-  ) -> TensorLike:
+    self,
+    y_grid: torch.Tensor,
+    /,
+    *,
+    x: torch.Tensor,
+    batch_size: int | None = None,
+  ) -> torch.Tensor:
+    del batch_size
     self._check_fitted()
-    rt, (w_in, y_in) = _normalize_inputs(w, y_grid, device=self._device)
-    assert w_in is not None and y_in is not None
-    w_t = _as_2d(w_in, device=self._device)
-    row = self._cdf_z(self._transform_y(y_in.reshape(-1)))
-    out = row.unsqueeze(0).expand(w_t.shape[0], -1).clone()
-    return _wrap_output(out, return_as_torch=rt)
+    row = self._cdf_z(self._transform_y(y_grid.reshape(-1)))
+    return row.unsqueeze(0).expand(x.shape[0], -1).clone()
 
 
 @pytest.fixture

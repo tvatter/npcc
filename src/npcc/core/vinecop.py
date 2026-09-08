@@ -2,170 +2,117 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Self, cast
+from collections.abc import Sequence
+from typing import ClassVar
 
 import torch
-
 from pyvinecopulib import RVineStructure
-from pyvinecopulib.core import NonSimplifiedContext, VinecopBase
-
-from npcc.core._common import (
-  TensorLike,
-  _resolve_device,
-  _to_tensor,
-  _wrap_output,
-  is_torch_array,
+from pyvinecopulib.core import (
+  BicopLike,
+  NonSimplifiedContext,
+  VinecopBase,
 )
+
+from npcc.core._common import _resolve_device
 from npcc.core.bicop import RosenblattBicop
-from npcc.core.quantile_table_distribution1d import QuantileGridConfig
 
 
-class RosenblattVinecop(VinecopBase[TensorLike]):
+class RosenblattVinecop(VinecopBase[torch.Tensor]):
   """Fixed-structure non-simplified vine of Rosenblatt pair copulas.
 
-  Each edge is a fitted :class:`RosenblattBicop`. Higher-tree edges receive
-  their vine conditioning-set values followed by any external covariates.
-  The vine structure is fixed; automatic structure selection is not provided.
+  Each edge contains a fitted :class:`RosenblattBicop`. Higher-tree edges
+  receive their vine conditioning-set values followed by any external
+  covariates.
 
   Parameters
   ----------
   pair_copulas
-    Fitted pair copulas arranged as ``[tree][edge]``. Tree ``t`` must contain
-    ``dim - t - 1`` pairs.
+    Fitted pair copulas arranged as ``[tree][edge]``. ``None`` creates an unfitted
+    vine whose pairs can subsequently be estimated with :meth:`fit`.
   structure
-    R-vine structure defining the edge layout, order, and truncation level.
+    R-vine structure defining the edge layout and order.
+  var_types
+    Variable types in variable order. Only continuous variables are currently
+    supported by :class:`RosenblattBicop`.
   device
-    Device used for random sampling. When omitted, it is inherited from the
-    pair copulas. All pair copulas must use the same device.
+    Device used for random sampling. When omitted for a fitted vine, it is
+    inferred from the pair copulas.
 
   Notes
   -----
-  NumPy and torch inputs are supported, but ``u`` and ``x`` must use the same
-  array namespace within a call- Unconditional ``sample`` returns a float64
-  torch tensor on ``device``.
+  Public numerical methods accept and return torch tensors. Quasi-random
+  sampling uses pyvinecopulib's NumPy-based sampling utility internally and
+  converts its result to torch at that boundary.
   """
 
   supports_covariates: bool = True
+  bicop_class: ClassVar[type[RosenblattBicop]] = RosenblattBicop
 
   def __init__(
     self,
-    pair_copulas: list[list[RosenblattBicop]],
+    pair_copulas: list[list[RosenblattBicop]] | None,
     structure: RVineStructure,
     *,
+    var_types: list[str] | None = None,
     device: str | torch.device | None = None,
   ) -> None:
-    self._bind_vine(structure, NonSimplifiedContext())
-    self.pair_copulas = [list(row) for row in pair_copulas]
-    self._validate_pair_copulas()
-    self._device = self._resolve_vine_device(device)
+    self.pair_copulas: list[list[RosenblattBicop]] = []
 
-  @classmethod
-  def from_data(
-    cls,
-    u: TensorLike,
-    structure: RVineStructure,
-    *,
-    x: TensorLike | None = None,
-    backend: str = "tabpfn-criterion",
-    quantile_config: QuantileGridConfig | None = None,
-    transform: Literal["identity", "logit", "probit"] = "logit",
-    device: str | torch.device | None = None,
-    batch_size: int | None = None,
-    # Backend-specific third-party parameters are intentionally heterogeneous.
-    backend_kwargs: dict[str, Any] | None = None,
-    sinkhorn_iters: int | None = None,
-    projection_grid_size: int = 101,
-  ) -> Self:
-    """Fit Rosenblatt pair copulas along a fixed R-vine structure.
-
-    Parameters
-    ----------
-    u
-      Continuous pseudo-observations with shape ``(n, structure.dim)`` and
-      values in the unit interval.
-    structure
-      Fixed R-vine structure. Its order and truncation level are retained.
-    x
-      Optional external covariates with shape ``(n, p)``. These are appended
-      after each edge's internal conditioning-set values.
-    backend
-      Registered conditional-distribution backend used for every pair copula.
-    quantile_config
-      Quantile-grid and boundary configuration forwarded to every pair copula.
-    transform
-      Target-support transform used by every pair copula backend.
-    device
-      Shared pair copula and sampling device.
-    batch_size
-      Default backend inference chunk size.
-    backend_kwargs
-      Backend-specific constructor options forwarded to every pair.
-    sinkhorn_iters
-      Optional pair copula-level Sinkhorn projection iteration count.
-    projection_grid_size
-      Pair copula-level Sinkhorn projection grid size.
-
-    Returns
-    -------
-    RosenblattVinecop
-      Fitted non-simplified vine using the supplied structure.
-
-    Raises
-    ------
-    ValueError
-      If the observations, covariates, or structure dimensions are
-      incompatible.
-
-    Notes
-    -----
-    Tree-zero pair copulas receive external ``x`` only. A higher-tree pair copula
-    receives ``[u_D, x]``, where ``u_D`` follows pyvinecopulib's conditioning-tree
-    order. The method fits edges sequentially because later trees depend on
-    h-functions from earlier fitted pair copulas.
-    """
-
-    effective_device = _resolve_device(device)
-
-    def fit_edge(
-      tree: int,
-      edge: int,
-      u_edge: TensorLike,
-      x_edge: TensorLike | None,
-    ) -> RosenblattBicop:
-      del tree, edge
-      return RosenblattBicop(
-        backend=backend,
-        quantile_config=quantile_config,
-        transform=transform,
-        device=effective_device,
-        batch_size=batch_size,
-        backend_kwargs=backend_kwargs,
-        sinkhorn_iters=sinkhorn_iters,
-        projection_grid_size=projection_grid_size,
-      ).fit(u_edge, x_edge)
-
-    pair_copulas = cast(
-      list[list[RosenblattBicop]],
-      VinecopBase.fit(
-        structure,
-        u,
-        fit_edge,
-        context=NonSimplifiedContext(),
-        x=x,
-      ),
+    self._bind_vine(
+      structure,
+      NonSimplifiedContext(),
+      var_types=var_types,
     )
-    return cls(pair_copulas, structure, device=effective_device)
 
-  def _validate_pair_copulas(self) -> None:
-    expected_trees = self.trunc_lvl
-    if len(self.pair_copulas) != expected_trees:
+    if pair_copulas is None:
+      self._device = _resolve_device(device)
+      return
+
+    copied_pairs = self._copy_pair_copulas(pair_copulas)
+    self._validate_pair_copulas(copied_pairs)
+
+    self.pair_copulas = copied_pairs
+    self._device = self._resolve_vine_device(
+      copied_pairs,
+      device=device,
+    )
+
+  @staticmethod
+  def _copy_pair_copulas(
+    pair_copulas: Sequence[Sequence[BicopLike[torch.Tensor]]],
+  ) -> list[list[RosenblattBicop]]:
+    """Validate pair implementations and copy the nested containers."""
+    copied: list[list[RosenblattBicop]] = []
+
+    for row in pair_copulas:
+      copied_row: list[RosenblattBicop] = []
+
+      for pair in row:
+        if not isinstance(pair, RosenblattBicop):
+          raise TypeError(
+            "RosenblattVinecop only accepts RosenblattBicop pairs."
+          )
+
+        copied_row.append(pair)
+
+      copied.append(copied_row)
+
+    return copied
+
+  def _validate_pair_copulas(
+    self,
+    pair_copulas: list[list[RosenblattBicop]],
+  ) -> None:
+    """Validate the tree and edge dimensions of a pair-copula matrix."""
+    if len(pair_copulas) != self.trunc_lvl:
       raise ValueError(
-        f"pair_copulas has {len(self.pair_copulas)} trees, "
-        f"expected {expected_trees}."
+        f"pair_copulas has {len(pair_copulas)} trees, "
+        f"expected {self.trunc_lvl}."
       )
 
-    for tree, row in enumerate(self.pair_copulas):
+    for tree, row in enumerate(pair_copulas):
       expected_edges = self.d - tree - 1
+
       if len(row) != expected_edges:
         raise ValueError(
           f"pair_copulas tree {tree} has {len(row)} edges, "
@@ -174,35 +121,59 @@ class RosenblattVinecop(VinecopBase[TensorLike]):
 
   def _resolve_vine_device(
     self,
-    device: str | torch.device | None,
+    pair_copulas: list[list[RosenblattBicop]],
+    *,
+    device: str | torch.device | None = None,
   ) -> torch.device:
-    pair_devices = {pair._device for row in self.pair_copulas for pair in row}
+    """Infer and validate the common pair-copula device."""
+    pair_devices = {pair._device for row in pair_copulas for pair in row}
 
     if len(pair_devices) > 1:
-      devices = ", ".join(sorted(str(value) for value in pair_devices))
+      devices = ", ".join(
+        sorted(str(pair_device) for pair_device in pair_devices)
+      )
       raise ValueError(
         f"All pair copulas must use the same device; found: {devices}."
       )
 
-    requested = None if device is None else _resolve_device(device)
+    requested_device = None if device is None else _resolve_device(device)
 
     if pair_devices:
       pair_device = next(iter(pair_devices))
-      if requested is not None and requested != pair_device:
+
+      if requested_device is not None and requested_device != pair_device:
         raise ValueError(
-          f"Requested vine device {requested} does not match "
+          f"Requested vine device {requested_device} does not match "
           f"pair-copula device {pair_device}."
         )
+
       return pair_device
 
-    return _resolve_device(device)
+    return (
+      requested_device
+      if requested_device is not None
+      else _resolve_device(None)
+    )
 
-  def _get_pair_copula(
+  def get_pair_copula(
     self,
     tree: int,
     edge: int,
   ) -> RosenblattBicop:
+    """Return the pair copula at a tree and edge position."""
     return self.pair_copulas[tree][edge]
+
+  def set_pair_copulas(
+    self,
+    pair_copulas: list[list[BicopLike[torch.Tensor]]],
+  ) -> None:
+    """Install pair copulas produced by the inherited fit engine."""
+    copied_pairs = self._copy_pair_copulas(pair_copulas)
+    self._validate_pair_copulas(copied_pairs)
+
+    self.pair_copulas = copied_pairs
+    self._device = self._resolve_vine_device(copied_pairs)
+    self._batched = None
 
   def _sample_uniform(
     self,
@@ -211,7 +182,6 @@ class RosenblattVinecop(VinecopBase[TensorLike]):
     seeds: list[int],
   ) -> torch.Tensor:
     """Draw base uniforms for inherited vine sampling."""
-
     if qrng:
       from pyvinecopulib.utils import sample_uniform
 
@@ -234,101 +204,3 @@ class RosenblattVinecop(VinecopBase[TensorLike]):
       dtype=torch.float64,
       device=self._device,
     )
-
-  def cdf(
-    self,
-    u: TensorLike,
-    *,
-    N: int = 10000,
-    qrng: bool = True,
-    num_threads: int = 1,
-    seeds: list[int] | None = None,
-    x: TensorLike | None = None,
-    block_size: int = 4096,
-    batched: bool | None = None,
-  ) -> TensorLike:
-    """Evaluate the Monte Carlo CDF while preserving the query array type.
-
-    The inherited CDF combines query points with samples generated on the vine's
-    torch device. NumPy queries are temporarily converted to torch and converted
-    back after evaluation. External-covariate CDF evaluation is unsupported by
-    ``VinecopBase``.
-    """
-
-    return_as_torch = is_torch_array(u)
-    u_t = _to_tensor(u, device=self._device)
-    x_t = None if x is None else _to_tensor(x, device=self._device)
-
-    out = super().cdf(
-      u_t,
-      N=N,
-      qrng=qrng,
-      num_threads=num_threads,
-      seeds=seeds,
-      x=x_t,
-      block_size=block_size,
-      batched=batched,
-    )
-    assert isinstance(out, torch.Tensor)
-    return _wrap_output(out, return_as_torch=return_as_torch)
-
-  def sample(
-    self,
-    n: int,
-    *,
-    qrng: bool = False,
-    num_threads: int = 1,
-    seeds: list[int] | None = None,
-    x: TensorLike | None = None,
-    batched: bool | None = None,
-  ) -> TensorLike:
-    """Sample while preserving the covariate array type when supplied.
-
-    Unconditional sampling returns a torch tensor on the vine device.
-    Conditional sampling returns the same array type as ``x``.
-    """
-    return_as_torch = x is None or is_torch_array(x)
-    x_t = None if x is None else _to_tensor(x, device=self._device)
-
-    out = super().sample(
-      n,
-      qrng=qrng,
-      num_threads=num_threads,
-      seeds=seeds,
-      x=x_t,
-      batched=batched,
-    )
-    assert isinstance(out, torch.Tensor)
-    return _wrap_output(out, return_as_torch=return_as_torch)
-
-  def sample_conditional(
-    self,
-    u_cond: TensorLike,
-    *,
-    qrng: bool = False,
-    num_threads: int = 1,
-    seeds: list[int] | None = None,
-    conditioning_set: list[int] | None = None,
-    x: TensorLike | None = None,
-  ) -> TensorLike:
-    """Conditionally sample while preserving the conditioning array type.
-
-    The inherited sampler uses torch base uniforms. NumPy conditioning values are
-    temporarily converted to the vine device and the resulting samples are
-    converted back to NumPy.
-    """
-
-    return_as_torch = is_torch_array(u_cond)
-    u_cond_t = _to_tensor(u_cond, device=self._device)
-    x_t = None if x is None else _to_tensor(x, device=self._device)
-
-    out = super().sample_conditional(
-      u_cond_t,
-      qrng=qrng,
-      num_threads=num_threads,
-      seeds=seeds,
-      conditioning_set=conditioning_set,
-      x=x_t,
-    )
-    assert isinstance(out, torch.Tensor)
-    return _wrap_output(out, return_as_torch=return_as_torch)

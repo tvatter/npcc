@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
 import pytest
 import torch
 
 from npcc.core.bicop import RosenblattBicop
+from npcc.core.controls import (
+  FitControlsRosenblattBicop,
+  FitControlsRosenblattVinecop,
+)
 from npcc.core.errors import (
   InvalidBackendKwargsError,
   MissingBackendDependencyError,
@@ -31,7 +34,6 @@ from npcc.core.registry import (
 from tests.conftest import (
   _UniformNativeBackend,
   _UniformQuantileBackend,
-  uniform_density_y,
 )
 
 # ---------------------------------------------------------------------------
@@ -133,65 +135,106 @@ class TestHermeticBackendEndToEnd:
   def test_pdf_matches_analytic(
     self, register_uniform_backends: None, backend: str
   ) -> None:
-    rng = np.random.default_rng(0)
-    u = rng.uniform(0.2, 0.8, 40)
-    v = rng.uniform(0.2, 0.8, 40)
-    m = RosenblattBicop(backend=backend).fit(np.column_stack([u, v]))
+    generator = torch.Generator().manual_seed(0)
+    u = 0.2 + 0.6 * torch.rand(40, generator=generator)
+    v = 0.2 + 0.6 * torch.rand(40, generator=generator)
+    controls = FitControlsRosenblattBicop(
+      backend=backend,
+      device="cpu",
+    )
+    m = RosenblattBicop.from_data(
+      torch.column_stack((u, v)),
+      controls,
+    )
 
     # Symmetric average of two identical Uniform(-2,2)-logit densities.
-    y = np.array([0.3, 0.5, 0.7])
-    out = m.pdf(np.column_stack([y, y]))
-    expected = uniform_density_y(y)
-    np.testing.assert_allclose(out, expected, atol=1e-6)
+    y = torch.tensor([0.3, 0.5, 0.7])
+    out = m.pdf(torch.column_stack((y, y)))
+    expected = 0.25 / (y * (1.0 - y))
+    torch.testing.assert_close(out, expected, atol=1e-6, rtol=1e-6)
 
   def test_hfunc_in_unit_interval(
     self, register_uniform_backends: None, backend: str
   ) -> None:
-    rng = np.random.default_rng(1)
-    u = rng.uniform(0.2, 0.8, 30)
-    v = rng.uniform(0.2, 0.8, 30)
-    m = RosenblattBicop(backend=backend).fit(np.column_stack([u, v]))
-    h = m.hfunc1(np.array([[0.3, 0.4], [0.5, 0.5], [0.7, 0.6]]))
+    generator = torch.Generator().manual_seed(1)
+    u = 0.2 + 0.6 * torch.rand(30, generator=generator)
+    v = 0.2 + 0.6 * torch.rand(30, generator=generator)
+    controls = FitControlsRosenblattBicop(
+      backend=backend,
+      device="cpu",
+    )
+    m = RosenblattBicop.from_data(
+      torch.column_stack((u, v)),
+      controls,
+    )
+    h = m.hfunc1(torch.tensor([[0.3, 0.4], [0.5, 0.5], [0.7, 0.6]]))
     assert ((h >= 0.0) & (h <= 1.0)).all()
 
   def test_pdf_grid_matches_pointwise(
     self, register_uniform_backends: None, backend: str
   ) -> None:
-    rng = np.random.default_rng(2)
-    u = rng.uniform(0.2, 0.8, 30)
-    v = rng.uniform(0.2, 0.8, 30)
-    m = RosenblattBicop(backend=backend).fit(np.column_stack([u, v]))
-    u_g = np.linspace(0.25, 0.75, 4)
-    v_g = np.linspace(0.3, 0.7, 5)
+    generator = torch.Generator().manual_seed(2)
+    u = 0.2 + 0.6 * torch.rand(30, generator=generator)
+    v = 0.2 + 0.6 * torch.rand(30, generator=generator)
+    controls = FitControlsRosenblattBicop(
+      backend=backend,
+      device="cpu",
+    )
+    m = RosenblattBicop.from_data(
+      torch.column_stack((u, v)),
+      controls,
+    )
+    u_g = torch.linspace(0.25, 0.75, 4)
+    v_g = torch.linspace(0.3, 0.7, 5)
     grid = m.pdf_grid(u_g, v_g)
-    u_tile = np.repeat(u_g, len(v_g))
-    v_tile = np.tile(v_g, len(u_g))
-    expected = m.pdf(np.column_stack([u_tile, v_tile])).reshape(
+    u_tile = u_g.repeat_interleave(len(v_g))
+    v_tile = v_g.repeat(len(u_g))
+    expected = m.pdf(torch.column_stack((u_tile, v_tile))).reshape(
       len(u_g), len(v_g)
     )
-    np.testing.assert_allclose(grid, expected, atol=1e-9)
+    torch.testing.assert_close(grid, expected)
 
   def test_cdf_grid_available(
     self, register_uniform_backends: None, backend: str
   ) -> None:
-    rng = np.random.default_rng(3)
-    u = rng.uniform(0.2, 0.8, 30)
-    v = rng.uniform(0.2, 0.8, 30)
-    m = RosenblattBicop(backend=backend).fit(np.column_stack([u, v]))
-    out = m.cdf_grid(np.linspace(0.2, 0.8, 4), np.linspace(0.2, 0.8, 4))
+    generator = torch.Generator().manual_seed(3)
+    u = 0.2 + 0.6 * torch.rand(30, generator=generator)
+    v = 0.2 + 0.6 * torch.rand(30, generator=generator)
+    controls = FitControlsRosenblattBicop(
+      backend=backend,
+      device="cpu",
+    )
+    m = RosenblattBicop.from_data(
+      torch.column_stack((u, v)),
+      controls,
+    )
+    grid = torch.linspace(0.2, 0.8, 4)
+    out = m.cdf_grid(grid, grid)
     assert out.shape == (4, 4)
     assert ((out >= 0.0) & (out <= 1.0)).all()
 
   def test_sinkhorn_runs(
     self, register_uniform_backends: None, backend: str
   ) -> None:
-    rng = np.random.default_rng(4)
-    u = rng.uniform(0.2, 0.8, 30)
-    v = rng.uniform(0.2, 0.8, 30)
-    m = RosenblattBicop(
-      backend=backend, sinkhorn_iters=3, projection_grid_size=20
-    ).fit(np.column_stack([u, v]))
-    out = m.pdf(np.array([[0.4, 0.4], [0.6, 0.6]]))
+    generator = torch.Generator().manual_seed(4)
+    u = 0.2 + 0.6 * torch.rand(30, generator=generator)
+    v = 0.2 + 0.6 * torch.rand(30, generator=generator)
+    controls = FitControlsRosenblattBicop(
+      backend=backend,
+      device="cpu",
+      sinkhorn_iters=3,
+      projection_grid_size=20,
+    )
+    m = RosenblattBicop.from_data(
+      torch.column_stack((u, v)),
+      controls,
+    )
+    out = m.pdf(
+      torch.tensor(
+        [[0.4, 0.4], [0.6, 0.6]],
+        dtype=torch.float64,
+      )
+    )
     assert (out > 0).all()
 
 
@@ -205,12 +248,15 @@ class TestGridPredictsOncePerRow:
     self, monkeypatch: pytest.MonkeyPatch
   ) -> None:
     backend = _UniformQuantileBackend(transform="logit", batch_size=1000)
-    backend.fit(np.zeros((10, 1)), np.full(10, 0.5))
+    backend.fit(
+      torch.full((10,), 0.5, dtype=torch.float64),
+      x=torch.zeros((10, 1), dtype=torch.float64),
+    )
 
     calls = 0
     original = backend._predict_quantiles
 
-    def _spy(w: torch.Tensor, alphas: np.ndarray) -> torch.Tensor:
+    def _spy(w: torch.Tensor, alphas: torch.Tensor) -> torch.Tensor:
       nonlocal calls
       calls += 1
       return original(w, alphas)
@@ -218,9 +264,9 @@ class TestGridPredictsOncePerRow:
     monkeypatch.setattr(backend, "_predict_quantiles", _spy)
 
     n_w, n_y = 6, 25
-    w = np.zeros((n_w, 1))
-    y_grid = np.linspace(0.2, 0.8, n_y)
-    backend.pdf_grid(w, y_grid)
+    w = torch.zeros((n_w, 1), dtype=torch.float64)
+    y_grid = torch.linspace(0.2, 0.8, n_y, dtype=torch.float64)
+    backend.pdf_grid(y_grid, x=w)
 
     # One chunk (batch_size >= n_w) => exactly one prediction, regardless
     # of n_y.  A per-cell path would call n_w * n_y = 150 times.
@@ -230,12 +276,15 @@ class TestGridPredictsOncePerRow:
     self, monkeypatch: pytest.MonkeyPatch
   ) -> None:
     backend = _UniformQuantileBackend(transform="logit", batch_size=2)
-    backend.fit(np.zeros((10, 1)), np.full(10, 0.5))
+    backend.fit(
+      torch.full((10,), 0.5, dtype=torch.float64),
+      x=torch.zeros((10, 1), dtype=torch.float64),
+    )
 
     calls = 0
     original = backend._predict_quantiles
 
-    def _spy(w: torch.Tensor, alphas: np.ndarray) -> torch.Tensor:
+    def _spy(w: torch.Tensor, alphas: torch.Tensor) -> torch.Tensor:
       nonlocal calls
       calls += 1
       return original(w, alphas)
@@ -243,12 +292,118 @@ class TestGridPredictsOncePerRow:
     monkeypatch.setattr(backend, "_predict_quantiles", _spy)
 
     n_w, n_y = 5, 30
-    backend.cdf_grid(np.zeros((n_w, 1)), np.linspace(0.2, 0.8, n_y))
+    w = torch.zeros((n_w, 1), dtype=torch.float64)
+    y_grid = torch.linspace(0.2, 0.8, n_y, dtype=torch.float64)
+    backend.cdf_grid(y_grid, x=w)
     # ceil(5 / 2) = 3 chunks, independent of n_y (not 5 * 30 = 150).
     assert calls == math.ceil(n_w / backend.batch_size) == 3
 
 
 def test_native_backend_is_conditional_distribution() -> None:
-  from npcc.core.conditional_distribution1d import ConditionalDistribution1D
+  from npcc.core.margin import ConditionalMargin
 
-  assert issubclass(_UniformNativeBackend, ConditionalDistribution1D)
+  assert issubclass(_UniformNativeBackend, ConditionalMargin)
+
+
+def test_bicop_from_data_accepts_fit_controls(
+  register_uniform_backends: None,
+) -> None:
+  controls = FitControlsRosenblattBicop(
+    backend="uniform-native",
+    transform="logit",
+    device="cpu",
+    batch_size=17,
+  )
+  generator = torch.Generator().manual_seed(42)
+  u = 0.2 + 0.6 * torch.rand(
+    (30, 2),
+    generator=generator,
+    dtype=torch.float64,
+  )
+
+  pair = RosenblattBicop.from_data(u, controls)
+
+  assert pair.backend == "uniform-native"
+  assert pair.transform == "logit"
+  assert pair._device == torch.device("cpu")
+  assert pair.batch_size == 17
+  assert pair.v_given_ux_.is_fitted
+  assert pair.u_given_vx_.is_fitted
+
+
+def test_bicop_accepts_vinecop_controls(
+  register_uniform_backends: None,
+) -> None:
+  controls = FitControlsRosenblattVinecop(
+    backend="uniform-native",
+    device="cpu",
+  )
+  generator = torch.Generator().manual_seed(43)
+  u = 0.2 + 0.6 * torch.rand(
+    (30, 2),
+    generator=generator,
+    dtype=torch.float64,
+  )
+
+  pair = RosenblattBicop.from_data(u, controls)
+
+  assert pair.backend == controls.backend
+  assert pair.v_given_ux_.is_fitted
+  assert pair.u_given_vx_.is_fitted
+
+
+def test_fit_controls_replace_conditional_estimators(
+  register_uniform_backends: None,
+) -> None:
+  pair = RosenblattBicop(
+    backend="uniform-quantile",
+    device="cpu",
+  )
+  old_forward = pair.v_given_ux_
+  old_reverse = pair.u_given_vx_
+
+  controls = FitControlsRosenblattBicop(
+    backend="uniform-native",
+    device="cpu",
+  )
+  generator = torch.Generator().manual_seed(44)
+  u = 0.2 + 0.6 * torch.rand(
+    (30, 2),
+    generator=generator,
+    dtype=torch.float64,
+  )
+
+  result = pair.fit(u, controls)
+
+  assert result is pair
+  assert pair.backend == "uniform-native"
+  assert pair.v_given_ux_ is not old_forward
+  assert pair.u_given_vx_ is not old_reverse
+  assert pair.v_given_ux_.is_fitted
+  assert pair.u_given_vx_.is_fitted
+
+
+def test_fit_without_controls_retains_configuration(
+  register_uniform_backends: None,
+) -> None:
+  pair = RosenblattBicop(
+    backend="uniform-native",
+    device="cpu",
+    batch_size=23,
+  )
+  forward = pair.v_given_ux_
+  reverse = pair.u_given_vx_
+
+  generator = torch.Generator().manual_seed(45)
+  u = 0.2 + 0.6 * torch.rand(
+    (30, 2),
+    generator=generator,
+    dtype=torch.float64,
+  )
+
+  pair.fit(u)
+
+  assert pair.backend == "uniform-native"
+  assert pair.batch_size == 23
+  assert pair.v_given_ux_ is forward
+  assert pair.u_given_vx_ is reverse
