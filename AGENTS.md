@@ -1,53 +1,245 @@
-# CLAUDE.md
+# AGENTS.md
+
+Normative engineering spec for contributors and coding agents working on this
+repository: scope, layers, conventions, and where each rule is written down.
+
+For the user-facing pitch and the worked examples, see
+[README.md](README.md). This file does not duplicate it.
 
 ## Project
 
-Neural Pair-Copulas Constructions (NPCCs) for multivariate conditional density estimation.
-Python >= 3.11, managed with `uv`.
+Neural Pair-Copula Constructions (NPCCs) for multivariate conditional density
+estimation. Python >= 3.11, managed with `uv`.
+
+The package builds on [pyvinecopulib](https://github.com/vinecopulib/pyvinecopulib)
+1.0's extension points: `RosenblattBicop` is a `BicopBase`,
+`ConditionalMargin` a `MarginBase`, `RosenblattVinecop` a `VinecopBase`, and
+`RosenblattVinedist` a `VinedistBase`. **Its conventions are this project's
+conventions** wherever the two could differ — argument order, the fitting
+idiom, module naming, the typing policy. Where this repository
+departs, the departure is named below with its reason.
+
+pyvinecopulib 1.0.0 is not on PyPI yet, so `[tool.uv.sources]` pins a git
+revision. Drop that override once 1.0.0 publishes; the `>=1.0.0` floor in
+`[project]` is already the right specifier.
 
 ## Commands
 
+Everything goes through `make`; run `make help` for the list.
+
 ```bash
-# Install (pick one extra: cpu, cu126, cu128, cu130)
+# Install: pick exactly one PyTorch flavor (cpu, cu126, cu128, cu130, cu132),
+# optionally with the backend and experiment extras.
 uv sync --extra cpu
+uv sync --extra cu130 --extra backends --extra experiments
 
-# Lint / format
-uv run ruff check . --select ANN --fix
-uv run ruff format .
-
-# Type check
-uv run ty check
-
-# Tests
-uv run pytest tests/ -v -n auto
-uv run pytest tests/ --cov=src/npcc --cov-report=term-missing -v -n auto
+make check            # lint + format-check + numpydoc + codespell, then `ty`
+make test             # pytest -n auto
+make test-notebooks   # executes the notebooks; needs TABPFN_TOKEN
+make hooks            # install the pre-commit hooks
 ```
+
+`make check` and `make test` are what CI runs, `check` running before `test`. Both
+must be zero-error before a pull request.
+
+## The layers, and which way they depend
+
+```text
+  npcc/__init__.py                          the public re-export surface
+      |
+      +--> npcc.experiments   (extra: experiments -- pandas, matplotlib)
+      |         |
+      v         v
+  npcc.core                                 estimators and contracts
+      |
+      +--> npcc.core.backends               one adapter per third-party model
+      |
+      v
+  pyvinecopulib.core                        the four extension points
+```
+
+Four rules, pinned by `tests/test_import_surface.py`:
+
+1. **`import npcc` needs no optional extra.** Every non-TabPFN backend is
+   reached through a registry factory that imports its adapter module *inside
+   the function body*. That deferral is the whole of the guarantee, so
+   `npcc.core.registry` must not import any `npcc.core.backends.*` module at
+   module scope.
+2. **An adapter module may import its own third-party package eagerly.** The
+   module *is* that package's adapter; there is nothing to gain by deferring
+   inside it. What must not happen is any other module importing it eagerly.
+3. **`npcc.experiments` is above `npcc.core`** and the edge points one way.
+   Nothing under `core` may name it.
+4. **The two public surfaces agree.** `npcc.core.__all__` is a subset of
+   `npcc.__all__`; the difference is exactly the two concrete TabPFN backend
+   leaves, which live in `npcc.core.backends`.
+
+`matplotlib`, `pandas` and `sklearn` are **not** treated as optional in that
+test, because each is also a transitive hard dependency — `matplotlib` of
+pyvinecopulib, `pandas` and `sklearn` of `tabpfn`. Asserting their absence
+would pin a fact about someone else's dependency tree.
+
+## Module naming
+
+- **An unprefixed module is an import path.** It holds one public thing, or a
+  small coherent set of them: `bicop.py`, `vinecop.py`, `vinedist.py`,
+  `margin.py`, `margin_quantile_table.py`, `controls.py`, `errors.py`,
+  `registry.py`.
+- **An underscore-prefixed module is internal, and is named for what it
+  does** — `_placement.py`, `_interp.py`, `_trim.py` — following
+  pyvinecopulib's `_<level>_<thing>` scheme.
+- **Names inside an underscore-prefixed module carry no second underscore.**
+  `_placement.py` exports `place`, `to_numpy`, `resolve_device`, not
+  `_place`. The module's prefix already says "not an import path".
+- A module docstring does not restate the file name.
 
 ## Code style
 
 - **Formatter**: ruff — line length 80, indent width 2, target Python 3.11.
-- **Linter**: ruff with `ANN` rules enabled — all public functions and methods must have type annotations.
-- **Type checker**: ty — always run before committing; zero errors required.
-- Use modern Python syntax: `X | Y` unions, `list[T]` / `dict[K, V]` built-in generics, `match` statements where appropriate.
-- Prefer `pathlib.Path` over `os.path`.
-- No `Any` unless unavoidable and explicitly annotated with a comment explaining why.
+  `*.ipynb` is included, so the notebooks are linted too.
+- **Linter**: ruff with `ANN`, `I`, `TC`, `PYI`, `PGH003`, `RUF022`,
+  `RUF045`, `RUF100`, `ERA001`, under `preview`. `ALL` is not
+  used: these sets complement `ty` rather than restating the prose rules here.
+- **Type checker**: `ty`, with its off-by-default rules enabled. Requires
+  `ty>=0.0.73` — an older one warns `unknown-rule` and silently checks less.
+- Modern syntax: `X | Y` unions, `list[T]` / `dict[K, V]`, `match` where it
+  reads better. `pathlib.Path` over `os.path`.
+- **No bare `Any` in a signature.** A signature that must accept anything
+  states its reason at the site with `# noqa: ANN401 - <reason>`, and
+  `RUF100` fails the build when one goes stale. A body that computes may hold
+  a local `Any` and return through `cast(...)`; an `Any` in a *signature*
+  erases the type for every caller and is published contract text.
+- **Do not suppress diagnostics.** `# noqa` and `# ty: ignore` name the rule
+  they suppress and say why. `blanket-ignore-comment` and
+  `respect-type-ignore-comments = false` in `[tool.ty.rules]`, plus
+  pre-commit's `python-check-blanket-noqa`, enforce the naming half.
+- **Comments are documentation, not history.** Aim them at whoever reads the
+  code next: the constraint, the invariant, or why a non-obvious choice is
+  required. The test — *would this comment still make sense in a file that had
+  never had the bug?* If it only reads as a contrast with what the code used
+  to do, it belongs in the commit message.
+- **No commented-out code.** `ERA001` checks it.
+- **No `print` in library code** — use `logging`. `npcc.experiments` is a CLI
+  and prints on purpose.
+
+## Estimator API shape
+
+Inherited from pyvinecopulib, and not to be diverged from:
+
+- **One argument order: the observations, then `controls`, then keyword-only
+  whatever the object cannot infer.** `fit`, `select` and `from_data` take
+  `(data, controls)` positionally; `var_types`, `x`, `weights` and the
+  callbacks are keyword-only. A covariate matrix passed positionally binds to
+  `controls`, which is why `_bicop_controls` refuses an array in that slot
+  with a message naming the order.
+- **`fit` returns `self`; `from_data` constructs.** `RosenblattBicop()` must
+  stay constructible with no arguments — `BicopBase.from_data` is
+  `cls().select(...)`, which is how a vine fits one pair per edge.
+- **Configuration travels as a `ControlsLike`** — anything with `to_dict()`.
+  A consumer reads the settings it owns and **refuses one it can neither
+  honor nor delegate**, rather than dropping it silently. The same rule
+  governs `supports_controls` / `supports_weights` / `supports_covariates`:
+  a declared `False` means refuse, not ignore.
+- **Capability flags are declared, not inferred**, and exist where a consumer
+  reads them.
+
+## Placement, layout, domain
+
+Three separable steps on every input, one hook each:
+
+| step | hook | what it does |
+|---|---|---|
+| placement | `_prep` | onto this estimator's dtype (`float64`) and device |
+| layout | `_layout` | which shapes are admissible |
+| domain | `check_uv` | copula arguments into the open unit interval |
+
+`_prep_args` is the composite. Two rules that are easy to get wrong:
+
+- **Place every argument, not just the copula ones.** Covariates are placed
+  and never clamped — they are arbitrary reals — but they *are* placed, since
+  they get concatenated with values that live on the estimator's device.
+- **`TensorPlacement` must be mixed in ahead of the canonical base**, so
+  `_prep` resolves to it rather than to pyvinecopulib's array-API inference,
+  which finds nothing on these estimators and returns its argument untouched.
+
+`check_uv` **departs** from pyvinecopulib's `trim` on purpose: it rejects a
+copula argument at or outside `{0, 1}` before clamping to a caller-chosen
+`eps`, where `trim` clamps silently at working precision. Every score reaching
+an npcc estimator comes from a probability integral transform, so an exact 0
+or 1 is a defect upstream rather than a rounding artifact, and clamping would
+turn it into a plausible number and hide it.
+
+**One NumPy boundary.** Everything that hands a tensor to a third-party model
+goes through `npcc.core._placement.to_numpy`. The exception is a transfer that
+also *changes dtype* — the CatBoost and Nori adapters downcast to float32 —
+which is a different operation and stays explicit.
+
+## Docstrings and prose
+
+- **numpydoc**, validated in `make lint`. Sections in the numpydoc order;
+  every parameter and return value typed. Private methods are excluded.
+- A free-form heading inside a docstring parses as a numpydoc section and then
+  fails the order check. Use a **bold run-in heading** instead:
+  `**Approach.** ...`.
+- **American English**, enforced by codespell's `en-GB_to_en-US` builtin.
+- **A banned-word list**, `.codespell-prose.txt`, ported from pyvinecopulib.
+  Each entry carries its reason after a comma, which is what makes codespell
+  suggest rather than auto-fix: the right replacement depends on the sentence.
+  The list is the source of truth and is not repeated here — a rule that
+  quotes its own banned words fails itself.
+- `tests/test_prose.py` covers what a tokenizer cannot see: multi-word
+  phrases, and banned words hiding inside identifiers. To use a banned word
+  where it is the right word, wrap the lines in `# codespell:ignore-begin` /
+  `-end`.
+- **Error messages** read `f"{name} must <requirement>; got {actual}"`, name
+  the offending class, and say what to do instead. A missing-extra message
+  carries the `pip install npcc[<extra>]` hint.
 
 ## Testing
 
-- All new code must have corresponding tests under `tests/`.
-- Tests run in parallel (`-n auto`); do not rely on shared mutable state.
-- Use `pytest` fixtures; avoid bare `assert` on floats — use `pytest.approx` or numpy equivalents.
+- All new code has tests under `tests/`. One file per topic, flat.
+- **Every test's docstring states the defect it exists to prevent.** A test
+  that only restates the code's happy path has no reason to exist.
+- Tests run in parallel (`-n auto`); no shared mutable state. The
+  `register_uniform_backends` fixture pops what it registered on teardown.
+- Use fixtures; avoid bare `assert` on floats — `pytest.approx` or
+  `torch.testing.assert_close`.
+- Tests import from the public namespaces, `npcc` or `npcc.core`, except where
+  a test's subject is an internal module.
+- **The suite is hermetic by default.** TabPFN is faked via a monkeypatched
+  regressor, and two closed-form `Uniform(-2, 2)` backends exercise the whole
+  registry and vine cascade with no third-party model. A test that reaches a
+  real model skips when its dependency or credentials are absent.
+- A test that passes a wrong type on purpose says so in a comment and names
+  the rule it suppresses.
+- **Fix what you find.** A defect uncovered along the way is fixed, not
+  annotated or worked around.
 
 ## Dependencies
 
-- Add runtime dependencies via `uv add <pkg>`.
-- Add dev/tooling dependencies via `uv add --group dev <pkg>`.
-- Do not pin exact versions unless a compatibility issue requires it; prefer lower bounds (`>=`).
-- PyTorch extras (`cpu`, `cu126`, `cu128`, `cu130`) are mutually exclusive — never mix them.
+- Runtime: `uv add <pkg>`. Dev/tooling: `uv add --group dev <pkg>`.
+- Prefer lower bounds (`>=`); pin exactly only with a reason stated in a
+  comment beside the pin.
+- PyTorch extras (`cpu`, `cu126`, `cu128`, `cu130`, `cu132`) are mutually
+  exclusive — never mix them. `make` exports `UV_NO_SYNC=1` so a bare
+  `uv run` cannot silently reinstall a different flavor.
+- Do not add backwards-compatibility shims or feature flags unless asked.
 
-## General rules
+## Where each cross-cutting rule is written down
 
-- No commented-out code committed to the repo.
-- No `print` statements in library code — use `logging`.
-- Keep functions small and focused; avoid side effects in pure computation functions.
-- Do not add backwards-compatibility shims or feature flags unless explicitly requested.
+| Deciding | Read |
+|---|---|
+| whether a module gets an underscore | *Module naming* |
+| whether an import may point somewhere | *The layers*, and `tests/test_import_surface.py` |
+| where a new argument goes in a signature | *Estimator API shape* |
+| what to do with a setting you cannot honor | *Estimator API shape* |
+| whether to place, check, or clamp an input | *Placement, layout, domain* |
+| how to get a tensor to a third-party model | *Placement, layout, domain* |
+| whether an `Any` is allowed | *Code style* |
+| how to word an error | *Docstrings and prose* |
+| whether a comment should exist | *Code style* |
+
+The rule is stated once, where the link points, and nowhere else. If a
+reviewer or a coding agent keeps repeating the same correction, update this
+file rather than relying on tribal knowledge — but do not add ephemeral or
+machine-local preferences here.

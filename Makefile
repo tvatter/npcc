@@ -1,6 +1,6 @@
 UV := uv
 # Every `uv run` otherwise re-resolves and re-syncs, which fights the mutually
-# exclusive PyTorch extras: a bare `uv run` picks its own flavour and undoes
+# exclusive PyTorch extras: a bare `uv run` picks its own flavor and undoes
 # whichever one is installed.
 export UV_NO_SYNC := 1
 

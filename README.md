@@ -70,16 +70,30 @@ backend gets it for free.
 The inner conditional-density model is any registered backend, chosen by
 name:
 
-| `backend=`            | Underlying model                     | Extra to install       |
-| --------------------- | ------------------------------------ | ---------------------- |
-| `"tabpfn-criterion"`  | TabPFN native binned head (default)  | — (core)               |
-| `"tabpfn-quantiles"`  | TabPFN quantile output, inverted     | — (core)               |
-| `"ngboost"`           | NGBoost parametric (analytic)        | `npcc[ngboost]`        |
-| `"gbm"`               | scikit-learn quantile GBM            | `npcc[gbm]`            |
-| `"tabicl"`            | TabICL foundation model              | `npcc[tabicl]`         |
+| `backend=`             | Underlying model                          | Extra to install   |
+| ---------------------- | ----------------------------------------- | ------------------ |
+| `"tabpfn-criterion"`   | TabPFN native binned head (default)       | — (core)           |
+| `"tabpfn-quantiles"`   | TabPFN quantile output, inverted          | — (core)           |
+| `"tabpfn-finetune"`    | TabPFN fine-tuned on a scoring rule       | — (core)           |
+| `"ngboost"`            | NGBoost parametric (analytic)             | `npcc[ngboost]`    |
+| `"gbm"`                | scikit-learn quantile GBM                 | `npcc[gbm]`        |
+| `"catboost"`           | CatBoost MultiQuantile                    | `npcc[catboost]`   |
+| `"xgb-quantile"`       | XGBoost quantile trees (see note)         | `npcc[xgboost]`    |
+| `"pytabkit-realmlp"`   | PyTabKit RealMLP                          | `npcc[pytabkit]`   |
+| `"pytabkit-tabm"`      | PyTabKit TabM                             | `npcc[pytabkit]`   |
+| `"tabicl"`             | TabICL foundation model                   | `npcc[tabicl]`     |
+| `"tabicl-finetune"`    | TabICL fine-tuned on pinball loss         | `npcc[tabicl]`     |
+| `"nori"`               | Synthefy Nori                             | `npcc[nori]`       |
 
-`available_backends()` lists them; `register_backend(name, factory)` adds
-your own.
+`available_backends()` lists them, `documented_n_range(name)` gives a
+backend's supported sample-size range, and `register_backend(name, factory)`
+adds your own.  `npcc[backends]` installs every non-TabPFN extra at once.
+
+`"xgb-quantile"` is registered but a poor choice on an unbounded support:
+XGBoost quantile trees cannot extrapolate, so the predicted conditional
+support collapses to roughly the inner `[0.24, 0.96]` of `(0, 1)` and the
+quantile-to-density inversion returns exactly zero outside it.  See the note
+in `npcc/core/registry.py`.
 
 ### Two base classes
 
@@ -119,30 +133,48 @@ grid cell.  Inference is chunked by `batch_size` (device-aware default:
 
 ## Public API
 
-`RosenblattBicop` is the main entry point.  `batch_size` defaults are
-device-aware and overridable model-wide
-(`RosenblattBicop(..., batch_size=...)`) or per call.
+`RosenblattBicop` is the main entry point.  It is a `pyvinecopulib`
+`BicopBase`, so it inherits `loglik`, `sample`, `plot` and the
+`fit` / `select` / `from_data` estimator surface, and it follows the one
+argument order those settled on: **the observations, then `controls`, then
+keyword-only whatever the object cannot infer**.
+
+Configuration travels as a `FitControlsRosenblattBicop` — including the
+backend name, the device and the `batch_size` default, which is device-aware
+(400 on CPU, 2000 on CUDA) and overridable per call.
 
 | Method | What it returns |
 | --- | --- |
-| `fit(u, v, x=None)` | Fits both Rosenblatt directions.  `x=None` → unconditional fit. |
-| `pdf(u, v, x=None, *, batch_size=None, sinkhorn_iters=None)` | Pointwise $\hat c(u_i, v_i \mid x_i)$. |
-| `log_pdf(u, v, x=None, *, batch_size=None, sinkhorn_iters=None)` | $\log$ of `pdf`, floored at the smallest positive float. |
-| `pdf_grid(u_grid, v_grid, x_row=None, *, batch_size=None, sinkhorn_iters=None)` | Cartesian-grid density `out[i, j] = c(u_grid[i], v_grid[j] | x_row)`.  Available for every backend. |
-| `cdf(u, v, x=None, *, n_int=12, batch_size=None)` | Pointwise joint CDF, trapezoidal in $s$ and $t$. |
-| `cdf_grid(u_grid, v_grid, x_row=None, *, n_int=64)` | Cartesian-grid joint CDF.  Available for every backend. |
-| `hfunc1(uv, x=None)` | $h_1 = \partial C / \partial u = F_{V \mid U, X}(v \mid u, x)$ (conditions on the first argument; matches `pyvinecopulib`). |
-| `hfunc2(uv, x=None)` | $h_2 = \partial C / \partial v = F_{U \mid V, X}(u \mid v, x)$. |
+| `fit(u, controls=None, *, var_types=None, x=None)` | Fits both Rosenblatt directions on `u` of shape `(n, 2)`.  `x=None` → unconditional fit.  Returns `self`. |
+| `from_data(u, controls=None, *, var_types=None, x=None)` | Constructs and fits in one call (inherited). |
+| `pdf(u, *, x=None, batch_size=None, sinkhorn_iters=None)` | Pointwise $\hat c(u_i, v_i \mid x_i)$. |
+| `log_pdf(uv, *, x=None, batch_size=None, sinkhorn_iters=None)` | $\log$ of `pdf`, floored at the smallest positive float. |
+| `pdf_grid(u_grid, v_grid, *, x_row=None, batch_size=None, sinkhorn_iters=None)` | Cartesian-grid density `out[i, j] = c(u_grid[i], v_grid[j] | x_row)`.  Available for every backend. |
+| `cdf(u, *, x=None, n_int=12, batch_size=None)` | Pointwise joint CDF, trapezoidal in $s$ and $t$. |
+| `cdf_grid(u_grid, v_grid, *, x_row=None, n_int=64)` | Cartesian-grid joint CDF.  Available for every backend. |
+| `hfunc1(u, *, x=None)` | $h_1 = \partial C / \partial u = F_{V \mid U, X}(v \mid u, x)$ (conditions on the first argument; matches `pyvinecopulib`). |
+| `hfunc2(u, *, x=None)` | $h_2 = \partial C / \partial v = F_{U \mid V, X}(u \mid v, x)$. |
+| `hinv1(u, *, x=None)` / `hinv2(u, *, x=None)` | Native inverses, read from the backend's own quantiles rather than root-found. |
 | `tau(x_row=None, *, n=1000, seeds=None)` | Kendall's $\tau(x)$ via [pyvinecopulib](https://github.com/vinecopulib/pyvinecopulib)'s recipe: `ghalton(n, 2)` + inverse-Rosenblatt + `wdm`. |
-| `as_bicop(x_row=None)` | A `pyvinecopulib`-compatible adapter (`var_types = ["c", "c"]`, `pdf(uv)`). |
-| `plot(*, x_row=None, plot_type="contour", margin_type="norm", ...)` | Contour/surface plot via `pyvinecopulib`'s plotter (lazy-imports `matplotlib`). |
+| `plot(plot_type="surface", margin_type="unif", xylim=None, grid_size=None, *, x=None)` | Contour or surface plot, inherited from `BicopBase`. |
 
-Exported names: `RosenblattBicop`, `RosenblattVinecop`, `RosenblattVinedist`,
-the abstract `ConditionalMargin` and `QuantileTableDistribution1D` base classes,
-`QuantileTableConfig`, the `TabPFNCriterionBackend` / `TabPFNQuantileBackend` leaves,
-and the registry helpers `create_backend` / `register_backend` / `available_backends`.
+`npcc.__all__` carries 23 names, and `npcc.core` re-exports all but the two
+concrete TabPFN backend leaves — either import path works.  Briefly: the four
+estimators (`RosenblattBicop`, `RosenblattVinecop`, `RosenblattVinedist`,
+`ConditionalMargin`), the fit controls (`FitControlsRosenblattBicop`,
+`FitControlsRosenblattVinecop`, `Transform`), the quantile-table layer
+(`QuantileTableConfig`, `QuantileTableDistribution1D`), the registry
+(`BackendSpec`, `available_backends`, `create_backend`, `documented_n_range`,
+`register_backend`, `validate_backend_kwargs`), the `TabPFNCriterionBackend` /
+`TabPFNQuantileBackend` leaves, and a six-member error taxonomy rooted at
+`NpccError`.
 
 ### Quick start
+
+The public numerical API is **torch-only**: every method takes and returns
+`torch.Tensor`.  Inputs are brought onto the estimator's dtype (`float64`) and
+device by `_prep`, so a NumPy array or a float32 tensor is accepted and
+converted rather than silently carried through at the wrong precision.
 
 ```python
 from dotenv import load_dotenv
@@ -150,72 +182,72 @@ load_dotenv()  # picks up TABPFN_TOKEN from .env
 
 import numpy as np
 import pyvinecopulib as pv
+import torch
 
-from npcc import RosenblattBicop
+from npcc import FitControlsRosenblattBicop, RosenblattBicop
 
-# Sample from a Clayton bicop
+# Sample from a Clayton bicop (pyvinecopulib works in NumPy)
 clayton = pv.Bicop(
     family=pv.BicopFamily.clayton,
     parameters=np.asarray([[3.0]], dtype=np.float64),
 )
-u = clayton.sample(n=1000, seeds=[2, 2, 4])
+u = torch.as_tensor(clayton.sample(n=1000, seeds=[2, 2, 4]))
 
-# Fit the Rosenblatt copula (default backend="tabpfn-criterion")
-model = RosenblattBicop()
-model.fit(u)
+# Fit the Rosenblatt copula (default backend: "tabpfn-criterion")
+model = RosenblattBicop().fit(u)
 
 # Pointwise density
-print(model.pdf(np.array([[0.3, 0.4], [0.5, 0.6]])))
+uv = torch.tensor([[0.3, 0.4], [0.5, 0.6]], dtype=torch.float64)
+print(model.pdf(uv))
 
 # Cartesian-grid density (fast path, any backend)
-u_grid = np.linspace(0.05, 0.95, 30)
-v_grid = np.linspace(0.05, 0.95, 30)
-grid = model.pdf_grid(u_grid, v_grid)   # shape (30, 30)
+grid = torch.linspace(0.05, 0.95, 30, dtype=torch.float64)
+density = model.pdf_grid(grid, grid)   # shape (30, 30)
 
-# Joint CDF and h-functions (pyvinecopulib convention: h_i conditions on i-th arg)
-C = model.cdf_grid(u_grid, v_grid)            # shape (30, 30)
-h1 = model.hfunc1(np.array([[0.3, 0.4], [0.5, 0.6]]))   # F_{V|U,X}
-h2 = model.hfunc2(np.array([[0.3, 0.4], [0.5, 0.6]]))   # F_{U|V,X}
+# Joint CDF and h-functions (pyvinecopulib convention: h_i conditions on arg i)
+C = model.cdf_grid(grid, grid)         # shape (30, 30)
+h1 = model.hfunc1(uv)                  # F_{V|U,X}
+h2 = model.hfunc2(uv)                  # F_{U|V,X}
 
-# BicopBase API: native inverse h-functions, sampling, and log-likelihood
-v = model.hinv1(np.array([[0.3, 0.25], [0.5, 0.75]]))
-sampled = model.sample(100, seeds=[42])  # float64 torch tensor
+# Inherited from BicopBase: native inverse h-functions, sampling, loglik
+v = model.hinv1(torch.tensor([[0.3, 0.25], [0.5, 0.75]], dtype=torch.float64))
+sampled = model.sample(100, seeds=[42])
 log_likelihood = model.loglik(u)
 
 # Kendall's tau via the pyvinecopulib quasi-random recipe.
 tau = model.tau()   # Clayton(theta=3) analytic: theta / (theta + 2) = 0.6
 
-# Plot via pyvinecopulib's helper (matplotlib)
+# Contour or surface plot, also inherited
 model.plot(plot_type="contour", margin_type="norm")
 ```
 
-To switch backends (TabPFN read-outs need no extra):
+Configuration is one object, and it is the second positional argument to
+`fit` — so a covariate matrix goes in `x=`, never positionally:
 
 ```python
-model = RosenblattBicop(backend="tabpfn-quantiles")
+controls = FitControlsRosenblattBicop(backend="tabpfn-quantiles", device="cpu")
+model = RosenblattBicop(controls)
 
-# Non-TabPFN backends (install the matching extra); backend-specific
+# Non-TabPFN backends need the matching extra; backend-specific
 # hyperparameters go in backend_kwargs.
-model = RosenblattBicop(backend="ngboost", backend_kwargs={"n_estimators": 500})
-model = RosenblattBicop(backend="gbm", backend_kwargs={"max_depth": 3})
-model = RosenblattBicop(backend="tabicl")
-```
+RosenblattBicop(FitControlsRosenblattBicop(
+    backend="ngboost", backend_kwargs={"n_estimators": 500},
+))
+RosenblattBicop(FitControlsRosenblattBicop(backend="gbm", backend_kwargs={"max_depth": 3}))
 
-To pin the TabPFN model version, pass it through `backend_kwargs`:
-
-```python
+# To pin the TabPFN model version:
 from tabpfn.constants import ModelVersion
-model = RosenblattBicop(
+RosenblattBicop(FitControlsRosenblattBicop(
     backend="tabpfn-criterion",
     backend_kwargs={"model_version": ModelVersion.V3},
-)
+))
 ```
 
-To pass a covariate matrix:
+With covariates:
 
 ```python
-model.fit(np.column_stack([u, v]), x=X_train)               # X_train shape (n, p)
-model.pdf(np.column_stack([u_query, v_query]), x_query)     # x_query shape (n_query, p)
+model.fit(uv_train, x=x_train)          # x_train shape (n, p)
+model.pdf(uv_query, x=x_query)          # x_query shape (n_query, p)
 ```
 
 ---
@@ -252,60 +284,54 @@ contains optional external covariates. Consequently, the fitted vine density is
 
 For tree-zero edges, \(D_e\) is empty, so those pairs receive only the external
 covariates. Higher-tree pair copulas receive the conditioning-set values first and the
-external coavariates last.
+external covariates last.
+
+A non-simplified vine is **not** built with the inherited `from_data`, whose
+plain factory fits a simplified vine along a structure.  Construct the vine
+with its conditioning context — which `RosenblattVinecop.__init__` installs —
+and then `fit` it with `x`:
 
 ```python
-import numpy as np
 import pyvinecopulib as pv
 import torch
 
-from npcc import RosenblattVinecop
+from npcc import FitControlsRosenblattVinecop, RosenblattVinecop
+
+generator = torch.Generator().manual_seed(0)
 
 # Continuous pseudo-observations and optional external covariates.
-u_train = rng.uniform(0.05, 0.95, size=(500, 3))
-x_train = rng.normal(size=(500, 2))
+u_train = 0.05 + 0.9 * torch.rand((500, 3), generator=generator, dtype=torch.float64)
+x_train = torch.randn((500, 2), generator=generator, dtype=torch.float64)
 
 # The order and truncation level are fixed by the supplied structure.
 structure = pv.RVineStructure.from_order([1, 2, 3])
+controls = FitControlsRosenblattVinecop(backend="tabpfn-criterion", device="cpu")
 
-vine = RosenblattVinecop.from_data(
-   u_train,
-   structure,
-   x=x_train,
-   backend="tabpfn-criterion",
-   device="cpu",
-)
+vine = RosenblattVinecop(None, structure, device=controls.device)
+vine.fit(u_train, controls, x=x_train)
 
-u_query = rng.uniform(0.05, 0.95, size=(2, 3))
-x_query = rng.normal(size=(2, 2))
+u_query = 0.05 + 0.9 * torch.rand((2, 3), generator=generator, dtype=torch.float64)
+x_query = torch.randn((2, 2), generator=generator, dtype=torch.float64)
 
-# NumPy inputs produce NumPy outputs.
 density = vine.pdf(u_query, x=x_query)
 independent = vine.rosenblatt(u_query, x=x_query)
 recovered = vine.inverse_rosenblatt(independent, x=x_query)
 
-# Conditional sample() preserves the covariate array type. Unconditional
-# sample() returns a float64 torch tensor on the configured device.
 samples = vine.sample(2, x=x_query, seeds=[42])
 unconditional_samples = vine.sample(2, seeds=[42])
 
 # With order [1, 2, 3], a one-column conditioning matrix conditions on
 # variable 3, the current order tail.
-u_cond = np.array([[0.3], [0.7]])
-conditional_samples = vine.sample_conditional(
-   u_cond,
-   x=x_query,
-   seeds=[42],
-)
+u_cond = torch.tensor([[0.3], [0.7]], dtype=torch.float64)
+conditional_samples = vine.sample_conditional(u_cond, x=x_query, seeds=[42])
 ```
 
-The initial vine integration supports continuous fixed structures only.
-Automatic structure selection and discrete variables are not (yet) implemented.
-Within ordinary evaluator calls, `u` and `x` must both be NumPy arrays or both
-be torch tensors. A joint CDF with external covariates is not currently
-available because it would require a separate Monte Carlo sample for every
-covariate row. For non-simplified vines, `sample_conditional()` can condition
-only on variables already forming the tail of the structure order.
+The vine supports continuous fixed structures only; automatic structure
+selection and discrete variables are not implemented.  A joint CDF with
+external covariates is not available, because it would need a separate Monte
+Carlo sample for every covariate row.  For non-simplified vines,
+`sample_conditional()` can condition only on variables already forming the
+tail of the structure order.
 
 ---
 
@@ -316,31 +342,36 @@ pyvinecopulib's `MarginBase` interface. `RosenblattVinedist` combines fitted
 conditional margins with a `RosenblattVinecop` on the resulting pseudo
 observations.
 
-For observations \(Y=(Y_1,\ldots,Y_d)\) and optional covariates \(X\), the
+For observations \(Y=(Y_1,\ldots,Y_d)\) and optional covariates \(X\), each
+margin supplies the conditional probability integral transform
 
 \[
-   U_j = F_j(X_j),
+   U_j = F_j(Y_j \mid x),
 \]
 
 and the resulting conditional joint density is
 
 \[
-   f(y_1,\ldots,y_d)
+   f(y_1,\ldots,y_d \mid x)
    =
    c\!\left(
-      F_1(y_1\mid x),\ldots.F_d(y_d\mid x)
+      F_1(y_1\mid x),\ldots,F_d(y_d\mid x)
       \mid x
    \right)
-   \prod_{j=1}^d f_j(y_j\mid x)
+   \prod_{j=1}^d f_j(y_j\mid x).
 \]
 
 ```python
 import pyvinecopulib as pv
 import torch
 
-from npcc import QuantileTableConfig, RosenblattVinedist, create_backend
-from npcc.core.controls import FitControlsRosenblattVinecop
-from npcc.core.vinecop import RosenblattVinecop
+from npcc import (
+   FitControlsRosenblattVinecop,
+   QuantileTableConfig,
+   RosenblattVinecop,
+   RosenblattVinedist,
+   create_backend,
+)
 
 generator = torch.Generator().manual_seed(42)
 y_train = torch.randn((500, 3), generator=generator, dtype=torch.float64)
@@ -390,9 +421,11 @@ variable names are not currently supported.
 
 ## Notebooks
 
-Worked demos live under [`notebooks/`](notebooks/) (Clayton demo,
-conditional copula, Sinkhorn projection, and the simulation study).  They
-require a `TABPFN_TOKEN` (see below) to run against the real TabPFN model.
+Worked demos live under [`notebooks/`](notebooks/): a conditional pair-copula
+demo across backends, a fixed-structure vine, an original-scale vine
+distribution, and the simulation study.  They need a `TABPFN_TOKEN` (see
+below) to run against the real TabPFN model, and `make test-notebooks`
+executes them under pytest so a stale demo fails somewhere.
 
 ---
 
@@ -408,9 +441,10 @@ uv sync --extra cpu
 uv sync --extra cpu --extra ngboost --extra gbm --extra tabicl
 ```
 
-The package depends on `numpy>=2.0`, `pyvinecopulib>=0.8.0`, and
-`tabpfn>=8.0`.  TabPFN pulls in PyTorch transitively; the flavor extras
-just pin its build.
+The declared dependencies are `pyvinecopulib>=1.0.0`, `tabpfn>=8.0` and
+`torch>=2.5`; the flavor extras only pin which PyTorch build is installed.
+pyvinecopulib 1.0.0 is not on PyPI yet, so `[tool.uv.sources]` pins a git
+revision — see the comment there for when that override goes away.
 
 ### Authenticate TabPFN (one-time)
 
@@ -446,17 +480,19 @@ larger samples either use a CUDA build, set
 ## Commands
 
 ```bash
-# Lint + format (ANN ruleset → public functions must have annotations)
-uv run ruff check . --select ANN --fix
-uv run ruff format .
-
-# Type check (zero errors required)
-uv run ty check
-
-# Tests
-uv run pytest tests/ -v -n auto
-uv run pytest tests/ --cov=src/npcc --cov-report=term-missing -v -n auto
+make help             # list the targets
+make lint             # ruff, ruff-format, numpydoc, codespell
+make check            # lint plus `ty check`
+make test             # pytest -n auto
+make test-cov         # with a coverage report
+make test-notebooks   # execute the notebooks (needs TABPFN_TOKEN)
+make hooks            # install the pre-commit hooks
 ```
+
+`make check` is what CI runs before the test matrix.  All of it is
+zero-error: ruff (with `ANN`, `I`, `TC`, `PYI`, `RUF100`, `ERA001`),
+numpydoc validation, a codespell prose ban list, and `ty` with its
+off-by-default rules enabled.
 
 The suite is hermetic by default: TabPFN is faked via a monkeypatched
 regressor, and pluggable-backend behavior is proven end-to-end with a

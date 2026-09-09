@@ -35,7 +35,7 @@ def interp(x: torch.Tensor, xp: torch.Tensor, fp: torch.Tensor) -> torch.Tensor:
   shape of ``x``.
   """
   n = xp.shape[0]
-  idx = torch.searchsorted(xp, x).clamp(1, n - 1)
+  idx = torch.searchsorted(xp, x.contiguous()).clamp(1, n - 1)
   x0 = xp[idx - 1]
   x1 = xp[idx]
   y0 = fp[idx - 1]
@@ -78,7 +78,7 @@ def interp_batched_fp(
   is shape ``(n, k)``.  Output has shape ``(n,)``.
   """
   k = xp.shape[0]
-  idx = torch.searchsorted(xp, x).clamp(1, k - 1)
+  idx = torch.searchsorted(xp, x.contiguous()).clamp(1, k - 1)
   rows = torch.arange(x.shape[0], device=xp.device)
   x0 = xp[idx - 1]
   x1 = xp[idx]
