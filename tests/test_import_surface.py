@@ -286,7 +286,10 @@ def _upstream_references() -> dict[str, list[str]]:
   Returns
   -------
   dict
-      Dotted name to the files mentioning it.
+      Dotted name to the files mentioning it, relative to the repository
+      root. Empty only if the globbing below is broken, which the caller
+      checks -- see the floor in
+      :func:`test_every_upstream_name_this_package_mentions_resolves`.
   """
   paths = [
     *sorted(_SRC.rglob("*.py")),
@@ -347,10 +350,25 @@ def test_every_upstream_name_this_package_mentions_resolves() -> None:
   Written after an upstream author reported the same shape three times in one
   day: a hand-written list applied across a set, right in nine places out of
   ten. Re-reading does not catch the tenth; cross-checking the set does.
+
+  The floor below is not decoration. "Nothing unresolved" is also what a
+  broken glob reports, and a check whose failure mode is silent success is
+  the fault it exists to prevent -- so each of the three roots has to have
+  contributed at least one reference for the empty result to mean anything.
   """
+  references = _upstream_references()
+  roots = {
+    where.split("/")[0] for places in references.values() for where in places
+  }
+
+  assert {"src", "tests"} <= roots, roots
+  assert any(
+    place.endswith(".md") for places in references.values() for place in places
+  )
+
   unresolved = {
     name: sorted(set(where))
-    for name, where in sorted(_upstream_references().items())
+    for name, where in sorted(references.items())
     if not _resolves(name)
   }
 
