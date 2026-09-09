@@ -9,7 +9,7 @@ description = "Neural Pair-Copulas Constructions (NPCCs) for multivariate condit
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "pyvinecopulib>=0.8.0",
+  "pyvinecopulib>=1.0.0",
   "tabpfn>=8.0",
   "torch>=2.5",
 ]
@@ -91,8 +91,11 @@ conflicts = [
 ]
 
 [tool.uv.sources]
-# Pin the tested head of pyvinecopulib PR #326.
-pyvinecopulib = { git = "https://github.com/vinecopulib/pyvinecopulib.git", rev = "4e03dbaa36bce3d2bc5ed62ca15f45c053552f65" }
+# pyvinecopulib 1.0.0 is not on PyPI yet (0.7.6 is the newest release, and
+# there is no v1.0.0 tag), so the 1.0 extension-point API this package builds
+# on is only reachable from git. Drop this override once 1.0.0 is published;
+# the `>=1.0.0` floor above is already the right specifier.
+pyvinecopulib = { git = "https://github.com/vinecopulib/pyvinecopulib.git", rev = "d01c6b6dd7bd7c576d1e2b2b4cbeb174436bc926" }
 # Temporary: install Synthefy Nori from the fork branch that uncaps torch
 # (PR https://github.com/Synthefy/synthefy-nori/pull/79). Drop once on PyPI.
 synthefy-nori = { git = "https://github.com/tvatter/synthefy-nori.git", branch = "allow-newer-torch-cuda" }
