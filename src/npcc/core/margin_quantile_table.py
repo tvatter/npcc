@@ -1,5 +1,4 @@
-"""
-Conditional margins reconstructed from predicted quantile tables.
+"""Conditional margins reconstructed from predicted quantile tables.
 
 Given a backend that predicts a conditional quantile function
 

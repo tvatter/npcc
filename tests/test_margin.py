@@ -220,3 +220,48 @@ def test_copied_margins_are_independent(
 
   assert first.is_fitted is True
   assert second.is_fitted is False
+
+
+def test_information_criteria_are_refused(
+  register_uniform_backends: None,
+) -> None:
+  """A distributional-regression backend has no free-parameter count.
+
+  ``MarginBase`` derives its criteria from ``_n_free``, which defaults to
+  ``0.0`` -- so inheriting them would have ranked every backend by
+  log-likelihood alone under a name that claims to penalize complexity.
+  """
+  margin = make_margin(register_uniform_backends)
+  margin.fit(torch.linspace(-1.0, 1.0, 20, dtype=torch.float64))
+
+  assert margin.n_parameters == 0.0
+
+  for name in ("aic", "bic", "aicc"):
+    with pytest.raises(NotImplementedError, match="free-parameter count"):
+      getattr(margin, name)()
+
+
+def test_fit_refuses_controls_it_cannot_honor(
+  register_uniform_backends: None,
+) -> None:
+  """``supports_controls = False`` means refuse, not drop."""
+  margin = make_margin(register_uniform_backends)
+
+  with pytest.raises(ValueError, match="takes no `controls`"):
+    margin.fit(
+      torch.rand(20, dtype=torch.float64),
+      object(),
+    )
+
+
+def test_fit_refuses_weights_it_cannot_apply(
+  register_uniform_backends: None,
+) -> None:
+  """``supports_weights = False`` means refuse, not drop."""
+  margin = make_margin(register_uniform_backends)
+
+  with pytest.raises(ValueError, match="cannot apply observation weights"):
+    margin.fit(
+      torch.rand(20, dtype=torch.float64),
+      weights=torch.ones(20, dtype=torch.float64),
+    )

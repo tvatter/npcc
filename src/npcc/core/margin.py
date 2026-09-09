@@ -1,5 +1,4 @@
-"""
-Backend-neutral conditional margins.
+"""Backend-neutral conditional margins.
 
 A concrete conditional margin represents the distribution of a univariate
 response ``Y`` given an optional feature matrix ``X``. It implements
@@ -21,7 +20,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import math
-from typing import Literal, Self
+from typing import Literal, NoReturn, Self
 
 import torch
 from pyvinecopulib.core import MarginBase
@@ -94,6 +93,48 @@ class ConditionalMargin(TensorPlacement, MarginBase[torch.Tensor], ABC):
   def family_name(self) -> str:
     """Name shown in margin summaries."""
     return type(self).__name__
+
+  @property
+  def n_parameters(self) -> float:
+    """Zero -- these backends estimate no free parameters in this sense.
+
+    A distributional-regression backend has no well-defined count of freely
+    estimated parameters: a gradient-boosted ensemble's is a function of its
+    tree structure, and a pretrained foundation model does not estimate any at
+    fit time at all. ``MarginBase`` derives its information criteria from this
+    number, so rather than let it silently stand for one, :meth:`aic`,
+    :meth:`bic` and :meth:`aicc` are refused below.
+
+    Returns
+    -------
+    float
+        Always ``0.0``. Read as "not a parameter count", not as "unpenalized".
+    """
+    return 0.0
+
+  def _refuse_criterion(self, name: str) -> NoReturn:
+    """Raise, naming the criterion and why this margin has none."""
+    raise NotImplementedError(
+      f"{type(self).__name__} has no well-defined free-parameter count, so "
+      f"{name} would penalize the fit by zero and rank every backend by "
+      "log-likelihood alone. Compare backends on held-out log-likelihood "
+      "instead."
+    )
+
+  def aic(self, y: torch.Tensor | None = None, /) -> float:
+    """Refuse: see :attr:`n_parameters`."""
+    del y
+    self._refuse_criterion("aic")
+
+  def bic(self, y: torch.Tensor | None = None, /) -> float:
+    """Refuse: see :attr:`n_parameters`."""
+    del y
+    self._refuse_criterion("bic")
+
+  def aicc(self, y: torch.Tensor | None = None, /) -> float:
+    """Refuse: see :attr:`n_parameters`."""
+    del y
+    self._refuse_criterion("aicc")
 
   def _resolve_batch_size(self, batch_size: int | None) -> int:
     """Resolve and validate a method-level batch-size override."""

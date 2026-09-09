@@ -178,7 +178,7 @@ def uniform_density_y(y: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Hermetic, TabPFN-free backends (no monkeypatch): same Z ~ Uniform(-2, 2)
 # ground truth as the fakes above, so ``uniform_density_y`` still applies.
-# Used to prove the registry + pluggable-backend seam end-to-end without
+# Used to prove the registry and pluggable-backend extension point without
 # touching TabPFN.
 # ---------------------------------------------------------------------------
 

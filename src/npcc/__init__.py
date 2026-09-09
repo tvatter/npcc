@@ -1,6 +1,17 @@
+"""Neural Pair-Copula Constructions.
+
+Every public name is re-exported here and from :mod:`npcc.core`, which is a
+supported import path in its own right.
+"""
+
 from npcc.core.backends.tabpfn_criterion import TabPFNCriterionBackend
 from npcc.core.backends.tabpfn_quantile import TabPFNQuantileBackend
 from npcc.core.bicop import RosenblattBicop
+from npcc.core.controls import (
+  FitControlsRosenblattBicop,
+  FitControlsRosenblattVinecop,
+  Transform,
+)
 from npcc.core.margin import ConditionalMargin
 from npcc.core.vinecop import RosenblattVinecop
 from npcc.core.vinedist import RosenblattVinedist
@@ -30,6 +41,8 @@ __all__ = [
   "BackendSpec",
   "ConditionalMargin",
   "EstimatorConfigError",
+  "FitControlsRosenblattBicop",
+  "FitControlsRosenblattVinecop",
   "InvalidBackendKwargsError",
   "MissingBackendDependencyError",
   "NpccError",
@@ -40,6 +53,7 @@ __all__ = [
   "RosenblattVinedist",
   "TabPFNCriterionBackend",
   "TabPFNQuantileBackend",
+  "Transform",
   "UnknownBackendError",
   "available_backends",
   "create_backend",

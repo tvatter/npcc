@@ -1,6 +1,6 @@
 """Registry behaviour and TabPFN-free pluggable-backend tests.
 
-These prove the backend seam end-to-end without touching TabPFN: a
+These prove the backend extension point end-to-end without touching TabPFN: a
 hermetic quantile backend and a hermetic native backend (both
 ``Z ~ Uniform(-2, 2)``) are registered and driven through
 ``RosenblattBicop``.  They also lock the core speed invariant — grid
