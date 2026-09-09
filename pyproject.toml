@@ -116,9 +116,14 @@ conflicts = [
 # `reference_array` are unused here. `trim` is refused on purpose:
 # `core/_trim.py`'s `check_uv` stays, and AGENTS.md says why.
 #
+# One thing to expect from that surface: `core/__init__.pyi` declares
+# `ArrayT: Any` rather than a `TypeVar`, so every generic upstream signature
+# reads as `Any -> Any` to a type checker and a cast is needed wherever the
+# result feeds an annotated return. Reported upstream.
+#
 # Two steps out of here, in order: move to the merge commit once #334 lands,
 # then drop the override entirely once a published 1.0.0 carries these.
-pyvinecopulib = { git = "https://github.com/vinecopulib/pyvinecopulib.git", rev = "d1f7181d79522832f8be3234122f27b8800f69fc" }
+pyvinecopulib = { git = "https://github.com/vinecopulib/pyvinecopulib.git", rev = "6472d28d9e1d5e4690870298fe4de5278702064c" }
 # Temporary: install Synthefy Nori from the fork branch that uncaps torch
 # (PR https://github.com/Synthefy/synthefy-nori/pull/79). Drop once on PyPI.
 synthefy-nori = { git = "https://github.com/tvatter/synthefy-nori.git", branch = "allow-newer-torch-cuda" }

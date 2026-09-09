@@ -391,6 +391,9 @@ class RosenblattBicop(TensorPlacement, BicopBase[torch.Tensor]):
     if x_row is None:
       return self._default_x(1)
 
+    # `covariate_row` is `ArrayT -> ArrayT`, but `core/__init__.pyi` declares
+    # `ArrayT: Any`, so the generic degrades to `Any -> Any` for a checker
+    # reading the stub. The cast restores what the source signature says.
     return cast("torch.Tensor", covariate_row(self._prep(x_row), name="x_row"))
 
   def _prepare_grid_inputs(
