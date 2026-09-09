@@ -117,11 +117,13 @@ conflicts = [
 # `core/_trim.py`'s `check_uv` stays instead of `trim`, and AGENTS.md says why.
 #
 # Pinned at the head of that branch rather than at a commit inside it, so the
-# pin tracks what will merge. Two steps out of here, in order: move to the
+# pin tracks what will merge -- and is the revision its matrix ran green on,
+# which the commit it replaced never got, having been superseded mid-run. Two
+# steps out of here, in order: move to the
 # merge commit once #334 lands, then drop the override entirely once a
 # published 1.0.0 carries these -- at which point `.github/workflows/ci.yml`
 # stops needing a C++ toolchain too.
-pyvinecopulib = { git = "https://github.com/vinecopulib/pyvinecopulib.git", rev = "516d98181fb86229e8eba6c5f424cffe251ead87" }
+pyvinecopulib = { git = "https://github.com/vinecopulib/pyvinecopulib.git", rev = "56518a45eeeb4da920fb6652dc40fc5cdadcb43b" }
 # Temporary: install Synthefy Nori from the fork branch that uncaps torch
 # (PR https://github.com/Synthefy/synthefy-nori/pull/79). Drop once on PyPI.
 synthefy-nori = { git = "https://github.com/tvatter/synthefy-nori.git", branch = "allow-newer-torch-cuda" }
