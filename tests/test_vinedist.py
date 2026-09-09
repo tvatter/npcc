@@ -215,7 +215,11 @@ def test_fit_rejects_non_tensor_data(
   distribution = make_distribution(controls)
 
   with pytest.raises(TypeError, match="y must be a torch tensor"):
-    distribution.fit([[0.0, 0.0, 0.0]], controls)
+    # A list, not a tensor, on purpose: this is the guard under test.
+    distribution.fit(
+      [[0.0, 0.0, 0.0]],  # ty: ignore[invalid-argument-type]
+      controls,
+    )
 
 
 def test_fit_rejects_dimension_mismatch(

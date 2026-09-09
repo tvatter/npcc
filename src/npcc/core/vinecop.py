@@ -13,11 +13,11 @@ from pyvinecopulib.core import (
   VinecopBase,
 )
 
-from npcc.core._common import _resolve_device
+from npcc.core._placement import TensorPlacement, resolve_device
 from npcc.core.bicop import RosenblattBicop
 
 
-class RosenblattVinecop(VinecopBase[torch.Tensor]):
+class RosenblattVinecop(TensorPlacement, VinecopBase[torch.Tensor]):
   """Fixed-structure non-simplified vine of Rosenblatt pair copulas.
 
   Each edge contains a fitted :class:`RosenblattBicop`. Higher-tree edges
@@ -65,10 +65,10 @@ class RosenblattVinecop(VinecopBase[torch.Tensor]):
     )
 
     if pair_copulas is None:
-      self._device = _resolve_device(device)
+      self._device = resolve_device(device)
       return
 
-    copied_pairs = self._copy_pair_copulas(pair_copulas)
+    copied_pairs = self._check_pair_copulas(pair_copulas)
     self._validate_pair_copulas(copied_pairs)
 
     self.pair_copulas = copied_pairs
@@ -78,26 +78,33 @@ class RosenblattVinecop(VinecopBase[torch.Tensor]):
     )
 
   @staticmethod
-  def _copy_pair_copulas(
+  def _check_pair_copulas(
     pair_copulas: Sequence[Sequence[BicopLike[torch.Tensor]]],
   ) -> list[list[RosenblattBicop]]:
-    """Validate pair implementations and copy the nested containers."""
-    copied: list[list[RosenblattBicop]] = []
+    """Check every pair's implementation and rebuild the nested containers.
+
+    The pairs themselves are shared, not copied: a caller handing in fitted
+    pair copulas keeps them, and the fit engine's output has no other owner.
+    Only the lists are this vine's own, so a later mutation of the caller's
+    sequence cannot reshape the vine.
+    """
+    checked: list[list[RosenblattBicop]] = []
 
     for row in pair_copulas:
-      copied_row: list[RosenblattBicop] = []
+      checked_row: list[RosenblattBicop] = []
 
       for pair in row:
         if not isinstance(pair, RosenblattBicop):
           raise TypeError(
-            "RosenblattVinecop only accepts RosenblattBicop pairs."
+            f"RosenblattVinecop hosts RosenblattBicop pairs; got "
+            f"{type(pair).__name__}."
           )
 
-        copied_row.append(pair)
+        checked_row.append(pair)
 
-      copied.append(copied_row)
+      checked.append(checked_row)
 
-    return copied
+    return checked
 
   def _validate_pair_copulas(
     self,
@@ -136,7 +143,7 @@ class RosenblattVinecop(VinecopBase[torch.Tensor]):
         f"All pair copulas must use the same device; found: {devices}."
       )
 
-    requested_device = None if device is None else _resolve_device(device)
+    requested_device = None if device is None else resolve_device(device)
 
     if pair_devices:
       pair_device = next(iter(pair_devices))
@@ -150,9 +157,7 @@ class RosenblattVinecop(VinecopBase[torch.Tensor]):
       return pair_device
 
     return (
-      requested_device
-      if requested_device is not None
-      else _resolve_device(None)
+      requested_device if requested_device is not None else resolve_device(None)
     )
 
   def get_pair_copula(
@@ -168,7 +173,7 @@ class RosenblattVinecop(VinecopBase[torch.Tensor]):
     pair_copulas: list[list[BicopLike[torch.Tensor]]],
   ) -> None:
     """Install pair copulas produced by the inherited fit engine."""
-    copied_pairs = self._copy_pair_copulas(pair_copulas)
+    copied_pairs = self._check_pair_copulas(pair_copulas)
     self._validate_pair_copulas(copied_pairs)
 
     self.pair_copulas = copied_pairs
@@ -186,11 +191,7 @@ class RosenblattVinecop(VinecopBase[torch.Tensor]):
       from pyvinecopulib.utils import sample_uniform
 
       draws = sample_uniform(n, self.d, qrng=True, seeds=list(seeds))
-      return torch.as_tensor(
-        draws,
-        dtype=torch.float64,
-        device=self._device,
-      )
+      return self._prep(draws)
 
     generator = torch.Generator(device=self._device)
     if seeds:

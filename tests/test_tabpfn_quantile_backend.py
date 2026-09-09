@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from npcc.core.backends.tabpfn_quantile import TabPFNQuantileBackend
-from npcc.core.quantile_table_distribution1d import QuantileTableConfig
+from npcc.core.margin_quantile_table import QuantileTableConfig
 
 
 def make_fitted_backend(
@@ -127,7 +127,7 @@ class TestQuantileDistribution1D:
   def test_fit_rejects_length_mismatch(self, patch_uniform: None) -> None:
     backend = TabPFNQuantileBackend(transform="logit", device="cpu")
 
-    with pytest.raises(ValueError, match="same number of rows"):
+    with pytest.raises(ValueError, match="one row per observation"):
       backend.fit(
         torch.zeros(6, dtype=torch.float64),
         x=torch.zeros((5, 1), dtype=torch.float64),
@@ -136,7 +136,7 @@ class TestQuantileDistribution1D:
   def test_pdf_rejects_length_mismatch(self, patch_uniform: None) -> None:
     backend = make_fitted_backend(patch_uniform)
 
-    with pytest.raises(ValueError, match="same number of rows"):
+    with pytest.raises(ValueError, match="one row per observation"):
       backend.pdf(
         torch.full((6,), 0.5, dtype=torch.float64),
         x=torch.zeros((5, 1), dtype=torch.float64),
@@ -256,7 +256,7 @@ class TestQuantileDistribution1D:
   def test_cdf_rejects_length_mismatch(self, patch_uniform: None) -> None:
     backend = make_fitted_backend(patch_uniform)
 
-    with pytest.raises(ValueError, match="same number of rows"):
+    with pytest.raises(ValueError, match="one row per observation"):
       backend.cdf(
         torch.full((6,), 0.5, dtype=torch.float64),
         x=torch.zeros((5, 1), dtype=torch.float64),
@@ -336,7 +336,7 @@ class TestQuantileDistribution1D:
   def test_icdf_rejects_length_mismatch(self, patch_uniform: None) -> None:
     backend = make_fitted_backend(patch_uniform)
 
-    with pytest.raises(ValueError, match="same number of rows"):
+    with pytest.raises(ValueError, match="one row per observation"):
       backend.icdf(
         torch.tensor([0.5], dtype=torch.float64),
         x=torch.zeros((5, 1), dtype=torch.float64),

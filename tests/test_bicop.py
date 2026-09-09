@@ -47,7 +47,7 @@ def fit_bicop(
   sinkhorn_iters: int | None = None,
 ) -> RosenblattBicop:
   del patch_uniform
-  model = RosenblattBicop(device="cpu")
+  model = RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))
   return model.fit(
     random_uv(),
     make_controls(
@@ -61,13 +61,13 @@ def fit_bicop(
 
 class TestRosenblattBicopConstruction:
   def test_implements_bicop_contract(self) -> None:
-    model = RosenblattBicop(device="cpu")
+    model = RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))
 
     assert isinstance(model, BicopBase)
     assert isinstance(model, BicopLike)
 
   def test_default_backend_is_criterion(self) -> None:
-    model = RosenblattBicop(device="cpu")
+    model = RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))
 
     assert model.backend == "tabpfn-criterion"
     assert model.transform == "logit"
@@ -78,7 +78,7 @@ class TestRosenblattBicopConstruction:
     self,
     patch_uniform: None,
   ) -> None:
-    model = RosenblattBicop(device="cpu")
+    model = RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))
     controls = make_controls(
       "quantiles",
       transform="identity",
@@ -94,7 +94,7 @@ class TestRosenblattBicopConstruction:
     assert isinstance(model.u_given_vx_, TabPFNQuantileBackend)
 
   def test_default_batch_size_on_cpu_is_400(self) -> None:
-    model = RosenblattBicop(device="cpu")
+    model = RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))
 
     assert model.batch_size == 400
     assert model.v_given_ux_.batch_size == 400
@@ -116,7 +116,7 @@ class TestRosenblattBicopValidation:
     method: str,
     uv: torch.Tensor,
   ) -> None:
-    model = RosenblattBicop(device="cpu")
+    model = RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))
 
     with pytest.raises(ValueError, match=r"shape \(n, 2\)"):
       model.fit(uv, make_controls(method))
@@ -126,9 +126,9 @@ class TestRosenblattBicopValidation:
     patch_uniform: None,
     method: str,
   ) -> None:
-    model = RosenblattBicop(device="cpu")
+    model = RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))
 
-    with pytest.raises(ValueError, match="same number"):
+    with pytest.raises(ValueError, match="one row per observation"):
       model.fit(
         random_uv(10),
         make_controls(method),
@@ -142,7 +142,7 @@ class TestRosenblattBicopValidation:
   ) -> None:
     model = fit_bicop(patch_uniform, method)
 
-    with pytest.raises(ValueError, match="same number"):
+    with pytest.raises(ValueError, match="one row per observation"):
       model.pdf(
         random_uv(10),
         x=torch.zeros((5, 2), dtype=torch.float64),
@@ -157,7 +157,7 @@ class TestRosenblattBicopValidation:
       [[0.5, 0.3], [0.0, 0.4]],
       dtype=torch.float64,
     )
-    model = RosenblattBicop(device="cpu")
+    model = RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))
 
     with pytest.raises(ValueError, match="strictly inside"):
       model.fit(uv, make_controls(method))

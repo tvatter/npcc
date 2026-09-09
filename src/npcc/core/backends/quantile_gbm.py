@@ -17,7 +17,7 @@ from typing import Literal
 import torch
 from sklearn.ensemble import GradientBoostingRegressor
 
-from npcc.core.quantile_table_distribution1d import (
+from npcc.core.margin_quantile_table import (
   QuantileTableConfig,
   QuantileTableDistribution1D,
 )

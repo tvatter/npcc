@@ -20,7 +20,8 @@ from typing import Any, Literal
 import torch
 from xgboost import XGBRegressor
 
-from npcc.core.quantile_table_distribution1d import (
+from npcc.core._placement import to_numpy
+from npcc.core.margin_quantile_table import (
   QuantileTableConfig,
   QuantileTableDistribution1D,
 )
@@ -95,8 +96,8 @@ class XGBQuantileBackend(QuantileTableDistribution1D):
     )
 
     model.fit(
-      x.detach(),
-      z.detach(),
+      to_numpy(x),
+      to_numpy(z),
     )
     self.model_ = model
 
@@ -110,7 +111,7 @@ class XGBQuantileBackend(QuantileTableDistribution1D):
 
     del alphas
 
-    predicted = self.model_.predict(x.detach())
+    predicted = self.model_.predict(to_numpy(x))
 
     quantiles = torch.as_tensor(
       predicted,

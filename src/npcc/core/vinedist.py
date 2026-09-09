@@ -31,18 +31,41 @@ class RosenblattVinedist(VinedistBase[torch.Tensor]):
   @classmethod
   def _coerce_fit_data(
     cls,
-    y: torch.Tensor,
+    y: object,
     weights: torch.Tensor | None,
     controls: ControlsLike | None,
   ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Keep fitting data in the caller-provided torch placement.
 
-    Device and dtype conversion are intentionally omitted. The observations,
-    covariates, margins, and copula are expected to have matching placement.
+    ``y`` is declared ``object`` because the base declares it so -- an
+    override may not ask for less -- and narrowed here, which is the whole
+    work of this hook. Device and dtype conversion are omitted on purpose: the
+    observations, covariates, margins and copula are expected to share a
+    placement already, and silently moving a caller's data would hide a
+    mismatch between the parts rather than report it.
+
+    Parameters
+    ----------
+    y : object
+        The caller's observations, which must already be a torch tensor.
+    weights : torch.Tensor, or None
+        Observation weights, passed through untouched.
+    controls : ControlsLike, or None
+        Fit configuration; unread here.
+
+    Returns
+    -------
+    tuple of (torch.Tensor, torch.Tensor or None)
+        The observations and weights, unchanged.
+
+    Raises
+    ------
+    TypeError
+        If ``y`` is not a torch tensor.
     """
     del cls, controls
 
     if not isinstance(y, torch.Tensor):
-      raise TypeError("y must be a torch tensor.")
+      raise TypeError(f"y must be a torch tensor; got {type(y).__name__}.")
 
     return y, weights

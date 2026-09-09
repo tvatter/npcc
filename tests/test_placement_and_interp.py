@@ -1,29 +1,28 @@
-"""Tests for the private Torch helpers in ``npcc.core._common``."""
+"""Tests for the Torch helpers in ``npcc.core._placement`` / ``_interp`` / ``_trim``."""
 
 from __future__ import annotations
 
 import pytest
 import torch
 
-from npcc.core._common import (
-  _check_uv,
-  _logit,
-  _resolve_device,
-  _torch_gradient_1d,
-  _torch_interp,
-  _torch_interp_batched_fp,
-  _torch_interp_batched_xp,
+from npcc.core._interp import (
+  gradient_1d,
+  interp,
+  interp_batched_fp,
+  interp_batched_xp,
 )
+from npcc.core._placement import resolve_device
+from npcc.core._trim import check_uv, logit
 
 
 def test_resolve_explicit_cpu_device() -> None:
-  assert _resolve_device("cpu") == torch.device("cpu")
+  assert resolve_device("cpu") == torch.device("cpu")
 
 
 def test_resolve_device_object() -> None:
   device = torch.device("cpu")
 
-  assert _resolve_device(device) == device
+  assert resolve_device(device) == device
 
 
 class TestCheckUv:
@@ -32,21 +31,21 @@ class TestCheckUv:
     v = torch.tensor([0.5, 0.5], dtype=torch.float64)
 
     with pytest.raises(ValueError, match="strictly inside"):
-      _check_uv(u, v, 1e-6)
+      check_uv(u, v, 1e-6)
 
   def test_rejects_upper_boundary(self) -> None:
     u = torch.tensor([0.5, 1.0], dtype=torch.float64)
     v = torch.tensor([0.5, 0.5], dtype=torch.float64)
 
     with pytest.raises(ValueError, match="strictly inside"):
-      _check_uv(u, v, 1e-6)
+      check_uv(u, v, 1e-6)
 
   def test_rejects_shape_mismatch(self) -> None:
     u = torch.tensor([0.5], dtype=torch.float64)
     v = torch.tensor([0.5, 0.5], dtype=torch.float64)
 
     with pytest.raises(ValueError, match="same shape"):
-      _check_uv(u, v, 1e-6)
+      check_uv(u, v, 1e-6)
 
   def test_clips_into_eps_band(self) -> None:
     u = torch.tensor([1e-9, 0.5], dtype=torch.float64)
@@ -55,7 +54,7 @@ class TestCheckUv:
       dtype=torch.float64,
     )
 
-    actual_u, actual_v = _check_uv(u, v, eps=1e-6)
+    actual_u, actual_v = check_uv(u, v, eps=1e-6)
 
     expected_u = torch.tensor(
       [1e-6, 0.5],
@@ -73,7 +72,7 @@ class TestCheckUv:
     u = torch.tensor([[0.2], [0.4]], dtype=torch.float64)
     v = torch.tensor([[0.6], [0.8]], dtype=torch.float64)
 
-    actual_u, actual_v = _check_uv(u, v, eps=1e-6)
+    actual_u, actual_v = check_uv(u, v, eps=1e-6)
 
     assert actual_u.shape == (2,)
     assert actual_v.shape == (2,)
@@ -83,7 +82,7 @@ class TestLogit:
   def test_logit_at_half_is_zero(self) -> None:
     p = torch.tensor([0.5], dtype=torch.float64)
 
-    result = _logit(p)
+    result = logit(p)
 
     torch.testing.assert_close(result, torch.zeros_like(p))
 
@@ -91,8 +90,8 @@ class TestLogit:
     p = torch.tensor([0.1, 0.4], dtype=torch.float64)
 
     torch.testing.assert_close(
-      _logit(p),
-      -_logit(1.0 - p),
+      logit(p),
+      -logit(1.0 - p),
     )
 
 
@@ -111,7 +110,7 @@ class TestTorchInterp:
       dtype=torch.float64,
     )
 
-    result = _torch_interp(x, xp, fp)
+    result = interp(x, xp, fp)
 
     expected = torch.tensor(
       [0.0, 5.0, 20.0],
@@ -141,7 +140,7 @@ class TestTorchInterpBatchedXp:
       dtype=torch.float64,
     )
 
-    result = _torch_interp_batched_xp(x, xp, fp)
+    result = interp_batched_xp(x, xp, fp)
 
     expected = torch.tensor(
       [5.0, 30.0],
@@ -168,7 +167,7 @@ class TestTorchInterpBatchedFp:
       dtype=torch.float64,
     )
 
-    result = _torch_interp_batched_fp(x, xp, fp)
+    result = interp_batched_fp(x, xp, fp)
 
     expected = torch.tensor(
       [5.0, 150.0],
@@ -185,7 +184,7 @@ class TestTorchGradient1d:
     )
     y = x.square()
 
-    result = _torch_gradient_1d(y, x)
+    result = gradient_1d(y, x)
 
     expected = torch.tensor(
       [1.0, 2.0, 3.0],
@@ -205,7 +204,7 @@ class TestTorchGradient1d:
       ]
     )
 
-    result = _torch_gradient_1d(y, x)
+    result = gradient_1d(y, x)
 
     expected = torch.tensor(
       [
@@ -221,4 +220,4 @@ class TestTorchGradient1d:
     y = torch.tensor([1.0], dtype=torch.float64)
 
     with pytest.raises(ValueError, match="at least 2 points"):
-      _torch_gradient_1d(y, x)
+      gradient_1d(y, x)

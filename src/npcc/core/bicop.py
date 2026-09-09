@@ -1,5 +1,4 @@
-"""
-bicop.py — Rosenblatt conditional bivariate copula.
+"""Rosenblatt conditional bivariate copula.
 
 Approach
 --------
@@ -55,34 +54,96 @@ and interpolated back to the queried points.
 
 Plotting
 --------
-:class:`RosenblattBicop` doubles as a duck-typed bivariate copula via
-:py:meth:`as_bicop`, which returns an object exposing
-``var_types = ["c", "c"]`` and ``pdf(uv)`` — exactly what
-``pyvinecopulib`` plotting helpers expect.  Cartesian-grid queries (which
-is what plotting always produces) automatically take the fast
-:py:meth:`pdf_grid` path.
+:class:`RosenblattBicop` is a ``BicopBase``, so it inherits ``plot`` and needs
+no adapter. The inherited implementation manufactures a NumPy evaluation grid,
+which :meth:`_prep` brings onto this estimator's dtype and device before the
+Cartesian-grid fast path evaluates it.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from dataclasses import fields
 from typing import Self
 
 import torch
-from pyvinecopulib.core import BicopBase
+from pyvinecopulib.core import BicopBase, ControlsLike
 
-from npcc.core._common import (
-  _check_uv,
-  _resolve_device,
-  _torch_interp,
-)
-from npcc.core.controls import (
-  FitControlsRosenblattBicop,
-  Transform,
-)
+from npcc.core._interp import interp
+from npcc.core._placement import TensorPlacement, resolve_device, to_numpy
+from npcc.core._trim import check_uv
+from npcc.core.controls import FitControlsRosenblattBicop
 from npcc.core.margin import ConditionalMargin
-from npcc.core.quantile_table_distribution1d import QuantileTableConfig
 from npcc.core.registry import create_backend
+
+
+def _bicop_controls(
+  controls: ControlsLike | None,
+) -> FitControlsRosenblattBicop:
+  """Coerce a ``ControlsLike`` into this estimator's own controls.
+
+  What a consumer is handed is the ``ControlsLike`` contract -- an object with
+  a ``to_dict`` -- so :meth:`RosenblattBicop.fit` may not declare less than
+  that, and this is where it narrows. A
+  :class:`~npcc.core.controls.FitControlsRosenblattVinecop` passes straight
+  through, a vine's controls being valid pair controls.
+
+  Anything else is read through ``to_dict`` and rebuilt, so a foreign controls
+  object carrying exactly these settings works. One carrying a setting this
+  estimator can neither honor nor delegate is **refused** rather than dropped,
+  which is what ``ControlsLike`` asks of a consumer.
+
+  Parameters
+  ----------
+  controls : ControlsLike, or None
+      The caller's fit configuration, or ``None`` for the defaults.
+
+  Returns
+  -------
+  FitControlsRosenblattBicop
+      Controls this estimator can read field by field.
+
+  Raises
+  ------
+  TypeError
+      If ``controls`` is an array -- the argument-order mistake -- or carries
+      no ``to_dict``.
+  ValueError
+      If it carries a setting this estimator cannot honor.
+  """
+  if controls is None:
+    return FitControlsRosenblattBicop()
+
+  if isinstance(controls, FitControlsRosenblattBicop):
+    return controls
+
+  if hasattr(controls, "shape"):
+    raise TypeError(
+      "RosenblattBicop received an array where `controls` goes. The order is "
+      "(observations, controls) with everything else keyword-only, so "
+      "covariates are passed as `x=`: fit(u, controls, x=covariates)."
+    )
+
+  to_dict = getattr(controls, "to_dict", None)
+  if to_dict is None:
+    raise TypeError(
+      "controls must be a FitControlsRosenblattBicop, or a ControlsLike -- an "
+      f"object with `to_dict`; got {type(controls).__name__}."
+    )
+
+  settings = dict(to_dict())
+  unknown = sorted(
+    set(settings) - {f.name for f in fields(FitControlsRosenblattBicop)}
+  )
+
+  if unknown:
+    plural = "them" if len(unknown) > 1 else "it"
+    raise ValueError(
+      f"RosenblattBicop cannot honor {', '.join(unknown)} from "
+      f"{type(controls).__name__}, and will not drop {plural} silently; pass "
+      "a FitControlsRosenblattBicop instead."
+    )
+
+  return FitControlsRosenblattBicop(**settings)
 
 
 def _sinkhorn_project(
@@ -155,81 +216,29 @@ def _sinkhorn_project(
   return r, s
 
 
-class RosenblattBicop(BicopBase[torch.Tensor]):
+class RosenblattBicop(TensorPlacement, BicopBase[torch.Tensor]):
   """Rosenblatt conditional bivariate copula estimator.
 
   Parameters
   ----------
-  backend
-      Name of the inner conditional-density backend (see
-      :mod:`npcc.core.registry`).  ``"tabpfn-criterion"`` (default) is
-      TabPFN's native head; ``"tabpfn-quantiles"`` inverts TabPFN's
-      quantile output; optional extras include ``"ngboost"``, ``"gbm"``,
-      and ``"tabicl"``.
-  quantile_table_config
-      :class:`QuantileTableConfig` instance configuring quantile-table
-      reconstruction for quantile-based backends.
-  eps
-      Boundary clipping distance used throughout copula and transformed-margin
-      computations.
-  transform
-      Support transform used by the inner backend.  ``"logit"`` (default)
-      maps copula values in ``(0, 1)`` to ``R`` before fitting;
-      ``"probit"`` applies ``Phi^{-1}``; ``"identity"`` keeps the scale.
-  device
-      Device for internal tensors and inference.  ``None`` (default)
-      auto-selects ``cuda`` if available, else ``cpu``.
-  batch_size
-      Default chunk size used by inner ``pdf`` / ``cdf`` calls.  ``None``
-      (default) uses 400 on CPU and 2000 on CUDA.
-  backend_kwargs
-      Extra keyword arguments forwarded to the backend constructor.  For
-      the TabPFN backends this is where ``model_version`` and
-      ``model_kwargs`` go; other backends take their own hyperparameters
-      here.
-  sinkhorn_iters
-      Default number of Sinkhorn / iterative-proportional-fitting
-      iterations used to project the estimated density onto the space of
-      bivariate copula densities with approximately uniform margins.
-      ``None`` (default) disables projection.
-  projection_grid_size
-      Number of points per axis in the uniform copula-scale grid used for
-      the optional Sinkhorn projection; the default is 101.
+  controls : ControlsLike, or None, optional
+      Backend and numerical configuration; see
+      :class:`~npcc.core.controls.FitControlsRosenblattBicop`. ``None`` uses
+      its defaults, which is what lets the inherited
+      :meth:`~pyvinecopulib.core.BicopBase.from_data` construct one pair per
+      vine edge with no arguments.
 
   Notes
   -----
   - The estimator fits both Rosenblatt directions and averages them to
     reduce directional bias (see the module docstring).
-  - Public numerical methods accept and return torch tensors. The inherited
-  plotting implementation may construct a NumPy evaluation grid, which is
-  converted to the model's device at that boundary.
+  - Public numerical methods accept and return torch tensors. Inputs are
+    brought onto this estimator's dtype and device by ``_prep``, which is what
+    lets the inherited plotting implementation hand it a NumPy grid.
   """
 
-  def __init__(
-    self,
-    *,
-    backend: str = "tabpfn-criterion",
-    quantile_table_config: QuantileTableConfig | None = None,
-    eps: float = 1e-6,
-    transform: Transform = "logit",
-    device: str | torch.device | None = None,
-    batch_size: int | None = None,
-    backend_kwargs: Mapping[str, object] | None = None,
-    sinkhorn_iters: int | None = None,
-    projection_grid_size: int = 101,
-  ) -> None:
-    initial_controls = FitControlsRosenblattBicop(
-      backend=backend,
-      quantile_table_config=quantile_table_config or QuantileTableConfig(),
-      eps=eps,
-      transform=transform,
-      device=device,
-      batch_size=batch_size,
-      backend_kwargs=backend_kwargs or {},
-      sinkhorn_iters=sinkhorn_iters,
-      projection_grid_size=projection_grid_size,
-    )
-    self._apply_controls(initial_controls)
+  def __init__(self, controls: ControlsLike | None = None) -> None:
+    self._apply_controls(_bicop_controls(controls))
 
   def _apply_controls(
     self,
@@ -240,7 +249,7 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     self.quantile_table_config = controls.quantile_table_config
     self.eps = controls.eps
     self.transform = controls.transform
-    self._device = _resolve_device(controls.device)
+    self._device = resolve_device(controls.device)
 
     if controls.batch_size is None:
       self.batch_size = 2000 if self._device.type == "cuda" else 400
@@ -318,28 +327,70 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     uv: torch.Tensor,
     x: torch.Tensor | None,
   ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Validate paired copula observations and optional covariates."""
-    # Required because BicopBase.plot() constructs a NumPy evaluation grid.
-    # Existing same-device tensors are not copied.
-    uv_t = torch.as_tensor(uv, device=self._device)
+    """Place and validate paired copula observations and their covariates.
+
+    Both arguments go through :meth:`_prep`, which is what lets a NumPy
+    evaluation grid from the inherited ``plot``, and a host covariate matrix
+    handed to a CUDA estimator, meet this estimator's own tensors.
+    """
+    uv_t = self._prep(uv)
 
     if uv_t.ndim != 2 or uv_t.shape[1] != 2:
-      raise ValueError("uv must have shape (n, 2).")
+      raise ValueError(f"uv must have shape (n, 2); got {tuple(uv_t.shape)}")
 
-    u_t, v_t = _check_uv(uv_t[:, 0], uv_t[:, 1], self.eps)
+    u_t, v_t = check_uv(uv_t[:, 0], uv_t[:, 1], self.eps)
 
+    return u_t, v_t, self._prepare_covariates(x, uv_t.shape[0])
+
+  def _prepare_covariates(
+    self,
+    x: torch.Tensor | None,
+    n: int,
+  ) -> torch.Tensor:
+    """Place covariates and check they are row-aligned with ``n`` rows.
+
+    Placement and layout only, never the domain step: covariates are arbitrary
+    reals rather than copula arguments, so they are brought onto this
+    estimator's dtype and device but never clamped. That is the split
+    pyvinecopulib draws in ``core._covariates.prepare``.
+    """
     if x is None:
-      x_t = uv_t.new_empty((uv_t.shape[0], 0))
-    else:
-      x_t = x.reshape(-1, 1) if x.ndim == 1 else x
+      return self._default_x(n)
+
+    x_t = self._prep(x)
+
+    if x_t.ndim == 1:
+      x_t = x_t.reshape(-1, 1)
 
     if x_t.ndim != 2:
-      raise ValueError("x must have shape (n,) or (n, p).")
+      raise ValueError(
+        f"x must have shape (n,) or (n, p); got {tuple(x_t.shape)}"
+      )
 
-    if x_t.shape[0] != uv_t.shape[0]:
-      raise ValueError("x and uv must have the same number of observations.")
+    if x_t.shape[0] != n:
+      raise ValueError(
+        f"x must have shape ({n}, p), with one row per observation; "
+        f"got {tuple(x_t.shape)}"
+      )
 
-    return u_t, v_t, x_t
+    return x_t
+
+  def _prepare_x_row(self, x_row: torch.Tensor | None) -> torch.Tensor:
+    """Place and validate the single covariate row a grid query shares."""
+    if x_row is None:
+      return self._default_x(1)
+
+    x_t = self._prep(x_row)
+
+    if x_t.ndim == 1:
+      x_t = x_t.reshape(1, -1)
+
+    if x_t.ndim != 2 or x_t.shape[0] != 1:
+      raise ValueError(
+        f"x_row must have shape (p,) or (1, p); got {tuple(x_t.shape)}"
+      )
+
+    return x_t
 
   def _prepare_grid_inputs(
     self,
@@ -347,9 +398,9 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     v_grid: torch.Tensor,
     x_row: torch.Tensor | None,
   ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Validate copula grids and an optional shared covariate row."""
-    u = u_grid.reshape(-1)
-    v = v_grid.reshape(-1)
+    """Place and validate copula grids and an optional shared covariate row."""
+    u = self._prep(u_grid).reshape(-1)
+    v = self._prep(v_grid).reshape(-1)
 
     if torch.any((u <= 0.0) | (u >= 1.0)) or torch.any((v <= 0.0) | (v >= 1.0)):
       raise ValueError("u_grid and v_grid must lie strictly inside (0, 1).")
@@ -358,15 +409,7 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     u = torch.clamp(u, eps, 1.0 - eps)
     v = torch.clamp(v, eps, 1.0 - eps)
 
-    if x_row is None:
-      x_row_t = u_grid.new_empty((1, 0))
-    else:
-      x_row_t = x_row.reshape(1, -1) if x_row.ndim == 1 else x_row
-
-      if x_row_t.ndim != 2 or x_row_t.shape[0] != 1:
-        raise ValueError("x_row must have shape (p,) or (1, p).")
-
-    return u, v, x_row_t
+    return u, v, self._prepare_x_row(x_row)
 
   @staticmethod
   def _trapezoidal_weights(grid: torch.Tensor) -> torch.Tensor:
@@ -395,7 +438,7 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     self,
     u: torch.Tensor,
     /,
-    controls: FitControlsRosenblattBicop | None = None,
+    controls: ControlsLike | None = None,
     *,
     var_types: list[str] | None = None,
     x: torch.Tensor | None = None,
@@ -418,7 +461,7 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     del var_types
 
     if controls is not None:
-      self._apply_controls(controls)
+      self._apply_controls(_bicop_controls(controls))
 
     u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
 
@@ -520,8 +563,8 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
       # Sinkhorn IPF stays per-x (cheap, no forward pass).
       r, s = _sinkhorn_project(density_all[:, x_idx, :], wu, wv, sinkhorn_iters)
 
-      r_interp = _torch_interp(u[mask], u_grid, r)
-      s_interp = _torch_interp(v[mask], v_grid, s)
+      r_interp = interp(u[mask], u_grid, r)
+      s_interp = interp(v[mask], v_grid, s)
 
       out[mask] = c_raw[mask] * r_interp * s_interp
 
@@ -767,6 +810,7 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
   def hinv2(
     self,
     u: torch.Tensor,
+    *,
     x: torch.Tensor | None = None,
   ) -> torch.Tensor:
     """Invert :meth:`hfunc2` using the U|V backend's native quantiles."""
@@ -784,7 +828,7 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
       from pyvinecopulib.utils import sample_uniform
 
       draws = sample_uniform(n, 2, qrng=True, seeds=list(seeds))
-      return torch.as_tensor(draws, dtype=torch.float64, device=self._device)
+      return self._prep(draws)
 
     generator = torch.Generator(device=self._device)
     if seeds:
@@ -865,7 +909,9 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     upper_safe = torch.clamp(upper, min=eps + 1e-12)
 
     # s_grids[i, k] = linspace(eps, upper_safe[i], n_int+1)[k]
-    t = torch.linspace(0.0, 1.0, n_int + 1, device=self._device)
+    t = torch.linspace(
+      0.0, 1.0, n_int + 1, dtype=torch.float64, device=self._device
+    )
     s_grids = eps + (upper_safe.unsqueeze(1) - eps) * t.unsqueeze(0)
 
     s_flat = s_grids.reshape(-1)
@@ -885,8 +931,8 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     self,
     u_grid: torch.Tensor,
     v_grid: torch.Tensor,
-    x_row: torch.Tensor | None = None,
     *,
+    x_row: torch.Tensor | None = None,
     n_int: int = 64,
   ) -> torch.Tensor:
     """Cartesian-grid joint CDF ``out[i, j] = C(u_grid[i], v_grid[j] | x_row)``.
@@ -938,7 +984,11 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     # Shared fine s-grid covering [eps, max(upper_grid)].
     s_max = torch.clamp(upper_grid.max(), min=eps + 1e-12)
     s_fine = torch.linspace(
-      eps, float(s_max.item()), n_int + 1, device=self._device
+      eps,
+      float(s_max.item()),
+      n_int + 1,
+      dtype=torch.float64,
+      device=self._device,
     )
 
     x_for_s = x_row.repeat_interleave(s_fine.shape[0], dim=0)
@@ -948,13 +998,15 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     # Cumulative trapezoid along axis=0.
     ds = torch.diff(s_fine)
     avgs = 0.5 * (cdf_table[:-1] + cdf_table[1:])
-    cum = torch.zeros((s_fine.shape[0], n_v), device=self._device)
+    cum = torch.zeros(
+      (s_fine.shape[0], n_v), dtype=torch.float64, device=self._device
+    )
     cum[1:] = torch.cumsum(avgs * ds.unsqueeze(1), dim=0)
 
     # For each upper_grid[i], interpolate cum at s = upper_grid[i].
     out = torch.empty((n_u, n_v), dtype=torch.float64, device=self._device)
     for j in range(n_v):
-      out[:, j] = _torch_interp(upper_grid, s_fine, cum[:, j])
+      out[:, j] = interp(upper_grid, s_fine, cum[:, j])
     return out
 
   # -------------------------------------------------------------------
@@ -1002,11 +1054,7 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
 
     from pyvinecopulib.utils import ghalton, wdm
 
-    quasi = torch.as_tensor(
-      ghalton(n, 2, seeds_list),
-      dtype=torch.float64,
-      device=self._device,
-    )
+    quasi = self._prep(ghalton(n, 2, seeds_list))
 
     eps = self.eps
     u_t = torch.clamp(quasi[:, 0], eps, 1.0 - eps)
@@ -1015,20 +1063,9 @@ class RosenblattBicop(BicopBase[torch.Tensor]):
     if x_row is None:
       x_t = self._default_x(n)
     else:
-      x_row_t = x_row.reshape(1, -1) if x_row.dim == 1 else x_row
-
-      if x_row_t.ndim != 2 or x_row_t.shape[0] != 1:
-        raise ValueError("x_row must have shape (p,) or (1, p).")
-
-      x_t = x_row_t.repeat_interleave(n, dim=0)
+      x_t = self._prepare_x_row(x_row).repeat_interleave(n, dim=0)
 
     # Inverse Rosenblatt: v = F_{V | U, X}^{-1}(alpha | u, x).
     v_t = self.v_given_ux_.icdf(alpha_t, x=self._features(u_t, x_t))
 
-    return float(
-      wdm(
-        u_t.detach().cpu().numpy(),
-        v_t.detach().cpu().numpy(),
-        "tau",
-      )
-    )
+    return float(wdm(to_numpy(u_t), to_numpy(v_t), "tau"))

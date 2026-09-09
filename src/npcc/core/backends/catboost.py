@@ -22,7 +22,8 @@ from typing import Any, Literal
 import torch
 from catboost import CatBoostRegressor
 
-from npcc.core.quantile_table_distribution1d import (
+from npcc.core._placement import to_numpy
+from npcc.core.margin_quantile_table import (
   QuantileTableConfig,
   QuantileTableDistribution1D,
 )
@@ -98,7 +99,7 @@ class CatBoostBackend(QuantileTableDistribution1D):
       )
       .numpy()
     )
-    z_host = z.detach().cpu().numpy()
+    z_host = to_numpy(z)
 
     model.fit(x_host, z_host)
 

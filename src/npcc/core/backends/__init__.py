@@ -2,7 +2,7 @@
 
 Each backend implements :class:`npcc.core.margin.ConditionalMargin` (directly,
 for native-evaluation backends) or
-:class:`npcc.core.quantile_table_distribution1d.QuantileTableDistribution1D`
+:class:`npcc.core.margin_quantile_table.QuantileTableDistribution1D`
 (for quantile-based backends).
 
 Backends are constructed through the registry

@@ -31,8 +31,11 @@ def make_structure() -> RVineStructure:
 
 def make_pairs() -> list[list[RosenblattBicop]]:
   return [
-    [RosenblattBicop(device="cpu"), RosenblattBicop(device="cpu")],
-    [RosenblattBicop(device="cpu")],
+    [
+      RosenblattBicop(FitControlsRosenblattBicop(device="cpu")),
+      RosenblattBicop(FitControlsRosenblattBicop(device="cpu")),
+    ],
+    [RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))],
   ]
 
 

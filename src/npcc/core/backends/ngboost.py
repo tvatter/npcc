@@ -22,6 +22,7 @@ import torch
 from ngboost import NGBRegressor
 from ngboost.distns import Normal
 
+from npcc.core._placement import to_numpy
 from npcc.core.margin import ConditionalMargin
 
 
@@ -76,8 +77,8 @@ class NGBoostBackend(ConditionalMargin):
     model = NGBRegressor(Dist=self._dist, verbose=False, **self.ngb_kwargs)
 
     model.fit(
-      x.detach().cpu().numpy(),
-      z.detach().cpu().numpy(),
+      to_numpy(x),
+      to_numpy(z),
     )
 
     self.model_ = model
@@ -89,7 +90,7 @@ class NGBoostBackend(ConditionalMargin):
     """Return the vectorized SciPy distribution for conditioning rows."""
     assert self.model_ is not None
 
-    return self.model_.pred_dist(x.detach().cpu().numpy()).dist
+    return self.model_.pred_dist(to_numpy(x)).dist
 
   @staticmethod
   def _to_tensor(
@@ -130,7 +131,7 @@ class NGBoostBackend(ConditionalMargin):
 
       frozen = self._frozen(x_t[start:end])
       density = frozen.pdf(
-        z[start:end].detach().cpu().numpy(),
+        to_numpy(z[start:end]),
       )
 
       parts.append(self._to_tensor(density, like=y_t))
@@ -167,7 +168,7 @@ class NGBoostBackend(ConditionalMargin):
       end = min(start + effective_batch_size, y_t.shape[0])
 
       frozen = self._frozen(x_t[start:end])
-      probabilities = frozen.cdf(z[start:end].detach().cpu().numpy())
+      probabilities = frozen.cdf(to_numpy(z[start:end]))
 
       parts.append(self._to_tensor(probabilities, like=y_t))
 
@@ -204,7 +205,7 @@ class NGBoostBackend(ConditionalMargin):
       end = min(start + effective_batch_size, p_t.shape[0])
 
       frozen = self._frozen(x_t[start:end])
-      transformed_quantiles = frozen.ppf(p_t[start:end].detach().cpu().numpy())
+      transformed_quantiles = frozen.ppf(to_numpy(p_t[start:end]))
 
       parts.append(self._to_tensor(transformed_quantiles, like=p_t))
 
@@ -235,7 +236,7 @@ class NGBoostBackend(ConditionalMargin):
     x_t = x.reshape(-1, 1) if x.ndim == 1 else x
     z_grid = self._transform_y(y_grid_t)
     jacobian = self._jacobian_inverse(y_grid_t)
-    z_host = z_grid.detach().cpu().numpy()
+    z_host = to_numpy(z_grid)
 
     chunks: list[torch.Tensor] = []
 
@@ -276,7 +277,7 @@ class NGBoostBackend(ConditionalMargin):
 
     x_t = x.reshape(-1, 1) if x.ndim == 1 else x
     z_grid = self._transform_y(y_grid_t)
-    z_host = z_grid.detach().cpu().numpy()
+    z_host = to_numpy(z_grid)
 
     chunks: list[torch.Tensor] = []
 

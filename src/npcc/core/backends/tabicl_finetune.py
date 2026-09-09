@@ -22,8 +22,9 @@ from typing import Any, Literal
 
 import torch
 
+from npcc.core._placement import to_numpy
 from npcc.core.backends.tabicl import TabICLBackend
-from npcc.core.quantile_table_distribution1d import QuantileTableConfig
+from npcc.core.margin_quantile_table import QuantileTableConfig
 
 
 class FinetunedTabICLBackend(TabICLBackend):
@@ -72,5 +73,5 @@ class FinetunedTabICLBackend(TabICLBackend):
       learning_rate=self.learning_rate,
       **self.finetune_kwargs,
     )
-    model.fit(x.detach().cpu().numpy(), z.detach().cpu().numpy())
+    model.fit(to_numpy(x), to_numpy(z))
     self.model_ = model

@@ -26,10 +26,11 @@ from typing import Literal, Self
 import torch
 from pyvinecopulib.core import MarginBase
 
-from npcc.core._common import _logit, _resolve_device
+from npcc.core._placement import TensorPlacement, resolve_device
+from npcc.core._trim import logit
 
 
-class ConditionalMargin(MarginBase[torch.Tensor], ABC):
+class ConditionalMargin(TensorPlacement, MarginBase[torch.Tensor], ABC):
   """Abstract backend-powered conditional continuous margin.
 
   Parameters
@@ -73,7 +74,7 @@ class ConditionalMargin(MarginBase[torch.Tensor], ABC):
 
     self.transform = transform
     self.eps = eps
-    self._device = _resolve_device(device)
+    self._device = resolve_device(device)
 
     if batch_size is None:
       self.batch_size = 2000 if self._device.type == "cuda" else 400
@@ -113,7 +114,13 @@ class ConditionalMargin(MarginBase[torch.Tensor], ABC):
     values: torch.Tensor,
     x: torch.Tensor | None,
   ) -> torch.Tensor:
-    """Prepare conditioning features."""
+    """Place conditioning features and check they are row-aligned.
+
+    An absent ``x`` becomes a single constant column rather than a zero-width
+    one: the inner regressors are third-party estimators that require at least
+    one feature, so an unconditional margin is fitted as a conditional one on a
+    covariate that carries no information.
+    """
     n = values.shape[0]
 
     if x is None:
@@ -123,15 +130,22 @@ class ConditionalMargin(MarginBase[torch.Tensor], ABC):
         device=self._device,
       )
 
-    if x.ndim == 1:
-      x = x.reshape(-1, 1)
-    elif x.ndim != 2:
-      raise ValueError("x must have shape (n,) or (n, p).")
+    x_t = self._prep(x)
 
-    if x.shape[0] != n:
-      raise ValueError("values and x must have the same number of rows.")
+    if x_t.ndim == 1:
+      x_t = x_t.reshape(-1, 1)
+    elif x_t.ndim != 2:
+      raise ValueError(
+        f"x must have shape (n,) or (n, p); got {tuple(x_t.shape)}"
+      )
 
-    return x
+    if x_t.shape[0] != n:
+      raise ValueError(
+        f"x must have shape ({n}, p), with one row per observation; "
+        f"got {tuple(x_t.shape)}"
+      )
+
+    return x_t
 
   def _transform_y(self, y: torch.Tensor) -> torch.Tensor:
     """Transform responses to the backend's modeled scale."""
@@ -140,7 +154,7 @@ class ConditionalMargin(MarginBase[torch.Tensor], ABC):
 
     if self.transform == "logit":
       y_clip = torch.clamp(y, self.eps, 1.0 - self.eps)
-      return _logit(y_clip)
+      return logit(y_clip)
 
     if self.transform == "probit":
       y_clip = torch.clamp(y, self.eps, 1.0 - self.eps)
@@ -187,10 +201,28 @@ class ConditionalMargin(MarginBase[torch.Tensor], ABC):
     x: torch.Tensor | None = None,
     weights: torch.Tensor | None = None,
   ) -> Self:
-    """Fit the backend to responses and optional conditioning features."""
-    del controls, weights
+    """Fit the backend to responses and optional conditioning features.
 
-    y_t = y.reshape(-1)
+    Neither ``controls`` nor ``weights`` is accepted -- this margin is
+    configured entirely at construction, which is what
+    :attr:`supports_controls` ``False`` and :attr:`supports_weights` ``False``
+    declare. Both are refused rather than dropped, so a caller who passes one
+    is told instead of being handed a fit that quietly ignored it.
+    """
+    if controls is not None:
+      raise ValueError(
+        f"{type(self).__name__} declares `supports_controls = False`, so it "
+        "is configured at construction and takes no `controls`; pass the "
+        "backend settings to the constructor instead."
+      )
+
+    if weights is not None:
+      raise ValueError(
+        f"{type(self).__name__} declares `supports_weights = False`, so it "
+        "cannot apply observation weights; drop `weights`."
+      )
+
+    y_t = self._prep(y).reshape(-1)
 
     x_t = self._conditioning(y_t, x=x)
     z_t = self._transform_y(y_t)

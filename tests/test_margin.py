@@ -10,7 +10,7 @@ import torch
 from pyvinecopulib.core import MarginBase
 
 from npcc.core.margin import ConditionalMargin
-from npcc.core.quantile_table_distribution1d import QuantileTableConfig
+from npcc.core.margin_quantile_table import QuantileTableConfig
 from npcc.core.registry import create_backend
 
 
@@ -122,7 +122,7 @@ def test_rejects_mismatched_rows(
 ) -> None:
   margin = make_margin(register_uniform_backends)
 
-  with pytest.raises(ValueError, match="same number of rows"):
+  with pytest.raises(ValueError, match="one row per observation"):
     margin.fit(
       torch.linspace(-1.0, 1.0, 8, dtype=torch.float64),
       x=torch.ones((7, 2), dtype=torch.float64),

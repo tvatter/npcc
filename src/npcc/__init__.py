@@ -12,7 +12,7 @@ from npcc.core.errors import (
   NpccError,
   UnknownBackendError,
 )
-from npcc.core.quantile_table_distribution1d import (
+from npcc.core.margin_quantile_table import (
   QuantileTableConfig,
   QuantileTableDistribution1D,
 )

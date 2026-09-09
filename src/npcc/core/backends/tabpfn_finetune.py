@@ -27,6 +27,7 @@ from typing import Any, Literal
 
 import torch
 
+from npcc.core._placement import to_numpy
 from npcc.core.backends.tabpfn_criterion import TabPFNCriterionBackend
 
 
@@ -94,5 +95,5 @@ class FinetunedTabPFNCriterionBackend(TabPFNCriterionBackend):
       mae_loss_weight=self.mae_loss_weight,
       **self.finetune_kwargs,
     )
-    model.fit(x.detach().cpu().numpy(), z.detach().cpu().numpy())
+    model.fit(to_numpy(x), to_numpy(z))
     self.model_ = model

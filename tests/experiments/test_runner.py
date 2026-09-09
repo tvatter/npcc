@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 import torch
 
-from npcc.core.quantile_table_distribution1d import QuantileTableConfig
+from npcc.core.margin_quantile_table import QuantileTableConfig
 from npcc.experiments import runner as runner_mod
 from npcc.experiments.config import EstimatorSpec, GridConfig, RunConfig
 from npcc.experiments.runner import (

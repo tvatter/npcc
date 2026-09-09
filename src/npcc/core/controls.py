@@ -8,7 +8,7 @@ from typing import Literal
 
 import torch
 
-from npcc.core.quantile_table_distribution1d import QuantileTableConfig
+from npcc.core.margin_quantile_table import QuantileTableConfig
 from npcc.core.registry import validate_backend_kwargs
 
 Transform = Literal["identity", "logit", "probit"]

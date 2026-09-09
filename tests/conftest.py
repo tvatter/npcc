@@ -32,7 +32,7 @@ pytest.importorskip("tabpfn")
 from npcc.core.margin import (  # noqa: E402
   ConditionalMargin,
 )
-from npcc.core.quantile_table_distribution1d import (  # noqa: E402
+from npcc.core.margin_quantile_table import (  # noqa: E402
   QuantileTableDistribution1D,
 )
 

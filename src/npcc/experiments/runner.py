@@ -24,6 +24,7 @@ import pandas as pd
 import torch
 
 from npcc.core.bicop import RosenblattBicop
+from npcc.core.controls import FitControlsRosenblattBicop
 from npcc.experiments import metrics, scenarios
 from npcc.experiments.config import Cell, EstimatorSpec, GridConfig, RunConfig
 from npcc.experiments.scenarios import EvalGrid
@@ -510,11 +511,13 @@ def summarize_one_cell(
     if torch.cuda.is_available():
       torch.cuda.reset_peak_memory_stats()
     model = RosenblattBicop(
-      backend=est.backend,
-      transform=cast(Literal["identity", "logit", "probit"], est.transform),
-      device=device,
-      projection_grid_size=projection_grid_size,
-      backend_kwargs=dict(est.backend_kwargs),
+      FitControlsRosenblattBicop(
+        backend=est.backend,
+        transform=cast(Literal["identity", "logit", "probit"], est.transform),
+        device=device,
+        projection_grid_size=projection_grid_size,
+        backend_kwargs=dict(est.backend_kwargs),
+      )
     )
     model.fit(torch.column_stack([u, v]), x=x)
     fit_time = perf_counter() - t0

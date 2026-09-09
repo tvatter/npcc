@@ -24,7 +24,7 @@ from npcc.core.errors import (
   MissingBackendDependencyError,
   UnknownBackendError,
 )
-from npcc.core.quantile_table_distribution1d import QuantileTableConfig
+from npcc.core.margin_quantile_table import QuantileTableConfig
 from npcc.core.registry import (
   available_backends,
   create_backend,
@@ -151,7 +151,7 @@ class TestHermeticBackendEndToEnd:
     )
 
     # Symmetric average of two identical Uniform(-2,2)-logit densities.
-    y = torch.tensor([0.3, 0.5, 0.7])
+    y = torch.tensor([0.3, 0.5, 0.7], dtype=torch.float64)
     out = m.pdf(torch.column_stack((y, y)))
     expected = 0.25 / (y * (1.0 - y))
     torch.testing.assert_close(out, expected, atol=1e-6, rtol=1e-6)
@@ -363,8 +363,10 @@ def test_fit_controls_replace_conditional_estimators(
   register_uniform_backends: None,
 ) -> None:
   pair = RosenblattBicop(
-    backend="uniform-quantile",
-    device="cpu",
+    FitControlsRosenblattBicop(
+      backend="uniform-quantile",
+      device="cpu",
+    )
   )
   old_forward = pair.v_given_ux_
   old_reverse = pair.u_given_vx_
@@ -394,9 +396,11 @@ def test_fit_without_controls_retains_configuration(
   register_uniform_backends: None,
 ) -> None:
   pair = RosenblattBicop(
-    backend="uniform-native",
-    device="cpu",
-    batch_size=23,
+    FitControlsRosenblattBicop(
+      backend="uniform-native",
+      device="cpu",
+      batch_size=23,
+    )
   )
   forward = pair.v_given_ux_
   reverse = pair.u_given_vx_

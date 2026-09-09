@@ -17,12 +17,13 @@ from typing import Any, Literal
 
 import torch
 
+from npcc.core._placement import to_numpy
 from npcc.core.backends.tabpfn_common import (
   _DEFAULT_MODEL_VERSION,
   ModelVersion,
   make_tabpfn_regressor,
 )
-from npcc.core.quantile_table_distribution1d import (
+from npcc.core.margin_quantile_table import (
   QuantileTableConfig,
   QuantileTableDistribution1D,
 )
@@ -106,7 +107,7 @@ class TabPFNQuantileBackend(QuantileTableDistribution1D):
     predicted = self.model_.predict(
       x.detach().cpu(),
       output_type="quantiles",
-      quantiles=alphas.detach().cpu().tolist(),
+      quantiles=to_numpy(alphas).tolist(),
     )
 
     quantiles = torch.as_tensor(

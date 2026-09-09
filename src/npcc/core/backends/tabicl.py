@@ -22,7 +22,8 @@ from typing import Any, Literal
 import torch
 from tabicl import TabICLRegressor
 
-from npcc.core.quantile_table_distribution1d import (
+from npcc.core._placement import to_numpy
+from npcc.core.margin_quantile_table import (
   QuantileTableConfig,
   QuantileTableDistribution1D,
 )
@@ -78,8 +79,8 @@ class TabICLBackend(QuantileTableDistribution1D):
     self.model_ = TabICLRegressor(**self.model_kwargs)
 
     self.model_.fit(
-      x.detach().cpu().numpy(),
-      z.detach().cpu().numpy(),
+      to_numpy(x),
+      to_numpy(z),
     )
 
   def _predict_quantiles(
@@ -91,9 +92,9 @@ class TabICLBackend(QuantileTableDistribution1D):
     assert self.model_ is not None
 
     predicted = self.model_.predict(
-      x.detach().cpu().numpy(),
+      to_numpy(x),
       output_type="quantiles",
-      alphas=alphas.detach().cpu().tolist(),
+      alphas=to_numpy(alphas).tolist(),
     )
 
     quantiles = torch.as_tensor(

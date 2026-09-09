@@ -22,7 +22,8 @@ from typing import Any, Literal
 
 import torch
 
-from npcc.core.quantile_table_distribution1d import (
+from npcc.core._placement import to_numpy
+from npcc.core.margin_quantile_table import (
   QuantileTableConfig,
   QuantileTableDistribution1D,
 )
@@ -82,8 +83,8 @@ class _PyTabKitBackend(QuantileTableDistribution1D):
     model = estimator_class(**model_kwargs)
 
     model.fit(
-      x.detach().cpu().numpy(),
-      z.detach().cpu().numpy(),
+      to_numpy(x),
+      to_numpy(z),
     )
 
     self.model_ = model
@@ -96,7 +97,7 @@ class _PyTabKitBackend(QuantileTableDistribution1D):
     """Predict one quantile table for a chunk of conditioning rows."""
     assert self.model_ is not None
 
-    predicted = self.model_.predict(x.detach().cpu().numpy())
+    predicted = self.model_.predict(to_numpy(x))
 
     quantiles = torch.as_tensor(
       predicted,

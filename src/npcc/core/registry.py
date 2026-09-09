@@ -28,7 +28,7 @@ from npcc.core.errors import (
   MissingBackendDependencyError,
   UnknownBackendError,
 )
-from npcc.core.quantile_table_distribution1d import QuantileTableConfig
+from npcc.core.margin_quantile_table import QuantileTableConfig
 
 _Transform = Literal["identity", "logit", "probit"]
 

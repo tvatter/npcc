@@ -112,7 +112,7 @@ class TestTabPFNCriterionBackend:
   def test_fit_rejects_length_mismatch(self, patch_uniform: None) -> None:
     backend = TabPFNCriterionBackend(transform="logit", device="cpu")
 
-    with pytest.raises(ValueError, match="same number of rows"):
+    with pytest.raises(ValueError, match="one row per observation"):
       backend.fit(
         torch.zeros(6, dtype=torch.float64),
         x=torch.zeros((5, 1), dtype=torch.float64),
@@ -121,7 +121,7 @@ class TestTabPFNCriterionBackend:
   def test_pdf_rejects_length_mismatch(self, patch_uniform: None) -> None:
     backend = make_fitted_backend(patch_uniform)
 
-    with pytest.raises(ValueError, match="same number of rows"):
+    with pytest.raises(ValueError, match="one row per observation"):
       backend.pdf(
         torch.full((6,), 0.5, dtype=torch.float64),
         x=torch.zeros((5, 1), dtype=torch.float64),
@@ -253,7 +253,7 @@ class TestTabPFNCriterionBackend:
   def test_cdf_rejects_length_mismatch(self, patch_uniform: None) -> None:
     backend = make_fitted_backend(patch_uniform)
 
-    with pytest.raises(ValueError, match="same number of rows"):
+    with pytest.raises(ValueError, match="one row per observation"):
       backend.cdf(
         torch.full((6,), 0.5, dtype=torch.float64),
         x=torch.zeros((5, 1), dtype=torch.float64),
@@ -362,7 +362,7 @@ class TestTabPFNCriterionBackend:
   def test_icdf_rejects_length_mismatch(self, patch_uniform: None) -> None:
     backend = make_fitted_backend(patch_uniform)
 
-    with pytest.raises(ValueError, match="same number of rows"):
+    with pytest.raises(ValueError, match="one row per observation"):
       backend.icdf(
         torch.tensor([0.5], dtype=torch.float64),
         x=torch.zeros((5, 1), dtype=torch.float64),
