@@ -2,7 +2,7 @@
 
 Copula scores live in ``(0, 1)`` open, and both directions across that
 boundary need care. :func:`check_uv` is this package's *domain* step, the
-counterpart of ``pyvinecopulib.core.trim``, and differs from it
+counterpart of ``pyvinecopulib.core.extend.trim``, and differs from it
 for a reason: ``trim`` clamps silently at the working precision, while this
 **rejects** a value at or outside ``{0, 1}`` before clamping to a caller-chosen
 ``eps``. A copula argument of exactly ``0`` or ``1`` is a caller error here

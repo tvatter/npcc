@@ -50,12 +50,11 @@ device before the Cartesian-grid fast path evaluates it.
 from __future__ import annotations
 
 from dataclasses import fields
-from typing import Self, cast
+from typing import Self
 
 import torch
-from pyvinecopulib.core import (
-  BicopBase,
-  ControlsLike,
+from pyvinecopulib.core import BicopBase, ControlsLike
+from pyvinecopulib.core.extend import (
   covariate_row,
   prepare_covariates,
   to_numpy,
@@ -350,7 +349,7 @@ class RosenblattBicop(TensorPlacement, BicopBase[torch.Tensor]):
     Placement and layout only, never the domain step: covariates are arbitrary
     reals rather than copula arguments, so they are brought onto this
     estimator's dtype and device but never clamped. That is the split
-    :func:`pyvinecopulib.core.prepare_covariates` draws, and whose
+    :func:`pyvinecopulib.core.extend.prepare_covariates` draws, and whose
     row-alignment check this delegates to.
 
     A one-dimensional ``x`` is reshaped to ``(n, 1)`` **before** that check,
@@ -383,7 +382,7 @@ class RosenblattBicop(TensorPlacement, BicopBase[torch.Tensor]):
     """Place the single covariate row a grid query shares, and shape it.
 
     ``(p,)`` and ``(1, p)`` both mean one row, which is why
-    :func:`pyvinecopulib.core.covariate_row` accepts either where
+    :func:`pyvinecopulib.core.extend.covariate_row` accepts either where
     ``prepare_covariates`` refuses a one-dimensional ``x``: a single row is
     unambiguous, a row-aligned block of them is not. That function shapes but
     does not place, so ``_prep`` runs first.
@@ -391,10 +390,7 @@ class RosenblattBicop(TensorPlacement, BicopBase[torch.Tensor]):
     if x_row is None:
       return self._default_x(1)
 
-    # `covariate_row` is `ArrayT -> ArrayT`, but `core/__init__.pyi` declares
-    # `ArrayT: Any`, so the generic degrades to `Any -> Any` for a checker
-    # reading the stub. The cast restores what the source signature says.
-    return cast("torch.Tensor", covariate_row(self._prep(x_row), name="x_row"))
+    return covariate_row(self._prep(x_row), name="x_row")
 
   def _prepare_grid_inputs(
     self,

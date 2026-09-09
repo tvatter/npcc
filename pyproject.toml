@@ -103,27 +103,22 @@ conflicts = [
 # there is no v1.0.0 tag), so the 1.0 extension-point API this package builds
 # on is only reachable from git.
 #
-# Pinned *ahead* of `main` to vinecopulib/pyvinecopulib#334, which publishes
-# the input pipeline's steps and the two hooks a torch extension writes. What
-# each buys here: `to_numpy` replaced a copy of it in `core/_placement.py`;
-# `prepare_covariates` owns the covariate layout check in `core/bicop.py` and
-# `core/margin.py`, and routes through `_prep`, which is what lets this
-# package declare a placement instead of holding a dummy tensor for the
-# inference to find; `covariate_row` shapes the single covariate row a grid
-# query shares; `TensorPlacementMixin` *is* the `_prep` hook now, so
-# `_placement.py` carries only the declaration; and `_invalidate_batched`
-# replaced a bare attribute write in `core/vinecop.py`. `place` and
-# `reference_array` are unused here. `trim` is refused on purpose:
-# `core/_trim.py`'s `check_uv` stays, and AGENTS.md says why.
-#
-# One thing to expect from that surface: `core/__init__.pyi` declares
-# `ArrayT: Any` rather than a `TypeVar`, so every generic upstream signature
-# reads as `Any -> Any` to a type checker and a cast is needed wherever the
-# result feeds an annotated return. Reported upstream.
+# Pinned *ahead* of `main` to vinecopulib/pyvinecopulib#334, which splits the
+# extension surface into `pyvinecopulib.core.extend` and publishes the input
+# pipeline's steps there. What each buys here: `to_numpy` replaced a copy of it
+# in `core/_placement.py`; `prepare_covariates` owns the covariate layout check
+# in `core/bicop.py` and `core/margin.py`, and routes through `_prep`, which is
+# what lets this package declare a placement instead of holding a tensor for
+# the inference to find; `covariate_row` shapes the single covariate row a grid
+# query shares; `TensorPlacementMixin` (which stays in `pyvinecopulib.torch`)
+# *is* the `_prep` hook, so `core/_placement.py` carries only the declaration;
+# and `_invalidate_batched` replaced a bare attribute write in
+# `core/vinecop.py`. `place`, `reference_array` and `trim` are unused here --
+# `core/_trim.py`'s `check_uv` stays instead of `trim`, and AGENTS.md says why.
 #
 # Two steps out of here, in order: move to the merge commit once #334 lands,
 # then drop the override entirely once a published 1.0.0 carries these.
-pyvinecopulib = { git = "https://github.com/vinecopulib/pyvinecopulib.git", rev = "6472d28d9e1d5e4690870298fe4de5278702064c" }
+pyvinecopulib = { git = "https://github.com/vinecopulib/pyvinecopulib.git", rev = "9ade3d886bcc9608fb4c85df2a7a188dc1a50e86" }
 # Temporary: install Synthefy Nori from the fork branch that uncaps torch
 # (PR https://github.com/Synthefy/synthefy-nori/pull/79). Drop once on PyPI.
 synthefy-nori = { git = "https://github.com/tvatter/synthefy-nori.git", branch = "allow-newer-torch-cuda" }

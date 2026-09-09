@@ -21,7 +21,7 @@ from typing import Any, Literal
 
 import torch
 from catboost import CatBoostRegressor
-from pyvinecopulib.core import to_numpy
+from pyvinecopulib.core.extend import to_numpy
 
 from npcc.core.margin_quantile_table import (
   QuantileTableConfig,

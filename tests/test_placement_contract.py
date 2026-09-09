@@ -20,7 +20,7 @@ import numpy
 import pytest
 import torch
 from pyvinecopulib import RVineStructure
-from pyvinecopulib.core import prepare_covariates
+from pyvinecopulib.core.extend import prepare_covariates
 
 from npcc.core._placement import TensorPlacement, resolve_device
 from npcc.core.bicop import RosenblattBicop

@@ -200,7 +200,7 @@ overriding `_prep_args` at the vine level, which is new behavior and not a
 decision this file has made.
 
 **One NumPy boundary.** Everything that hands a tensor to a third-party model
-goes through `pyvinecopulib.core.to_numpy`, which detaches and transfers and
+goes through `pyvinecopulib.core.extend.to_numpy`, which detaches and transfers and
 adopts no dtype. Two kinds of site stay outside it, and both should: five
 transfers in the CatBoost and Nori adapters *name* a dtype while moving
 (`to_numpy` would hand the model float64 where it wants float32), and nine

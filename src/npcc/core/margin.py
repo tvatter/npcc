@@ -23,7 +23,8 @@ from abc import ABC, abstractmethod
 from typing import Literal, NoReturn, Self
 
 import torch
-from pyvinecopulib.core import MarginBase, prepare_covariates
+from pyvinecopulib.core import MarginBase
+from pyvinecopulib.core.extend import prepare_covariates
 
 from npcc.core._placement import TensorPlacement
 from npcc.core._trim import logit
@@ -163,7 +164,7 @@ class ConditionalMargin(TensorPlacement, MarginBase[torch.Tensor], ABC):
     covariate that carries no information.
 
     A one-dimensional ``x`` is reshaped to ``(n, 1)`` before the layout check,
-    which :func:`pyvinecopulib.core.prepare_covariates` then performs. Note it
+    which :func:`pyvinecopulib.core.extend.prepare_covariates` then performs. Note it
     does not reach the methods inherited from ``MarginBase`` -- ``logpdf``,
     ``cdf_left``, ``loglik`` and ``sample`` call ``prepare_covariates``
     themselves, so a one-dimensional ``x`` is accepted here and refused there.

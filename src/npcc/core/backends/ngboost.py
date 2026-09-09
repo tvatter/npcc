@@ -21,7 +21,7 @@ from typing import Any, Literal
 import torch
 from ngboost import NGBRegressor
 from ngboost.distns import Normal
-from pyvinecopulib.core import to_numpy
+from pyvinecopulib.core.extend import to_numpy
 
 from npcc.core.margin import ConditionalMargin
 

@@ -21,7 +21,7 @@ from abc import abstractmethod
 from typing import Any, Literal, cast
 
 import torch
-from pyvinecopulib.core import to_numpy
+from pyvinecopulib.core.extend import to_numpy
 
 from npcc.core.margin_quantile_table import (
   QuantileTableConfig,
