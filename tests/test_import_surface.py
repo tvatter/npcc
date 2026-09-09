@@ -18,6 +18,8 @@ put pandas and matplotlib on the path of every ``import npcc``.
 from __future__ import annotations
 
 import ast
+import importlib
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -264,3 +266,92 @@ def test_the_public_lists_are_sorted_and_resolve(module: str) -> None:
   assert names == sorted(names)
   for name in names:
     assert hasattr(imported, name), name
+
+
+#: Where an upstream name can be mentioned: code, and the two prose files that
+#: name symbols. `pyproject.toml` is excluded because it holds URLs rather than
+#: references -- `.../pyvinecopulib.git` is not a symbol.
+_PROSE = ("AGENTS.md", "README.md")
+
+#: A dotted `pyvinecopulib.X.Y`, not preceded by `/` so a URL path does not
+#: match.
+_UPSTREAM_REF = re.compile(
+  r"(?<![/\w])pyvinecopulib(?:\.[A-Za-z_][A-Za-z0-9_]*)+"
+)
+
+
+def _upstream_references() -> dict[str, list[str]]:
+  """Every dotted ``pyvinecopulib`` name this package mentions, and where.
+
+  Returns
+  -------
+  dict
+      Dotted name to the files mentioning it.
+  """
+  paths = [
+    *sorted(_SRC.rglob("*.py")),
+    *sorted((_ROOT / "tests").rglob("*.py")),
+    *[_ROOT / name for name in _PROSE],
+  ]
+  found: dict[str, list[str]] = {}
+  for path in paths:
+    # This file spells a placeholder to describe the pattern, so it cannot be
+    # its own subject -- the same reason `test_prose.py` exempts itself.
+    if not path.is_file() or path.name == "test_import_surface.py":
+      continue
+    for match in _UPSTREAM_REF.finditer(path.read_text()):
+      found.setdefault(match.group(0), []).append(str(path.relative_to(_ROOT)))
+  return found
+
+
+def _resolves(dotted: str) -> bool:
+  """Whether ``dotted`` names something that exists at the pinned version.
+
+  Splits at every boundary rather than guessing where the module ends, since
+  a dotted name's module prefix and its attribute tail are not fixed: the
+  pipeline steps live one level deeper than the contract classes.
+
+  Parameters
+  ----------
+  dotted : str
+      A dotted name beginning ``pyvinecopulib``.
+
+  Returns
+  -------
+  bool
+      ``True`` if the name resolves.
+  """
+  parts = dotted.split(".")
+  for split in range(len(parts), 0, -1):
+    try:
+      obj = importlib.import_module(".".join(parts[:split]))
+    except ImportError:
+      continue
+    for attr in parts[split:]:
+      obj = getattr(obj, attr, None)
+      if obj is None:
+        return False
+    return True
+  return False
+
+
+def test_every_upstream_name_this_package_mentions_resolves() -> None:
+  """A cross-reference to a moved or renamed upstream name is a lying doc.
+
+  Prose is the half that nothing else checks: a stale ``:func:`` role fails no
+  import and no type check, and this package tracks a pre-release pin whose
+  surface has moved twice -- the input-pipeline steps went from private
+  modules to ``core`` and then to ``core.extend``, and each move left
+  references behind in docstrings that only a sweep like this finds.
+
+  Written after an upstream author reported the same shape three times in one
+  day: a hand-written list applied across a set, right in nine places out of
+  ten. Re-reading does not catch the tenth; cross-checking the set does.
+  """
+  unresolved = {
+    name: sorted(set(where))
+    for name, where in sorted(_upstream_references().items())
+    if not _resolves(name)
+  }
+
+  assert unresolved == {}, unresolved
