@@ -2980,7 +2980,7 @@ requires-dist = [
     { name = "pyarrow", marker = "extra == 'experiments'", specifier = ">=15.0,<24.0" },
     { name = "pytabkit", marker = "extra == 'backends'", specifier = ">=1.5" },
     { name = "pytabkit", marker = "extra == 'pytabkit'", specifier = ">=1.5" },
-    { name = "pyvinecopulib", git = "https://github.com/vinecopulib/pyvinecopulib.git?rev=d01c6b6dd7bd7c576d1e2b2b4cbeb174436bc926" },
+    { name = "pyvinecopulib", git = "https://github.com/vinecopulib/pyvinecopulib.git?rev=92f21fb10d862b5f12f10cfbe3b29d16101d719e" },
     { name = "scikit-learn", marker = "extra == 'backends'", specifier = ">=1.3" },
     { name = "scikit-learn", marker = "extra == 'gbm'", specifier = ">=1.3" },
     { name = "synthefy-nori", marker = "extra == 'backends'", git = "https://github.com/tvatter/synthefy-nori.git?branch=allow-newer-torch-cuda" },
@@ -4604,7 +4604,7 @@ wheels = [
 [[package]]
 name = "pyvinecopulib"
 version = "1.0.0"
-source = { git = "https://github.com/vinecopulib/pyvinecopulib.git?rev=d01c6b6dd7bd7c576d1e2b2b4cbeb174436bc926#d01c6b6dd7bd7c576d1e2b2b4cbeb174436bc926" }
+source = { git = "https://github.com/vinecopulib/pyvinecopulib.git?rev=92f21fb10d862b5f12f10cfbe3b29d16101d719e#92f21fb10d862b5f12f10cfbe3b29d16101d719e" }
 dependencies = [
     { name = "array-api-compat" },
     { name = "matplotlib" },

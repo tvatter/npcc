@@ -103,7 +103,13 @@ conflicts = [
 # there is no v1.0.0 tag), so the 1.0 extension-point API this package builds
 # on is only reachable from git. Drop this override once 1.0.0 is published;
 # the `>=1.0.0` floor above is already the right specifier.
-pyvinecopulib = { git = "https://github.com/vinecopulib/pyvinecopulib.git", rev = "d01c6b6dd7bd7c576d1e2b2b4cbeb174436bc926" }
+#
+# Pinned ahead of `main` to vinecopulib/pyvinecopulib#334, which publishes the
+# input pipeline's steps -- `place`, `reference_array`, `to_numpy`, `trim`,
+# `prepare_covariates` -- and names `VinecopBase._invalidate_batched`. Each
+# replaces a stand-in here; see `core/_placement.py`. Move to the merge commit
+# once #334 lands.
+pyvinecopulib = { git = "https://github.com/vinecopulib/pyvinecopulib.git", rev = "92f21fb10d862b5f12f10cfbe3b29d16101d719e" }
 # Temporary: install Synthefy Nori from the fork branch that uncaps torch
 # (PR https://github.com/Synthefy/synthefy-nori/pull/79). Drop once on PyPI.
 synthefy-nori = { git = "https://github.com/tvatter/synthefy-nori.git", branch = "allow-newer-torch-cuda" }
