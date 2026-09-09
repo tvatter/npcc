@@ -302,7 +302,8 @@ class TestGridPredictsOncePerRow:
     assert calls == math.ceil(n_w / backend.batch_size) == 3
 
 
-def test_native_backend_is_conditional_distribution() -> None:
+def test_native_backend_is_a_conditional_margin() -> None:
+  """The non-quantile path implements the margin contract directly."""
   from npcc.core.margin import ConditionalMargin
 
   assert issubclass(_UniformNativeBackend, ConditionalMargin)

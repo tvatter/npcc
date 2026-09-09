@@ -68,12 +68,12 @@ class RosenblattVinecop(TensorPlacement, VinecopBase[torch.Tensor]):
       self._device = resolve_device(device)
       return
 
-    copied_pairs = self._check_pair_copulas(pair_copulas)
-    self._validate_pair_copulas(copied_pairs)
+    checked_pairs = self._check_pair_copulas(pair_copulas)
+    self._validate_pair_copulas(checked_pairs)
 
-    self.pair_copulas = copied_pairs
+    self.pair_copulas = checked_pairs
     self._device = self._resolve_vine_device(
-      copied_pairs,
+      checked_pairs,
       device=device,
     )
 
@@ -173,11 +173,15 @@ class RosenblattVinecop(TensorPlacement, VinecopBase[torch.Tensor]):
     pair_copulas: list[list[BicopLike[torch.Tensor]]],
   ) -> None:
     """Install pair copulas produced by the inherited fit engine."""
-    copied_pairs = self._check_pair_copulas(pair_copulas)
-    self._validate_pair_copulas(copied_pairs)
+    checked_pairs = self._check_pair_copulas(pair_copulas)
+    self._validate_pair_copulas(checked_pairs)
 
-    self.pair_copulas = copied_pairs
-    self._device = self._resolve_vine_device(copied_pairs)
+    self.pair_copulas = checked_pairs
+    self._device = self._resolve_vine_device(checked_pairs)
+    # `set_pair_copulas` is the one place the pairs change without the
+    # structure changing, so the base asks an implementation to invalidate
+    # anything it memoized from them here. The grid-batched cascade is built
+    # from the pairs' own grids, so it goes.
     self._batched = None
 
   def _sample_uniform(

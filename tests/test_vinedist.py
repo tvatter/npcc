@@ -5,8 +5,9 @@ from __future__ import annotations
 import pytest
 import torch
 from pyvinecopulib import RVineStructure
-from pyvinecopulib.core import VinedistBase
+from pyvinecopulib.core import ControlsLike, VinedistBase
 
+from npcc.core.bicop import RosenblattBicop
 from npcc.core.controls import FitControlsRosenblattVinecop
 from npcc.core.margin import ConditionalMargin
 from npcc.core.registry import create_backend
@@ -390,3 +391,81 @@ def test_one_unfitted_margin_is_not_shared_across_variables(
     assert isinstance(margin, _RecordingMargin)
     assert margin.seen is not None
     torch.testing.assert_close(margin.seen, data[:, j])
+
+
+def test_fit_threads_covariates_through_to_every_pair(
+  register_uniform_backends: None,
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """A conditional distribution fit must reach the copula half, not just the margins.
+
+  ``VinedistBase`` forwards ``x`` to the copula only when the copula declares
+  ``supports_covariates``, and re-estimates in place through
+  ``_reestimate_copula``. That is two hops that a downstream class can get
+  wrong silently -- the fit would succeed, the margins would read ``x``, and
+  every pair copula would be estimated unconditionally under a conditional
+  name.
+
+  The widths pin the non-simplified assembly as well: two tree-zero edges see
+  the two external covariates, and the tree-one edge sees its one
+  conditioning value first and the covariates after.
+  """
+  controls = make_controls()
+  distribution = make_distribution(controls)
+  data = make_data()
+  x = torch.randn(
+    (data.shape[0], 2),
+    generator=torch.Generator(device="cpu").manual_seed(7),
+    dtype=torch.float64,
+  )
+
+  widths: list[int | None] = []
+  original_fit = RosenblattBicop.fit
+
+  def record_fit(
+    self: RosenblattBicop,
+    uv: torch.Tensor,
+    /,
+    controls: ControlsLike | None = None,
+    *,
+    var_types: list[str] | None = None,
+    x: torch.Tensor | None = None,
+  ) -> RosenblattBicop:
+    widths.append(None if x is None else int(x.shape[1]))
+    return original_fit(self, uv, controls, var_types=var_types, x=x)
+
+  monkeypatch.setattr(RosenblattBicop, "fit", record_fit)
+
+  distribution.fit(data, controls, x=x)
+
+  assert widths == [2, 2, 3]
+
+
+def test_fit_without_covariates_hands_the_pairs_none(
+  register_uniform_backends: None,
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """The counterpart: an unconditional fit must not fabricate a covariate block."""
+  controls = make_controls()
+  distribution = make_distribution(controls)
+
+  widths: list[int | None] = []
+  original_fit = RosenblattBicop.fit
+
+  def record_fit(
+    self: RosenblattBicop,
+    uv: torch.Tensor,
+    /,
+    controls: ControlsLike | None = None,
+    *,
+    var_types: list[str] | None = None,
+    x: torch.Tensor | None = None,
+  ) -> RosenblattBicop:
+    widths.append(None if x is None else int(x.shape[1]))
+    return original_fit(self, uv, controls, var_types=var_types, x=x)
+
+  monkeypatch.setattr(RosenblattBicop, "fit", record_fit)
+
+  distribution.fit(make_data(), controls)
+
+  assert widths == [None, None, 1]
