@@ -8,6 +8,7 @@ import pytest
 import torch
 from pyvinecopulib.core import ControlsLike
 
+from npcc.core.bicop import RosenblattBicop
 from npcc.core.controls import (
   FitControlsRosenblattBicop,
   FitControlsRosenblattVinecop,
@@ -17,6 +18,7 @@ from npcc.core.errors import (
   InvalidBackendKwargsError,
   UnknownBackendError,
 )
+from npcc.core.margin_quantile_table import QuantileTableConfig
 
 
 def test_bicop_controls_defaults() -> None:
@@ -59,7 +61,7 @@ def test_backend_kwargs_are_copied_on_construction() -> None:
   )
   backend_kwargs["model_version"] = "v3"
 
-  assert controls.backend_kwargs["model_version"] == "v2.5"
+  assert (controls.backend_kwargs or {})["model_version"] == "v2.5"
 
 
 def test_to_dict_returns_backend_kwargs_copy() -> None:
@@ -78,7 +80,7 @@ def test_to_dict_returns_backend_kwargs_copy() -> None:
 
   serialized_kwargs["model_version"] = "v3"
 
-  assert controls.backend_kwargs["model_version"] == "v2.5"
+  assert (controls.backend_kwargs or {})["model_version"] == "v2.5"
 
 
 def test_to_dict_contains_all_settings() -> None:
@@ -148,3 +150,24 @@ def test_invalid_backend_kwargs_are_rejected() -> None:
     FitControlsRosenblattBicop(
       backend_kwargs={"not_a_real_kwarg": 1},
     )
+
+
+def test_none_means_the_default_for_the_composite_settings() -> None:
+  """A caller assembling controls from a table passes ``None``, not a default.
+
+  ``BACKEND_KWARGS.get(name)`` is ``None`` for a backend with nothing to
+  configure, which is the natural spelling and not an error. The constructor
+  this replaced accepted it (`backend_kwargs or {}`); dropping that tolerance
+  broke a notebook with ``'NoneType' object is not iterable``.
+  """
+  controls = FitControlsRosenblattBicop(
+    backend_kwargs=None,
+    quantile_table_config=None,
+  )
+
+  assert controls.backend_kwargs == {}
+  assert controls.quantile_table_config == QuantileTableConfig()
+  assert controls.to_dict()["backend_kwargs"] == {}
+
+  # And it survives the round trip a foreign `ControlsLike` takes.
+  assert RosenblattBicop(controls).backend_kwargs == {}

@@ -56,10 +56,11 @@ import torch
 from pyvinecopulib.core import BicopBase, ControlsLike
 
 from npcc.core._interp import interp
-from npcc.core._placement import TensorPlacement, resolve_device, to_numpy
+from npcc.core._placement import TensorPlacement, to_numpy
 from npcc.core._trim import check_uv
 from npcc.core.controls import FitControlsRosenblattBicop
 from npcc.core.margin import ConditionalMargin
+from npcc.core.margin_quantile_table import QuantileTableConfig
 from npcc.core.registry import create_backend
 
 
@@ -233,17 +234,21 @@ class RosenblattBicop(TensorPlacement, BicopBase[torch.Tensor]):
   ) -> None:
     """Apply fit controls and create fresh conditional estimators."""
     self.backend = controls.backend
-    self.quantile_table_config = controls.quantile_table_config
+    # `__post_init__` filled both in; the fallbacks narrow away the `None`
+    # the declared types still carry, since that is what a caller may pass.
+    self.quantile_table_config = (
+      controls.quantile_table_config or QuantileTableConfig()
+    )
     self.eps = controls.eps
     self.transform = controls.transform
-    self._device = resolve_device(controls.device)
+    self._set_placement(controls.device)
 
     if controls.batch_size is None:
       self.batch_size = 2000 if self._device.type == "cuda" else 400
     else:
       self.batch_size = controls.batch_size
 
-    self.backend_kwargs = dict(controls.backend_kwargs)
+    self.backend_kwargs = dict(controls.backend_kwargs or {})
     self.sinkhorn_iters = controls.sinkhorn_iters
     self.projection_grid_size = controls.projection_grid_size
 

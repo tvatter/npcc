@@ -7,9 +7,11 @@ import torch
 from pyvinecopulib import RVineStructure
 from pyvinecopulib.core import ControlsLike, VinedistBase
 
+from npcc.core._placement import resolve_device
 from npcc.core.bicop import RosenblattBicop
 from npcc.core.controls import FitControlsRosenblattVinecop
 from npcc.core.margin import ConditionalMargin
+from npcc.core.margin_quantile_table import QuantileTableConfig
 from npcc.core.registry import create_backend
 from npcc.core.vinecop import RosenblattVinecop
 from npcc.core.vinedist import RosenblattVinedist
@@ -50,7 +52,8 @@ def make_distribution(
     create_backend(
       controls.backend,
       transform="identity",
-      quantile_table_config=controls.quantile_table_config,
+      quantile_table_config=controls.quantile_table_config
+      or QuantileTableConfig(),
       eps=controls.eps,
       device=controls.device,
       batch_size=controls.batch_size,
@@ -209,18 +212,32 @@ def test_unconditional_sample_returns_original_scale_tensor(
   assert torch.all((first >= -2.0) & (first <= 2.0))
 
 
-def test_fit_rejects_non_tensor_data(
+def test_fit_places_foreign_data_on_the_controls_device(
   register_uniform_backends: None,
 ) -> None:
+  """Anything ``torch.as_tensor`` accepts is accepted, and placed.
+
+  The placement comes from the controls, not from the data. Every other part
+  of the lane is built from the controls -- the margins through
+  ``create_backend``, the vine through its own ``device`` -- so reading it off
+  the observations would leave the margins on the caller's device while the
+  pair copulas went to the controls', and the first concatenation of the two
+  would fail.
+  """
   controls = make_controls()
   distribution = make_distribution(controls)
 
-  with pytest.raises(TypeError, match="y must be a torch tensor"):
-    # A list, not a tensor, on purpose: this is the guard under test.
-    distribution.fit(
-      [[0.0, 0.0, 0.0]],  # ty: ignore[invalid-argument-type]
-      controls,
-    )
+  # NumPy in, and integer-valued, so the dtype has to be imposed too.
+  fitted = distribution.fit(
+    make_data().numpy(),
+    controls,
+  )
+
+  expected = resolve_device(controls.device)
+  sample = fitted.sample(4, seeds=[1])
+
+  assert sample.dtype is torch.float64
+  assert sample.device == expected
 
 
 def test_fit_rejects_dimension_mismatch(

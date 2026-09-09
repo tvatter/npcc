@@ -104,9 +104,37 @@ class TensorPlacement:
   Only ordinary private members belong on a mixin at that position: it lands
   ahead of everything behind it in the resulting MRO, so anything defined here
   that a base also defines would silently shadow it.
+
+  Overriding ``_prep`` is not sufficient on its own, which is what
+  :meth:`_set_placement` is for. ``pyvinecopulib.core._covariates.prepare``
+  places a covariate matrix through the module-level ``place`` rather than
+  through the object's ``_prep``, so the override never sees that path -- and
+  ``place`` answers by looking for an array the object *holds*. Holding one is
+  therefore the only way to be placed on the paths the base owns: the vine
+  cascade's per-edge covariates, and ``BicopBase.loglik``.
   """
 
   _device: torch.device
+
+  def _set_placement(self, device: str | torch.device | None) -> None:
+    """Record the device this estimator evaluates on, and a reference tensor.
+
+    Parameters
+    ----------
+    device : str, torch.device, or None
+        The requested device; ``None`` picks the best available one.
+
+    Returns
+    -------
+    None
+    """
+    self._device = resolve_device(device)
+    # Empty, so it costs nothing, and float64 so `place` adopts the working
+    # precision rather than only the device. See the class docstring for why
+    # holding one is necessary at all.
+    self._placement_ref = torch.empty(
+      0, dtype=torch.float64, device=self._device
+    )
 
   def _prep(self, a: Any) -> torch.Tensor:  # noqa: ANN401 - any array, placed
     """Bring one input array onto this estimator's dtype and device.

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import ClassVar
+from collections.abc import Callable, Sequence
+from typing import Any, ClassVar, Self
 
+import numpy as np
 import torch
 from pyvinecopulib import RVineStructure
 from pyvinecopulib.core import (
   BicopLike,
+  ControlsLike,
   NonSimplifiedContext,
   VinecopBase,
 )
@@ -65,17 +67,14 @@ class RosenblattVinecop(TensorPlacement, VinecopBase[torch.Tensor]):
     )
 
     if pair_copulas is None:
-      self._device = resolve_device(device)
+      self._set_placement(device)
       return
 
     checked_pairs = self._check_pair_copulas(pair_copulas)
     self._validate_pair_copulas(checked_pairs)
 
     self.pair_copulas = checked_pairs
-    self._device = self._resolve_vine_device(
-      checked_pairs,
-      device=device,
-    )
+    self._set_placement(self._resolve_vine_device(checked_pairs, device=device))
 
   @staticmethod
   def _check_pair_copulas(
@@ -160,6 +159,57 @@ class RosenblattVinecop(TensorPlacement, VinecopBase[torch.Tensor]):
       requested_device if requested_device is not None else resolve_device(None)
     )
 
+  def fit(
+    self,
+    u: np.ndarray | torch.Tensor,
+    /,
+    controls: ControlsLike | None = None,
+    *,
+    var_types: list[str] | None = None,
+    x: torch.Tensor | None = None,
+    fit_edge: Callable[..., Any] | None = None,
+    fit_level: Callable[..., Any] | None = None,
+  ) -> Self:
+    """Fit every pair along the fixed structure, on this vine's placement.
+
+    Overridden only to place the inputs. The inherited implementation hands
+    them to the fit engine untouched -- which is right for a vine whose pairs
+    answer in whatever namespace they were given, and wrong here: the engine
+    allocates its per-tree scratch in the namespace of the ``u`` it received,
+    while a :class:`~npcc.core.bicop.RosenblattBicop` always answers in torch
+    on its own device. Handed a NumPy ``u``, the cascade would try to assign a
+    CUDA tensor into a NumPy row.
+
+    Parameters
+    ----------
+    u : array, shape (n, d), dtype float
+        Pseudo-observations, in any form ``torch.as_tensor`` accepts.
+    controls : ControlsLike, or None, optional
+        Backend and numerical configuration, passed to every pair.
+    var_types : list of str, or None, optional
+        One ``"c"`` per variable; only continuous pairs are supported.
+    x : array, shape (n, p), or None, optional
+        External covariates, threaded to every pair alongside each edge's
+        conditioning values.
+    fit_edge : callable, or None, optional
+        Per-edge pair fitter; defaults to fitting ``bicop_class``.
+    fit_level : callable, or None, optional
+        Whole-tree fitter.
+
+    Returns
+    -------
+    RosenblattVinecop
+        ``self``, so the call chains.
+    """
+    return super().fit(
+      self._prep(u),
+      controls,
+      var_types=var_types,
+      x=None if x is None else self._prep(x),
+      fit_edge=fit_edge,
+      fit_level=fit_level,
+    )
+
   def get_pair_copula(
     self,
     tree: int,
@@ -177,7 +227,7 @@ class RosenblattVinecop(TensorPlacement, VinecopBase[torch.Tensor]):
     self._validate_pair_copulas(checked_pairs)
 
     self.pair_copulas = checked_pairs
-    self._device = self._resolve_vine_device(checked_pairs)
+    self._set_placement(self._resolve_vine_device(checked_pairs))
     # `set_pair_copulas` is the one place the pairs change without the
     # structure changing, so the base asks an implementation to invalidate
     # anything it memoized from them here. The grid-batched cascade is built

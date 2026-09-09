@@ -25,7 +25,7 @@ from typing import Literal, NoReturn, Self
 import torch
 from pyvinecopulib.core import MarginBase
 
-from npcc.core._placement import TensorPlacement, resolve_device
+from npcc.core._placement import TensorPlacement
 from npcc.core._trim import logit
 
 
@@ -73,7 +73,7 @@ class ConditionalMargin(TensorPlacement, MarginBase[torch.Tensor], ABC):
 
     self.transform = transform
     self.eps = eps
-    self._device = resolve_device(device)
+    self._set_placement(device)
 
     if batch_size is None:
       self.batch_size = 2000 if self._device.type == "cuda" else 400
