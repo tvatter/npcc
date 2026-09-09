@@ -163,11 +163,10 @@ class ConditionalMargin(TensorPlacement, MarginBase[torch.Tensor], ABC):
     one feature, so an unconditional margin is fitted as a conditional one on a
     covariate that carries no information.
 
-    A one-dimensional ``x`` is reshaped to ``(n, 1)`` before the layout check,
-    which :func:`pyvinecopulib.core.extend.prepare_covariates` then performs. Note it
-    does not reach the methods inherited from ``MarginBase`` -- ``logpdf``,
-    ``cdf_left``, ``loglik`` and ``sample`` call ``prepare_covariates``
-    themselves, so a one-dimensional ``x`` is accepted here and refused there.
+    The layout is upstream's:
+    :func:`pyvinecopulib.core.extend.prepare_covariates` performs the check
+    and ``(n,)`` is refused, so every entry point on this margin agrees with
+    the ones it inherits.
     """
     n = values.shape[0]
 
@@ -180,10 +179,46 @@ class ConditionalMargin(TensorPlacement, MarginBase[torch.Tensor], ABC):
 
     x_t = self._prep(x)
 
-    if x_t.ndim == 1:
-      x_t = x_t.reshape(-1, 1)
-
     prepare_covariates(self, x_t, n)
+
+    return x_t
+
+  def _grid_covariates(self, x: torch.Tensor) -> torch.Tensor:
+    """Place the conditioning rows of a Cartesian-grid query, and check them.
+
+    The grid methods take ``(n, p)`` like every other entry point, so this
+    refuses ``(n,)`` for the reason
+    :func:`pyvinecopulib.core.extend.prepare_covariates` does -- it says
+    nothing about which axis is which. ``covariate_column`` is not the tool
+    here: these methods accept ``p > 1``, and it refuses a second column.
+
+    Placement is the other half. These methods reach the backend without
+    passing through ``_prep``, so before this a NumPy ``x`` raised from inside
+    the alpha grid rather than at the boundary, and a float32 one drove that
+    grid at float32.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Conditioning rows, shape ``(n, p)``.
+
+    Returns
+    -------
+    torch.Tensor
+        The same rows, ``float64`` on this margin's device.
+
+    Raises
+    ------
+    ValueError
+        If ``x`` is not two-dimensional.
+    """
+    x_t = self._prep(x)
+
+    if x_t.ndim != 2:
+      raise ValueError(
+        f"x must have shape (n, p), with one row per observation; "
+        f"got {tuple(x_t.shape)}"
+      )
 
     return x_t
 

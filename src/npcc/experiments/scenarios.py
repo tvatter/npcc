@@ -25,6 +25,7 @@ from dataclasses import dataclass
 
 import pyvinecopulib as pv
 import torch
+from pyvinecopulib.core.extend import covariate_column
 
 # Families restricted to the single-parameter set, for which
 # ``tau_to_parameters`` is an unambiguous scalar map. The insertion order is
@@ -155,7 +156,9 @@ def eval_grid(
     return EvalGrid(
       u_flat=u_pairs.repeat_interleave(conditional_x_grid_n),
       v_flat=v_pairs.repeat_interleave(conditional_x_grid_n),
-      x_flat=x_axis.repeat(n_pairs),
+      x_flat=covariate_column(
+        x_axis.repeat(n_pairs), n_pairs * conditional_x_grid_n
+      ),
       shape=(n_pairs, conditional_x_grid_n),
       conditional=True,
       x_axis=x_axis,
@@ -194,7 +197,7 @@ def eval_grid_for_x(
   return EvalGrid(
     u_flat=u_pairs.repeat_interleave(x_axis.shape[0]),
     v_flat=v_pairs.repeat_interleave(x_axis.shape[0]),
-    x_flat=x_axis.repeat(n_pairs),
+    x_flat=covariate_column(x_axis.repeat(n_pairs), n_pairs * x_axis.shape[0]),
     shape=(n_pairs, x_axis.shape[0]),
     conditional=True,
     x_axis=x_axis,
@@ -282,4 +285,4 @@ def sample(
     cop = _bicop(fam, float(tau_x[i]))
     uv_host = torch.stack([u[i], w[i]]).reshape(1, 2).numpy()
     v[i] = float(cop.hinv1(uv_host).item())
-  return u, v, x
+  return u, v, covariate_column(x, n)

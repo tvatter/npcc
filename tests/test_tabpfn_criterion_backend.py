@@ -98,16 +98,21 @@ class TestTabPFNCriterionBackend:
 
     assert backend.model_ is not None
 
-  def test_fit_accepts_one_dimensional_features(
+  def test_fit_rejects_one_dimensional_features(
     self,
     patch_uniform: None,
   ) -> None:
+    """``(n,)`` says nothing about which axis is which, so it is refused.
+
+    Matching on the shape clause rather than on "one row per observation":
+    the row-count refusal contains that phrase too, so the looser regex
+    would pass on the wrong branch.
+    """
     backend = TabPFNCriterionBackend(transform="logit", device="cpu")
     values = torch.linspace(0.1, 0.9, 20, dtype=torch.float64)
 
-    backend.fit(values, x=values)
-
-    assert backend.model_ is not None
+    with pytest.raises(ValueError, match=r"must have shape \(n, p\)"):
+      backend.fit(values, x=values)
 
   def test_fit_rejects_length_mismatch(self, patch_uniform: None) -> None:
     backend = TabPFNCriterionBackend(transform="logit", device="cpu")

@@ -253,12 +253,12 @@ class QuantileTableDistribution1D(ConditionalMargin):
     self._check_fitted()
     effective_batch_size = self._resolve_batch_size(batch_size)
 
-    y_grid_t = y_grid.reshape(-1)
+    y_grid_t = self._prep(y_grid).reshape(-1)
 
     if y_grid_t.numel() == 0:
       raise ValueError("y_grid must contain at least one value.")
 
-    x_t = x.reshape(-1, 1) if x.ndim == 1 else x
+    x_t = self._grid_covariates(x)
 
     n_y = y_grid_t.shape[0]
     z_grid = self._transform_y(y_grid_t)
@@ -360,12 +360,12 @@ class QuantileTableDistribution1D(ConditionalMargin):
     self._check_fitted()
     effective_batch_size = self._resolve_batch_size(batch_size)
 
-    y_grid_t = y_grid.reshape(-1)
+    y_grid_t = self._prep(y_grid).reshape(-1)
 
     if y_grid_t.numel() == 0:
       raise ValueError("y_grid must contain at least one value.")
 
-    x_t = x.reshape(-1, 1) if x.ndim == 1 else x
+    x_t = self._grid_covariates(x)
 
     n_y = y_grid_t.shape[0]
     z_grid = self._transform_y(y_grid_t)

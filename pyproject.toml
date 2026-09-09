@@ -121,7 +121,7 @@ conflicts = [
 # merge commit once #334 lands, then drop the override entirely once a
 # published 1.0.0 carries these -- at which point `.github/workflows/ci.yml`
 # stops needing a C++ toolchain too.
-pyvinecopulib = { git = "https://github.com/vinecopulib/pyvinecopulib.git", rev = "0abb6b144e64c60517dcf8ad9cebb1eccee3b252" }
+pyvinecopulib = { git = "https://github.com/vinecopulib/pyvinecopulib.git", rev = "516d98181fb86229e8eba6c5f424cffe251ead87" }
 # Temporary: install Synthefy Nori from the fork branch that uncaps torch
 # (PR https://github.com/Synthefy/synthefy-nori/pull/79). Drop once on PyPI.
 synthefy-nori = { git = "https://github.com/tvatter/synthefy-nori.git", branch = "allow-newer-torch-cuda" }

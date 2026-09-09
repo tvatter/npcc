@@ -229,11 +229,11 @@ class NGBoostBackend(ConditionalMargin):
     self._check_fitted()
     effective_batch_size = self._resolve_batch_size(batch_size)
 
-    y_grid_t = y_grid.reshape(-1)
+    y_grid_t = self._prep(y_grid).reshape(-1)
     if y_grid_t.numel() == 0:
       raise ValueError("y_grid must contain at least one value.")
 
-    x_t = x.reshape(-1, 1) if x.ndim == 1 else x
+    x_t = self._grid_covariates(x)
     z_grid = self._transform_y(y_grid_t)
     jacobian = self._jacobian_inverse(y_grid_t)
     z_host = to_numpy(z_grid)
@@ -270,12 +270,12 @@ class NGBoostBackend(ConditionalMargin):
     self._check_fitted()
     effective_batch_size = self._resolve_batch_size(batch_size)
 
-    y_grid_t = y_grid.reshape(-1)
+    y_grid_t = self._prep(y_grid).reshape(-1)
 
     if y_grid_t.numel() == 0:
       raise ValueError("y_grid must contain at least one value.")
 
-    x_t = x.reshape(-1, 1) if x.ndim == 1 else x
+    x_t = self._grid_covariates(x)
     z_grid = self._transform_y(y_grid_t)
     z_host = to_numpy(z_grid)
 

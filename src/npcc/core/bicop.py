@@ -352,24 +352,17 @@ class RosenblattBicop(TensorPlacement, BicopBase[torch.Tensor]):
     :func:`pyvinecopulib.core.extend.prepare_covariates` draws, and whose
     row-alignment check this delegates to.
 
-    A one-dimensional ``x`` is reshaped to ``(n, 1)`` **before** that check,
-    which is the one place this is wider than upstream: a conditional
-    simulation over a single covariate produces a ``linspace``, which the
-    simulation study hands in directly.
-    Upstream refuses ``(n,)`` because it is ambiguous per row, which it is for
-    an arbitrary ``p`` -- but not once the column count is known to be one.
-
-    Note the reshape does not reach the methods inherited from ``BicopBase``:
-    ``loglik`` and ``sample`` call ``prepare_covariates`` themselves, so a
-    one-dimensional ``x`` is accepted here and refused there.
+    The layout is upstream's and is not widened here: ``(n,)`` is refused,
+    because it says nothing about which axis is which.
+    :func:`pyvinecopulib.core.extend.covariate_column` is the widening the
+    library allows for a caller that has one covariate per observation, and it is
+    the producer's to apply -- the producer computed ``n`` and so can state
+    the claim, where this method knows only that it received a covariate.
     """
     if x is None:
       return self._default_x(n)
 
     x_t = self._prep(x)
-
-    if x_t.ndim == 1:
-      x_t = x_t.reshape(-1, 1)
 
     # For the layout and row-alignment check, and its message. `place`
     # short-circuits on a tensor `_prep` already placed, so this returns

@@ -139,6 +139,14 @@ Inherited from pyvinecopulib, and not to be diverged from:
 - **`fit` returns `self`; `from_data` constructs.** `RosenblattBicop()` must
   stay constructible with no arguments — `BicopBase.from_data` is
   `cls().select(...)`, which is how a vine fits one pair per edge.
+- **Covariate layout is upstream's and is not widened at an entry point.**
+  `(n,)` is refused because it says nothing about which axis is which;
+  `covariate_column(x, n)` and `covariate_row(x)` are the two readings the
+  library allows, and the widening belongs to the *producer*, which computed `n` and
+  can state the claim. An estimator only knows it received a covariate. This
+  package widened `(n,)` at eight entry points once, and the cost was two
+  contracts on one object: accepted on its own methods, refused on the
+  inherited ones that call `prepare_covariates` themselves.
 - **Configuration travels as a `ControlsLike`** — anything with `to_dict()`.
   A consumer reads the settings it owns and **refuses one it can neither
   honor nor delegate**, rather than dropping it silently. The same rule
