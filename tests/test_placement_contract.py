@@ -30,11 +30,39 @@ from npcc.core.registry import create_backend
 from npcc.core.vinecop import RosenblattVinecop
 from npcc.core.vinedist import RosenblattVinedist
 
-# Parameterized over both devices, with the mark on the *param*: `-m "not
-# cuda"` then deselects the GPU half, and a CPU-only runner never opens a
-# context. A mark applied from inside the test body lands after collection and
-# would do neither.
-_DEVICES = ["cpu", pytest.param("cuda", marks=pytest.mark.cuda)]
+
+def _cuda_available() -> bool:
+  """Whether a CUDA device can actually be used.
+
+  Defensive twice over: ``torch.cuda`` raises rather than returning ``False``
+  on a build without CUDA support, and a half-installed driver can raise from
+  somewhere else again. Neither may break collection.
+
+  Returns
+  -------
+  bool
+      ``True`` only if a device is present and usable.
+  """
+  try:
+    return torch.cuda.is_available()
+  except Exception:  # noqa: BLE001 - collection must not fail for any reason
+    return False
+
+
+# Parameterized over both devices, with the marks on the *param*: `-m "not
+# cuda"` (the declared default) deselects the GPU half, and `skipif` makes an
+# explicit `-m cuda` safe on a machine without one. A mark applied from inside
+# the test body lands after collection and would do neither.
+_DEVICES = [
+  "cpu",
+  pytest.param(
+    "cuda",
+    marks=[
+      pytest.mark.cuda,
+      pytest.mark.skipif(not _cuda_available(), reason="needs a CUDA device"),
+    ],
+  ),
+]
 
 
 def _estimators(device: str) -> dict[str, TensorPlacement]:

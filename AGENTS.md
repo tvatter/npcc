@@ -235,6 +235,12 @@ third-party call takes.
   that only restates the code's happy path has no reason to exist.
 - Tests run in parallel (`-n auto`); no shared mutable state. The
   `register_uniform_backends` fixture pops what it registered on teardown.
+- **A test that needs a GPU carries `@pytest.mark.cuda` and a `skipif`, and
+  the mark goes on the parametrize *param*, not inside the body** — a mark
+  applied from the body lands after collection and does neither. `-m "not
+  cuda"` is a declared default in `addopts`, so `make test`, CI and a bare
+  `pytest` all agree; `make test-cuda` is the way in. The `skipif` is what
+  makes an explicit `-m cuda` safe on a machine without a device.
 - Use fixtures; avoid bare `assert` on floats — `pytest.approx` or
   `torch.testing.assert_close`.
 - Tests import from the public namespaces, `npcc` or `npcc.core`, except where

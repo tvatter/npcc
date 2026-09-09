@@ -7,7 +7,7 @@ export UV_NO_SYNC := 1
 #: Everything whose Python this repository owns. Not `.`: see `lint`.
 OWNED := src tests notebooks
 
-.PHONY: help lint check test test-cov test-notebooks hooks
+.PHONY: help lint check test test-cuda test-cov test-notebooks hooks
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -28,6 +28,9 @@ check: lint ## `lint` plus the type check
 
 test: ## Run the test suite in parallel
 	$(UV) run pytest tests/ -v -n auto
+
+test-cuda: ## Run the CUDA-only tests; needs a device
+	$(UV) run pytest tests/ -v -m cuda
 
 test-cov: ## Run the test suite with a coverage report
 	$(UV) run pytest tests/ --cov=src/npcc --cov-report=term-missing -v -n auto

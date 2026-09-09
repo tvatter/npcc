@@ -262,7 +262,13 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 # `-n auto` is passed on the command line rather than set here, so a single
 # test can be run without spinning up workers.
-addopts = ["--strict-markers", "--strict-config"]
+#
+# `-m "not cuda"` is the default because most machines have no GPU and the
+# suite has to pass on them: CI is CPU-only, and four xdist workers each
+# opening a CUDA context is not something to do by accident. A command-line
+# `-m cuda` is appended after these and wins, which is what `make test-cuda`
+# passes.
+addopts = ["--strict-markers", "--strict-config", "-m", "not cuda"]
 markers = [
   "cuda: needs a CUDA device; skipped when torch.cuda.is_available() is False",
   "real_model: downloads or calls a real third-party model; needs credentials",
