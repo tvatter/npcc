@@ -50,12 +50,13 @@ device before the Cartesian-grid fast path evaluates it.
 from __future__ import annotations
 
 from dataclasses import fields
-from typing import Self
+from typing import Self, cast
 
 import torch
 from pyvinecopulib.core import (
   BicopBase,
   ControlsLike,
+  covariate_row,
   prepare_covariates,
   to_numpy,
 )
@@ -379,21 +380,18 @@ class RosenblattBicop(TensorPlacement, BicopBase[torch.Tensor]):
     return x_t
 
   def _prepare_x_row(self, x_row: torch.Tensor | None) -> torch.Tensor:
-    """Place and validate the single covariate row a grid query shares."""
+    """Place the single covariate row a grid query shares, and shape it.
+
+    ``(p,)`` and ``(1, p)`` both mean one row, which is why
+    :func:`pyvinecopulib.core.covariate_row` accepts either where
+    ``prepare_covariates`` refuses a one-dimensional ``x``: a single row is
+    unambiguous, a row-aligned block of them is not. That function shapes but
+    does not place, so ``_prep`` runs first.
+    """
     if x_row is None:
       return self._default_x(1)
 
-    x_t = self._prep(x_row)
-
-    if x_t.ndim == 1:
-      x_t = x_t.reshape(1, -1)
-
-    if x_t.ndim != 2 or x_t.shape[0] != 1:
-      raise ValueError(
-        f"x_row must have shape (p,) or (1, p); got {tuple(x_t.shape)}"
-      )
-
-    return x_t
+    return cast("torch.Tensor", covariate_row(self._prep(x_row), name="x_row"))
 
   def _prepare_grid_inputs(
     self,

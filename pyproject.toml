@@ -104,19 +104,21 @@ conflicts = [
 # on is only reachable from git.
 #
 # Pinned *ahead* of `main` to vinecopulib/pyvinecopulib#334, which publishes
-# the input pipeline's steps -- `place`, `reference_array`, `to_numpy`, `trim`,
-# `prepare_covariates` -- and names `VinecopBase._invalidate_batched`. What
-# each buys here: `to_numpy` replaced the copy in `core/_placement.py`;
-# `prepare_covariates` now owns the covariate layout check in `core/bicop.py`
-# and `core/margin.py`; `_invalidate_batched` replaced a bare attribute write
-# in `core/vinecop.py`. `place` and `reference_array` replace nothing -- they
-# are the paths `_placement.py`'s reference tensor exists to satisfy. `trim` is
-# refused on purpose: `core/_trim.py`'s `check_uv` stays, and AGENTS.md says
-# why.
+# the input pipeline's steps and the two hooks a torch extension writes. What
+# each buys here: `to_numpy` replaced a copy of it in `core/_placement.py`;
+# `prepare_covariates` owns the covariate layout check in `core/bicop.py` and
+# `core/margin.py`, and routes through `_prep`, which is what lets this
+# package declare a placement instead of holding a dummy tensor for the
+# inference to find; `covariate_row` shapes the single covariate row a grid
+# query shares; `TensorPlacementMixin` *is* the `_prep` hook now, so
+# `_placement.py` carries only the declaration; and `_invalidate_batched`
+# replaced a bare attribute write in `core/vinecop.py`. `place` and
+# `reference_array` are unused here. `trim` is refused on purpose:
+# `core/_trim.py`'s `check_uv` stays, and AGENTS.md says why.
 #
 # Two steps out of here, in order: move to the merge commit once #334 lands,
 # then drop the override entirely once a published 1.0.0 carries these.
-pyvinecopulib = { git = "https://github.com/vinecopulib/pyvinecopulib.git", rev = "92f21fb10d862b5f12f10cfbe3b29d16101d719e" }
+pyvinecopulib = { git = "https://github.com/vinecopulib/pyvinecopulib.git", rev = "d1f7181d79522832f8be3234122f27b8800f69fc" }
 # Temporary: install Synthefy Nori from the fork branch that uncaps torch
 # (PR https://github.com/Synthefy/synthefy-nori/pull/79). Drop once on PyPI.
 synthefy-nori = { git = "https://github.com/tvatter/synthefy-nori.git", branch = "allow-newer-torch-cuda" }

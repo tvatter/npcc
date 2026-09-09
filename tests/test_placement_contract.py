@@ -1,16 +1,17 @@
-"""Upstream's ``place`` must be able to find every estimator's placement.
+"""Every estimator places what the base hands it, on both devices.
 
-``pyvinecopulib.core.prepare_covariates`` reaches placement through the
-module-level ``place``, never through the object's ``_prep`` hook, and ``place``
-answers by looking for a float array the object *holds*. So an estimator that
-keeps its device as a ``torch.device`` handle and nothing else is skipped
-silently: the covariates come back untouched and meet placed copula arguments
-inside a concatenation, several frames later.
+pyvinecopulib's bases prepare a covariate matrix through
+``prepare_covariates``, which routes through the object's ``_prep`` hook --
+so a class whose placement is *declared* rather than held as a tensor is
+honored on that path as well as on the argument path. It was not always: the
+function reached placement through the module-level ``place``, which answers
+by looking for a float array the object holds, and these estimators hold none.
+A covariate matrix then came back untouched and met placed copula arguments
+inside a concatenation several frames later, which is invisible on CPU and
+fatal on CUDA.
 
-That is reachable from `BicopBase.loglik`, `sample`, `hinv1`, `hinv2` and every
-edge of the vine cascade, and it is invisible on CPU -- a host array and a host
-tensor concatenate without complaint. `_set_placement` plants an empty float64
-tensor so `place` resolves; these tests are what keep it planted.
+Reachable from ``BicopBase.loglik``, ``sample``, ``hinv1``, ``hinv2`` and
+every edge of the vine cascade. These tests are what keep it honored.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import numpy
 import pytest
 import torch
 from pyvinecopulib import RVineStructure
-from pyvinecopulib.core import place, prepare_covariates, reference_array
+from pyvinecopulib.core import prepare_covariates
 
 from npcc.core._placement import TensorPlacement, resolve_device
 from npcc.core.bicop import RosenblattBicop
@@ -89,60 +90,67 @@ def test_place_finds_every_estimators_placement(
   device: str,
   name: str,
 ) -> None:
-  """Every estimator holds a float array naming where its numerics run."""
+  """A host NumPy covariate block arrives placed, through the hook."""
   del register_uniform_backends
 
   expected = resolve_device(device)
   estimator = _estimators(device)[name]
   host = numpy.arange(6, dtype=float).reshape(3, 2)
 
-  reference = reference_array(estimator)
-
-  assert isinstance(reference, torch.Tensor)
-  assert reference.dtype is torch.float64
-  assert reference.device == expected
-
-  placed = place(estimator, host)
   covariates = prepare_covariates(estimator, host, 3)
 
-  assert isinstance(placed, torch.Tensor)
   assert isinstance(covariates, torch.Tensor)
-  assert placed.dtype is torch.float64
-  assert placed.device == expected
+  assert covariates.dtype is torch.float64
   assert covariates.device == expected
-  torch.testing.assert_close(placed, estimator._prep(host))
+  torch.testing.assert_close(covariates, estimator._prep(host))
 
 
 @pytest.mark.parametrize("name", ["bicop", "margin", "vinecop", "vinedist"])
-def test_the_reference_is_the_planted_one(
+def test_every_estimator_declares_its_placement(
   register_uniform_backends: None,
   name: str,
 ) -> None:
-  """``_placement_ref`` is the only float array on the object, by construction.
+  """The declaration is ``_ref_tensor``, not an array the object happens to hold.
 
-  ``reference_array`` prefers a float array and falls back to an integer one,
-  and for the vine the planted tensor is *last* in ``vars()`` -- the accessors
-  ahead of it (``order``, ``inverse_order``) are integer. A subclass that
-  stored a float32 tensor ahead of it would make ``place`` adopt float32 on
-  the covariate path, with nothing raising anywhere.
+  Upstream's mixin resolves a placement in three steps -- a registered tensor,
+  then a declared ``device``/``dtype``, then an empty CPU ``float64``. None of
+  these estimators is an ``nn.Module``, so the first finds nothing and the
+  last would silently put a CUDA estimator's inputs on the host. The override
+  is what makes the second step the one that answers.
   """
   del register_uniform_backends
 
   estimator = _estimators("cpu")[name]
+  reference = estimator._ref_tensor()
 
-  assert reference_array(estimator) is estimator._placement_ref
+  assert reference.dtype is torch.float64
+  assert reference.device == estimator._device
+  assert reference.numel() == 0
 
 
-def test_a_gradient_survives_prep_but_not_place() -> None:
-  """The reason ``_prep`` cannot simply delegate to ``place``.
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_prep_keeps_a_gradient_whatever_torch_is_installed(
+  dtype: torch.dtype,
+) -> None:
+  """``_prep`` preserves autograd across a dtype change, by construction.
 
-  ``torch.as_tensor`` carries a gradient across a dtype change; ``place``
-  reaches placement through ``array_api_compat``'s ``xp.asarray``, which
-  severs it. This is the durable justification for the override, so it is
-  worth failing here if either side ever changes.
+  This is why ``_prep`` cannot delegate to ``place``, and the reason is about
+  version independence rather than about ``place`` being wrong.
+  ``torch.as_tensor`` has always carried a gradient. ``place`` reaches
+  placement through ``array_api_compat``'s ``xp.asarray``, which delegates to
+  ``torch.asarray``, whose default for ``requires_grad`` changed: silently
+  ``False`` on torch 2.11, ``obj.requires_grad`` from 2.13. So asserting what
+  ``place`` does would pin the installed torch rather than a property of this
+  package -- what is asserted here is only that ``_prep`` does not care.
+
+  The float32 case is the one that converts; float64 already matches the
+  reference and would survive any implementation.
   """
   model = RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))
-  tracked = torch.tensor([[0.3, 0.4]], dtype=torch.float32, requires_grad=True)
+  tracked = torch.tensor([[0.3, 0.4]], dtype=dtype, requires_grad=True)
 
-  assert model._prep(tracked).requires_grad
-  assert not place(model, tracked).requires_grad
+  placed = model._prep(tracked)
+
+  assert placed.dtype is torch.float64
+  assert placed.requires_grad
+  assert placed.grad_fn is not None or placed is tracked

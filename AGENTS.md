@@ -168,19 +168,21 @@ Three rules that are easy to get wrong:
 - **Place every argument, not just the copula ones.** Covariates are placed
   and never clamped — they are arbitrary reals — but they *are* placed, since
   they get concatenated with values that live on the estimator's device.
-- **`TensorPlacement` must be mixed in ahead of the canonical base**, so
-  `_prep` resolves to it rather than to the array-API inference the base
-  ships. Not because that inference fails — `_set_placement` plants a
-  reference tensor so it resolves — but because `torch.as_tensor` carries a
-  gradient across a dtype or device change where `place`'s `xp.asarray`
-  severs it, and because the placement here is *declared* (`float64` on
-  `_device`) rather than read off whichever array the object happens to hold.
-- **`_set_placement`, not `self._device = ...`.** The reference tensor it
-  plants is what makes `place(self, ...)` correct on the paths the base owns
-  and the override cannot reach: `prepare_covariates` places through the
-  module-level `place`, never through `_prep`, so `BicopBase.loglik`,
-  `sample`, and the vine cascade all depend on the object *holding* an
-  array.
+- **The `_prep` hook is upstream's `TensorPlacementMixin`**, and it must be
+  mixed in **ahead** of the canonical base: all four bases already inherit
+  `PlacementMixin`, so a mixin placed after one never wins the lookup and
+  `_prep` silently becomes the array-API inference again. What
+  `TensorPlacement` adds is only the *declaration* — `float64` on `_device`,
+  through `_ref_tensor`, which is the mixin's second resolution step. None of
+  these estimators is an `nn.Module`, so its first step (a registered tensor)
+  finds nothing and its third (an empty CPU `float64`) would put a CUDA
+  estimator's inputs on the host.
+- **`_set_placement`, not `self._device = ...`**, so every construction path
+  records the device the hook reads.
+- The hook's `torch.as_tensor` is also what keeps a gradient across a dtype
+  change *whatever torch is installed*. The array-API route delegates to
+  `torch.asarray`, whose `requires_grad` default changed — silently `False`
+  on torch 2.11, `obj.requires_grad` from 2.13.
 
 `check_uv` **departs** from pyvinecopulib's `trim` on purpose: it rejects a
 copula argument at or outside `{0, 1}` before clamping to a caller-chosen
