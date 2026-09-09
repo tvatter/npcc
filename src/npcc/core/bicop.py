@@ -353,11 +353,10 @@ class RosenblattBicop(TensorPlacement, BicopBase[torch.Tensor]):
     row-alignment check this delegates to.
 
     The layout is upstream's and is not widened here: ``(n,)`` is refused,
-    because it says nothing about which axis is which.
-    :func:`pyvinecopulib.core.extend.covariate_column` is the widening the
-    library allows for a caller that has one covariate per observation, and it is
-    the producer's to apply -- the producer computed ``n`` and so can state
-    the claim, where this method knows only that it received a covariate.
+    because it says nothing about which axis is which. Reshaping a single
+    covariate to ``(n, 1)`` is the producer's to do -- it computed ``n`` and so
+    can state which axis is which, where this method knows only that it
+    received a covariate.
     """
     if x is None:
       return self._default_x(n)

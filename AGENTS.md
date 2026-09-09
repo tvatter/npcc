@@ -141,9 +141,10 @@ Inherited from pyvinecopulib, and not to be diverged from:
   `cls().select(...)`, which is how a vine fits one pair per edge.
 - **Covariate layout is upstream's and is not widened at an entry point.**
   `(n,)` is refused because it says nothing about which axis is which;
-  `covariate_column(x, n)` and `covariate_row(x)` are the two readings the
-  library allows, and the widening belongs to the *producer*, which computed `n` and
-  can state the claim. An estimator only knows it received a covariate. This
+  `covariate_row(x)` is the one reading the library names, for a single row
+  shared across observations. One covariate per observation is a `(n, 1)`
+  reshape, and it belongs to the *producer*, which computed `n` and can say
+  which axis is which. An estimator only knows it received a covariate. This
   package widened `(n,)` at eight entry points once, and the cost was two
   contracts on one object: accepted on its own methods, refused on the
   inherited ones that call `prepare_covariates` themselves.

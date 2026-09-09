@@ -314,8 +314,8 @@ def test_grid_methods_refuse_a_one_dimensional_covariate(
   with pytest.raises(ValueError, match=r"must have shape \(n, p\)"):
     margin.cdf_grid(y_grid, x=torch.zeros(3, dtype=torch.float64))
 
-  # And the wider contract survives: `p > 1` is still accepted, which is why
-  # `covariate_column` is not the tool for this path.
+  # And the wider contract survives: `p > 1` is still accepted, so this path
+  # needs the general check rather than a single-covariate one.
   assert margin.pdf_grid(
     y_grid, x=torch.zeros((3, 2), dtype=torch.float64)
   ).shape == (

@@ -189,8 +189,8 @@ class ConditionalMargin(TensorPlacement, MarginBase[torch.Tensor], ABC):
     The grid methods take ``(n, p)`` like every other entry point, so this
     refuses ``(n,)`` for the reason
     :func:`pyvinecopulib.core.extend.prepare_covariates` does -- it says
-    nothing about which axis is which. ``covariate_column`` is not the tool
-    here: these methods accept ``p > 1``, and it refuses a second column.
+    nothing about which axis is which. These methods accept ``p > 1``, so the
+    check here is the general one rather than anything single-covariate.
 
     Placement is the other half. These methods reach the backend without
     passing through ``_prep``, so before this a NumPy ``x`` raised from inside
