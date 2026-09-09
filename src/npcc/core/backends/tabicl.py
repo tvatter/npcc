@@ -37,9 +37,12 @@ class TabICLBackend(QuantileTableDistribution1D):
   transform
     Response transformation inherited from
     :class:`QuantileTableDistribution1D`.
-  config
-    Quantile-grid configuration.
-  device:
+  quantile_table_config
+    Quantile-table reconstruction configuration.
+  eps
+    Distance used when clipping values away from the boundaries of
+    ``(0, 1)`` before the logit or probit transform.
+  device
     Device used for model fitting, prediction, and returned tensors.
   batch_size
     Maximum number of conditioning rows evaluated in one prediction call.

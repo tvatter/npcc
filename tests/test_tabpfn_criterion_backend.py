@@ -423,7 +423,7 @@ class TestTabPFNCriterionBackend:
     )
 
   def test_unknown_transform_raises(self) -> None:
-    invalid = cast(Literal["identity", "logit", "probit"], "exp")
+    invalid = cast("Literal['identity', 'logit', 'probit']", "exp")
     backend = TabPFNCriterionBackend(transform=invalid)
 
     with pytest.raises(ValueError, match="Unknown transform"):

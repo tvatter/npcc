@@ -1,63 +1,50 @@
 """Rosenblatt conditional bivariate copula.
 
-Approach
---------
-A bivariate copula density factorises through the Rosenblatt
-construction.  Conditioning on covariates ``X`` and exploiting the
-uniform-margin property of the copula scale ``U``::
+**Approach.** A bivariate copula density factorizes through the Rosenblatt
+construction. Conditioning on covariates ``X`` and using the uniform-margin
+property of the copula scale ``U``::
 
     c(u, v | x) = f_{V | U, X}(v | u, x).
 
-So estimating a *conditional bivariate copula density* reduces to
-estimating a *univariate conditional density*, which is exactly what a
-:class:`~npcc.core.margin.ConditionalMargin`
-backend provides.  The features fed to the inner regressor are::
+So estimating a *conditional bivariate copula density* reduces to estimating a
+*univariate conditional density*, which is what a
+:class:`~npcc.core.margin.ConditionalMargin` backend provides. The features
+fed to the inner regressor are::
 
     W = [u, x]    (when predicting V | U, X)
 
-so the inner backend sees the conditioning copula score and the
-covariates side by side.
+so the inner backend sees the conditioning copula score and the covariates
+side by side.
 
-Pluggable backend
------------------
-The inner conditional-density estimator is any registered backend (see
-:mod:`npcc.core.registry`), selected by name via ``backend=``:
+**Pluggable backend.** The inner conditional-density estimator is any
+registered backend (see :mod:`npcc.core.registry`), named in the fit controls
+as :attr:`~npcc.core.controls.FitControlsRosenblattBicop.backend`:
+``"tabpfn-criterion"`` (the default) reads TabPFN's native binned head, which
+is the fastest read-out; ``"tabpfn-quantiles"`` inverts TabPFN's quantile
+output; the rest are behind extras. :class:`RosenblattBicop` reads only the
+backend's ``fit`` / ``pdf`` / ``cdf`` / ``icdf`` / ``pdf_grid`` / ``cdf_grid``
+surface, so it is otherwise backend-agnostic.
 
-- ``"tabpfn-criterion"`` (default) — TabPFN's native binned head; the
-  fastest read-out.
-- ``"tabpfn-quantiles"`` — TabPFN's quantile output, numerically
-  inverted.
-- optional extras: ``"ngboost"``, ``"gbm"``, ``"tabicl"``.
-
-``RosenblattBicop`` only relies on the backend's ``fit`` / ``pdf`` /
-``cdf`` / ``icdf`` / ``pdf_grid`` / ``cdf_grid`` interface — it is
-otherwise backend-agnostic.
-
-Symmetric averaging
--------------------
-A single Rosenblatt direction is ordering-dependent: it satisfies
-``int c(u, v | x) dv = 1`` by construction but generally not
-``int c(u, v | x) du = 1``.  To reduce this directional bias the
-estimator always fits both directions and averages::
+**Symmetric averaging.** A single Rosenblatt direction is ordering-dependent:
+it satisfies ``int c(u, v | x) dv = 1`` by construction but generally not
+``int c(u, v | x) du = 1``. To reduce that directional bias the estimator
+always fits both directions and averages them::
 
     c(u, v | x) =
         0.5 * f_{V | U, X}(v | u, x)
       + 0.5 * f_{U | V, X}(u | v, x).
 
-This does not impose exact uniform copula margins.  If exact margins are
-required, enable the optional Sinkhorn projection via ``sinkhorn_iters``.
-The projection uses a uniform copula-scale grid of
-``projection_grid_size`` points per axis.  For :py:meth:`pdf_grid` the
-projection is applied directly on the evaluated grid; for pointwise
-:py:meth:`pdf` the correction is computed on the internal projection grid
-and interpolated back to the queried points.
+Averaging still does not impose exact uniform copula margins. Where those are
+required, the optional Sinkhorn projection does, on a uniform copula-scale grid
+of ``projection_grid_size`` points per axis: :meth:`RosenblattBicop.pdf_grid`
+applies it to the evaluated grid directly, while pointwise
+:meth:`RosenblattBicop.pdf` computes the correction on the internal projection
+grid and interpolates it back to the queried points.
 
-Plotting
---------
-:class:`RosenblattBicop` is a ``BicopBase``, so it inherits ``plot`` and needs
-no adapter. The inherited implementation manufactures a NumPy evaluation grid,
-which :meth:`_prep` brings onto this estimator's dtype and device before the
-Cartesian-grid fast path evaluates it.
+**Plotting.** :class:`RosenblattBicop` is a ``BicopBase``, so it inherits
+``plot`` and needs no adapter. The inherited implementation manufactures a
+NumPy evaluation grid, which ``_prep`` brings onto this estimator's dtype and
+device before the Cartesian-grid fast path evaluates it.
 """
 
 from __future__ import annotations
@@ -908,7 +895,8 @@ class RosenblattBicop(TensorPlacement, BicopBase[torch.Tensor]):
     n = upper.shape[0]
     upper_safe = torch.clamp(upper, min=eps + 1e-12)
 
-    # s_grids[i, k] = linspace(eps, upper_safe[i], n_int+1)[k]
+    # One integration grid per row, from eps up to that row's own upper
+    # limit, so every row is integrated over its own interval.
     t = torch.linspace(
       0.0, 1.0, n_int + 1, dtype=torch.float64, device=self._device
     )

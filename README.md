@@ -401,7 +401,7 @@ require a `TABPFN_TOKEN` (see below) to run against the real TabPFN model.
 ### Install
 
 ```bash
-# Pick exactly one PyTorch flavour: cpu, cu126, cu128, cu130, cu132
+# Pick exactly one PyTorch flavor: cpu, cu126, cu128, cu130, cu132
 uv sync --extra cpu
 
 # Optionally add non-TabPFN backends:
@@ -409,7 +409,7 @@ uv sync --extra cpu --extra ngboost --extra gbm --extra tabicl
 ```
 
 The package depends on `numpy>=2.0`, `pyvinecopulib>=0.8.0`, and
-`tabpfn>=8.0`.  TabPFN pulls in PyTorch transitively; the flavour extras
+`tabpfn>=8.0`.  TabPFN pulls in PyTorch transitively; the flavor extras
 just pin its build.
 
 ### Authenticate TabPFN (one-time)
@@ -459,7 +459,7 @@ uv run pytest tests/ --cov=src/npcc --cov-report=term-missing -v -n auto
 ```
 
 The suite is hermetic by default: TabPFN is faked via a monkeypatched
-regressor, and pluggable-backend behaviour is proven end-to-end with a
+regressor, and pluggable-backend behavior is proven end-to-end with a
 TabPFN-free in-process backend.  A few tests hit the real models
 (`test_real_tabpfn_smoke`, the TabICL smoke) and skip automatically when
 their dependency/credentials are absent.

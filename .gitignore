@@ -219,3 +219,5 @@ results/
 *.aux
 *.log
 *.out
+# Claude Code local machine state
+.claude/settings.local.json

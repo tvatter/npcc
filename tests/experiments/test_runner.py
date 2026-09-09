@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import pandas as pd
 import pytest
@@ -361,7 +361,7 @@ def test_resume_skips_completed_cells(
     (tmp_path / "cells" / runner_mod._cell_key(cells[0]) / "DONE").unlink()
 
     seen: list[object] = []
-    orig = cast(Callable[..., object], runner_mod.summarize_one_cell)
+    orig = cast("Callable[..., object]", runner_mod.summarize_one_cell)
 
     def _spy(*args: object, **kwargs: object) -> object:
       seen.append(args[0])
@@ -390,7 +390,7 @@ def test_resume_grid_signature_mismatch_raises(tmp_path: Path) -> None:
 def test_run_study_forwards_backend_kwargs(tmp_path: Path) -> None:
   from npcc.core import registry
 
-  captured: list[dict] = []
+  captured: list[dict[str, Any]] = []
 
   def _factory(
     *,

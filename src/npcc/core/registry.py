@@ -23,12 +23,12 @@ from typing import Any, Literal
 
 import torch
 
-from npcc.core.margin import ConditionalMargin
 from npcc.core.errors import (
   InvalidBackendKwargsError,
   MissingBackendDependencyError,
   UnknownBackendError,
 )
+from npcc.core.margin import ConditionalMargin
 from npcc.core.margin_quantile_table import QuantileTableConfig
 
 _Transform = Literal["identity", "logit", "probit"]
@@ -44,7 +44,7 @@ class BackendSpec:
 
   ``allowed_kwargs=None`` means the backend accepts arbitrary ``backend_kwargs``
   (only their JSON shape is checked) — used by hermetic test fakes and any
-  escape-hatch backend. A concrete set restricts the keys a study config may
+  opt-out backend. A concrete set restricts the keys a study config may
   pass, so typos fail at config-load time instead of hours into a run.
   ``nested_kwargs`` names keys whose value must itself be a table/dict (e.g.
   ``model_kwargs``); ``n_range`` is the backend's documented sample-size range.

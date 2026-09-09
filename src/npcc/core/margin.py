@@ -18,8 +18,8 @@ All public numerical inputs and outputs are torch tensors.
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 import math
+from abc import ABC, abstractmethod
 from typing import Literal, NoReturn, Self
 
 import torch

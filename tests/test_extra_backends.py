@@ -10,6 +10,7 @@ failures (skipped, like the real-TabPFN smoke).
 from __future__ import annotations
 
 import os
+from typing import cast
 
 import pytest
 import torch
@@ -29,7 +30,10 @@ def _gaussian_copula_sample(
   standard_normal = torch.distributions.Normal(0.0, 1.0)
   u = standard_normal.cdf(z1)
   v = standard_normal.cdf(z2)
-  return u.clamp(1e-3, 1 - 1e-3), v.clamp(1e-3, 1 - 1e-3)
+  return (
+    cast("torch.Tensor", u.clamp(1e-3, 1 - 1e-3)),
+    cast("torch.Tensor", v.clamp(1e-3, 1 - 1e-3)),
+  )
 
 
 def _check_fitted_model(m: RosenblattBicop) -> None:

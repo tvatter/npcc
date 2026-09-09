@@ -27,11 +27,11 @@ __all__ = [
 
 
 def interp(x: torch.Tensor, xp: torch.Tensor, fp: torch.Tensor) -> torch.Tensor:
-  """1-D linear interpolation, analogue of :func:`numpy.interp`.
+  """1-D linear interpolation, analog of :func:`numpy.interp`.
 
   ``xp`` must be sorted ascending.  Values of ``x`` outside
   ``[xp[0], xp[-1]]`` are clamped to the endpoints (flat extrapolation),
-  matching NumPy's default behaviour.  Inputs are 1-D; output has the
+  matching NumPy's default behavior.  Inputs are 1-D; output has the
   shape of ``x``.
   """
   n = xp.shape[0]

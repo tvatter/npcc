@@ -34,7 +34,7 @@ pytabkit = ["pytabkit>=1.5"]
 # Synthefy Nori. Pinned to the tvatter fork (see [tool.uv.sources]) until the
 # torch-uncapping fix lands on upstream PyPI; then this becomes a plain pin.
 nori = ["synthefy-nori>=0.12"]
-# Umbrella of every non-TabPFN backend, installable alongside a CUDA flavour,
+# Umbrella of every non-TabPFN backend, installable alongside a CUDA flavor,
 # e.g. `uv sync --extra cu130 --extra backends`.
 backends = [
   "scikit-learn>=1.3",
@@ -53,13 +53,21 @@ npcc-simstudy = "npcc.experiments.cli:main"
 dev = [
   # Linters and formatters
   "ruff>=0.9",
-  "ty>=0.0.14",
+  # 0.0.73 is where the off-by-default rules in [tool.ty.rules] exist; an
+  # older one warns `unknown-rule` and silently checks less.
+  "ty>=0.0.73",
   # Unit testing
   "pytest>=7.0.0",
   "pytest-cov>=4.0.0",
   "pytest-xdist>=3.0.0",
   # For loading TABPFN_TOKEN from .env in the integration test
   "python-dotenv>=1.0",
+  # Prose and docstring checks, run by `make lint` and pre-commit
+  "codespell>=2.3",
+  "numpydoc>=1.8",
+  "pre-commit>=4.0",
+  # Executes the notebooks under pytest, so a stale demo fails somewhere
+  "nbmake>=1.5",
 ]
 interactive = [
   # For data wrangling
@@ -140,14 +148,36 @@ line-length = 80
 target-version = "py311"
 indent-width = 2
 src = ["src", "tests"]
+extend-include = ["*.ipynb"]
 
 [tool.ruff.lint]
-extend-select = ["ANN"]
+# These sets complement `ty` rather than restating conventions AGENTS.md
+# already states, which is why `ALL` is not used. `preview` lets `PYI` read
+# `.py` files as well as stubs.
+extend-select = [
+  "ANN",
+  "ERA001",
+  "I",
+  "PGH003",
+  "PYI",
+  "RUF022",
+  "RUF045",
+  "RUF100",
+  "TC",
+]
+preview = true
+# Annotations here are read at runtime -- the numpydoc hook imports modules,
+# and the fit-controls dataclasses resolve their own field types -- so moving
+# an import behind `TYPE_CHECKING` makes the signature that uses it
+# unresolvable. `TC006` stays.
+ignore = ["TC001", "TC002", "TC003"]
 
 [tool.ruff.lint.per-file-ignores]
 # Marimo cell functions have a reactive-graph signature style that makes
 # ANN annotations on cell arguments extremely verbose and unidiomatic.
 "notebooks/**" = ["ANN"]
+# A test passes a wrong type on purpose to prove a runtime guard fires.
+"tests/**" = ["ANN401"]
 
 # Type checking with ty
 [tool.ty.environment]
@@ -156,3 +186,94 @@ python-version = "3.11"
 
 [tool.ty.src]
 include = ["src", "tests"]
+
+[tool.ty.rules]
+unresolved-import = "error"
+# Off by default in ty. Each costs nothing on this tree, and each covers a
+# class of fault the linter cannot see.
+blanket-ignore-comment = "error"
+division-by-zero = "error"
+dynamic-function-decorator-return = "error"
+missing-type-argument = "error"
+possibly-missing-attribute = "error"
+possibly-missing-import = "error"
+possibly-unresolved-reference = "error"
+unsound-return-statement = "error"
+unsound-yield = "error"
+unsupported-dynamic-base = "error"
+
+[tool.ty.analysis]
+# `# ty: ignore[rule]` required instead of a blanket `# type: ignore`.
+respect-type-ignore-comments = false
+# The optional inner backends. Each is behind an extra, so a checkout synced
+# with only `--extra cpu` must still type-check -- which is what CI does.
+allowed-unresolved-imports = [
+  "catboost",
+  "ngboost",
+  "ngboost.distns",
+  "ngboost.learners",
+  "pytabkit",
+  "sklearn",
+  "sklearn.ensemble",
+  "synthefy_nori",
+  "tabicl",
+  "xgboost",
+]
+# The same optional backends, for the case where they *are* installed: none
+# ships type information, so their members resolve to nothing and every
+# attribute read is a `possibly-missing-attribute`. Reading them as `Any` is
+# the accurate description -- the adapter that wraps each one is where the shape
+# is checked, at run time, by its tests.
+replace-imports-with-any = [
+  "catboost",
+  "ngboost",
+  "ngboost.distns",
+  "ngboost.learners",
+  "pytabkit",
+  "synthefy_nori",
+  "tabicl",
+  "xgboost",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+# `-n auto` is passed on the command line rather than set here, so a single
+# test can be run without spinning up workers.
+addopts = ["--strict-markers", "--strict-config"]
+markers = [
+  "cuda: needs a CUDA device; skipped when torch.cuda.is_available() is False",
+  "real_model: downloads or calls a real third-party model; needs credentials",
+]
+
+[tool.numpydoc_validation]
+# Run by pre-commit; ad-hoc with `uv run numpydoc lint src/npcc`.
+# GL01 is off: it contradicts numpydoc's own format-spec example, so both
+# same-line and newline-first summaries are allowed. SS01/SS02 still require
+# a capitalized summary.
+checks = ["GL02", "GL03", "GL05", "GL07", "PR02", "PR03", "RT04", "SS01", "SS02"]
+exclude = [
+  # Private methods (single-underscore prefix, not dunder) inside the public
+  # modules: off-contract per the underscore-prefix rule.
+  '\._[a-z][a-zA-Z0-9_]*$',
+]
+
+[tool.codespell]
+# `en-GB_to_en-US` enforces the American-English rule from AGENTS.md.
+builtin = "clear,rare,en-GB_to_en-US"
+# The banned-word list. Each entry carries a reason after a comma, which is
+# what makes codespell report a suggestion instead of auto-fixing: the right
+# replacement depends on the sentence. The file must come first -- a value
+# beginning with `-` is read as another flag.
+dictionary = ".codespell-prose.txt,-"
+# A banned word is sometimes the right word. To use one, wrap the lines in
+# `# codespell:ignore-begin` / `-end`.
+ignore-multiline-regex = "codespell:ignore-begin *\\n.*?codespell:ignore-end *\\n"
+skip = ".claude/*,*/htmlcov/*,*/results/*,*/catboost_info/*,*/uv.lock,*/.venv/*,*.codespell-prose.txt,*test_prose.py"
+# Domain vocabulary and author names read as misspellings. `aas` is Kjersti
+# Aas; `nd` and `iff` are mathematical.
+ignore-words-list = "aas,nd,iff,ans,te,strat"
+# Base64 payloads in notebook outputs are not prose.
+ignore-regex = "[A-Za-z0-9+/]{32,}={0,2}"

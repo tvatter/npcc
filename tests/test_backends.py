@@ -1,4 +1,4 @@
-"""Registry behaviour and TabPFN-free pluggable-backend tests.
+"""Registry behavior and TabPFN-free pluggable-backend tests.
 
 These prove the backend extension point end-to-end without touching TabPFN: a
 hermetic quantile backend and a hermetic native backend (both

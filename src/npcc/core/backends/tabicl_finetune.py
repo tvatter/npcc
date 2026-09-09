@@ -1,5 +1,4 @@
-"""
-tabicl_finetune.py — fine-tuned TabICL backend (quantile head).
+"""Fine-tuned TabICL backend, read through its quantile head.
 
 Fine-tunes TabICL (`FinetunedTabICLRegressor`) and reads the predictive
 distribution off the same quantile head as
@@ -32,7 +31,7 @@ class FinetunedTabICLBackend(TabICLBackend):
 
   Parameters
   ----------
-  transform, config, device, batch_size
+  transform, quantile_table_config, eps, device, batch_size
       Forwarded to :class:`TabICLBackend`.
   epochs, learning_rate
       Fine-tuning schedule for ``FinetunedTabICLRegressor``.

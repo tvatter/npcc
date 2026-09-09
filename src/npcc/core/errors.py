@@ -1,7 +1,7 @@
 """Typed exception taxonomy for npcc.
 
 A single :class:`NpccError` root, with a stdlib base mixed in only where it is
-semantically correct — a missing optional dependency genuinely *is* an
+semantically correct — a missing optional dependency *is* an
 ``ImportError``, so tooling that already catches ``ImportError`` keeps working.
 The config errors are plain :class:`NpccError` subclasses so callers can catch
 the npcc types precisely.
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 
 class NpccError(Exception):
-  """Base class for every error npcc raises deliberately."""
+  """Base class for every error npcc raises on purpose."""
 
 
 class BackendError(NpccError):

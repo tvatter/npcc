@@ -9,7 +9,7 @@ A *scenario* pairs a copula family with a Kendall's-tau regime and defines:
 
 Everything is backed by :mod:`pyvinecopulib`: ``Bicop.tau_to_parameters`` maps a
 target Kendall's tau to the family's parameter, and ``Bicop.hinv1`` provides a
-generic inverse-Rosenblatt sampler, so the study generalises to any
+generic inverse-Rosenblatt sampler, so the study generalizes to any
 one-parameter family without per-family closed forms.
 
 Conditional scenarios vary ``tau`` with a scalar covariate ``x`` (``x`` is a
@@ -276,7 +276,7 @@ def sample(
   )
   v = torch.empty(n, dtype=torch.float64)
   # ponytail: one Bicop per row because tau(x) is continuous and pyvinecopulib
-  # does not vectorise hinv1 over row-specific parameters. O(n) Bicop builds is
+  # does not vectorize hinv1 over row-specific parameters. O(n) Bicop builds is
   # negligible next to the TabPFN fit; if it ever bites, group by rounded tau.
   for i in range(n):
     cop = _bicop(fam, float(tau_x[i]))

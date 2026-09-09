@@ -63,7 +63,7 @@ class TabPFNCriterionBackend(ConditionalMargin):
   device
     Device used by the TabPFN model and returned tensors.
   batch_size
-    Maximum number of conditioning rows evalutated in one prediction call.
+    Maximum number of conditioning rows evaluated in one prediction call.
   model_kwargs
     Additional arguments passed to ``TabPFNRegressor``.
   model_version

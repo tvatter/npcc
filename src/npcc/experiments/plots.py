@@ -1,14 +1,15 @@
 """Plotting helpers for the simulation study (matplotlib only).
 
 These consume the tidy tables produced by :func:`npcc.experiments.run_study`
-and :func:`npcc.experiments.aggregate_results`.  They are deliberately small and
-generic: pick a ``(family, tau_scenario, quantity, metric)`` slice and compare
+and :func:`npcc.experiments.aggregate_results`.  They are small and
+generic on purpose: pick a ``(family, tau_scenario, quantity, metric)`` slice and compare
 across any axis (``backend`` / ``transform`` / ``normalize`` / ...) via ``hue``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import cast
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -19,11 +20,12 @@ from matplotlib.patches import Patch
 def _slice(
   df: pd.DataFrame, family: str, tau_scenario: str, quantity: str
 ) -> pd.DataFrame:
-  return df[
+  sliced = df[
     (df["family"] == family)
     & (df["tau_scenario"] == tau_scenario)
     & (df["quantity"] == quantity)
   ]
+  return cast("pd.DataFrame", sliced)
 
 
 def mean_metric_lineplot(
@@ -38,7 +40,7 @@ def mean_metric_lineplot(
 ) -> Axes:
   """Plot the across-rep mean of ``metric`` vs ``n``, one line per ``hue`` level.
 
-  ``mc_summary`` is the long table from :func:`aggregate_results`.  Error bands
+  ``mc_summary`` is the long table from :func:`aggregate_results`. Error bands
   use ``rep_std``.
   """
   ax = ax or plt.subplots(figsize=(5.0, 3.5))[1]
@@ -71,8 +73,10 @@ def metric_boxplot(
   by: str = "label",
   ax: Axes | None = None,
 ) -> Axes:
-  """Boxplot of the per-rep ``metric`` distribution at sample size ``n``,
-  one box per level of axis ``by``."""
+  """Boxplot of the per-rep ``metric`` distribution at sample size ``n``.
+
+  One box per level of axis ``by``.
+  """
   ax = ax or plt.subplots(figsize=(5.0, 3.5))[1]
   sub = _slice(metrics_df, family, tau_scenario, quantity)
   sub = sub[sub["n"] == n].dropna(subset=[metric])

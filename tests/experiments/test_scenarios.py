@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import pyvinecopulib as pv
 import pytest
+import pyvinecopulib as pv
 import torch
 
 from npcc.experiments import scenarios

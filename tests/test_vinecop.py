@@ -1,6 +1,5 @@
 import pytest
 import torch
-
 from pyvinecopulib import RVineStructure
 from pyvinecopulib.core import NonSimplifiedContext, VinecopBase
 

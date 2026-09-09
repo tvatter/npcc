@@ -60,7 +60,8 @@ class TestQuantileTableConfig:
     config = QuantileTableConfig()
 
     with pytest.raises(AttributeError):
-      setattr(config, "n_quantiles", 11)
+      # Assigning to a frozen dataclass on purpose: the guard under test.
+      config.n_quantiles = 11  # ty: ignore[invalid-assignment]
 
   @pytest.mark.parametrize(
     "factory",
@@ -247,7 +248,7 @@ class TestQuantileDistribution1D:
     )
 
   def test_unknown_transform_raises(self) -> None:
-    invalid = cast(Literal["identity", "logit", "probit"], "exp")
+    invalid = cast("Literal['identity', 'logit', 'probit']", "exp")
     backend = TabPFNQuantileBackend(transform=invalid)
 
     with pytest.raises(ValueError, match="Unknown transform"):

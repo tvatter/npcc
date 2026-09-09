@@ -1,5 +1,4 @@
-"""
-tabpfn_finetune.py — fine-tuned TabPFN backend (native head).
+"""Fine-tuned TabPFN backend, read through its native head.
 
 Fine-tunes TabPFN (`FinetunedTabPFNRegressor`, which fine-tunes the v2.5
 checkpoint) with a proper-scoring-rule loss, then reads the predictive
@@ -40,8 +39,7 @@ class FinetunedTabPFNCriterionBackend(TabPFNCriterionBackend):
       Forwarded to :class:`TabPFNCriterionBackend`.
   epochs, learning_rate
       Fine-tuning schedule for ``FinetunedTabPFNRegressor``.
-  ce_loss_weight, crps_loss_weight, crls_loss_weight, mse_loss_weight,
-  mae_loss_weight
+  ce_loss_weight, crps_loss_weight, crls_loss_weight, mse_loss_weight, mae_loss_weight
       Proper-scoring-rule loss weights.  Default = pure bar-distribution NLL
       (`ce_loss_weight=1`, rest 0) — the density-optimal objective for copula
       KL (see module docstring).

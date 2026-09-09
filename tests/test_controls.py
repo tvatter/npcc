@@ -69,7 +69,7 @@ def test_to_dict_returns_backend_kwargs_copy() -> None:
 
   settings = controls.to_dict()
   serialized_kwargs = cast(
-    dict[str, object],
+    "dict[str, object]",
     settings["backend_kwargs"],
   )
 
@@ -110,7 +110,7 @@ def test_to_dict_contains_all_settings() -> None:
 def test_invalid_transform_is_rejected() -> None:
   with pytest.raises(ValueError, match="transform must be"):
     FitControlsRosenblattBicop(
-      transform=cast(Transform, "invalid"),
+      transform=cast("Transform", "invalid"),
     )
 
 
