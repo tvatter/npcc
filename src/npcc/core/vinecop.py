@@ -37,8 +37,11 @@ class RosenblattVinecop(TensorPlacement, VinecopBase[torch.Tensor]):
     Variable types in variable order. Only continuous variables are currently
     supported by :class:`RosenblattBicop`.
   device
-    Device used for random sampling. When omitted for a fitted vine, it is
-    inferred from the pair copulas.
+    Device this vine evaluates on: every input is placed onto it, and it is
+    where sampling draws. For a fitted vine, omitting it adopts the pair
+    copulas' common device and supplying a different one is refused. For an
+    unfitted vine there are no pairs to read, so it resolves the same way the
+    fit controls do -- CUDA when available, CPU otherwise.
 
   Notes
   -----
@@ -228,11 +231,13 @@ class RosenblattVinecop(TensorPlacement, VinecopBase[torch.Tensor]):
 
     self.pair_copulas = checked_pairs
     self._set_placement(self._resolve_vine_device(checked_pairs))
-    # `set_pair_copulas` is the one place the pairs change without the
-    # structure changing, so the base asks an implementation to invalidate
-    # anything it memoized from them here. The grid-batched cascade is built
-    # from the pairs' own grids, so it goes.
-    self._batched = None
+    # The pairs change here without the structure changing, which is the case
+    # `_bind_vine` does not cover, so the base asks an implementation to drop
+    # anything it memoized from them -- and names the hook rather than the
+    # attribute behind it. Nothing here memoizes the pairs: this vine's
+    # context assembles conditioning, so no batched state is ever built. The
+    # call is the contract.
+    self._invalidate_batched()
 
   def _sample_uniform(
     self,

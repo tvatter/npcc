@@ -1,7 +1,7 @@
 import pytest
 import torch
 from pyvinecopulib import RVineStructure
-from pyvinecopulib.core import NonSimplifiedContext, VinecopBase
+from pyvinecopulib.core import BicopLike, NonSimplifiedContext, VinecopBase
 
 from npcc import RosenblattBicop, RosenblattVinecop
 from npcc.core.controls import (
@@ -349,3 +349,32 @@ def test_sample_with_covariates_returns_torch_tensor(
   assert result.shape == (5, 3)
   assert result.dtype == torch.float64
   assert result.device.type == "cpu"
+
+
+def test_set_pair_copulas_calls_the_invalidation_hook() -> None:
+  """Installing pairs drops anything memoized from the previous ones.
+
+  ``set_pair_copulas`` is the one path where the pairs change while the
+  structure stays, so ``_bind_vine``'s own reset does not cover it and the base
+  asks the implementation to invalidate. Nothing in the suite calls
+  ``set_pair_copulas`` otherwise, so a regression that dropped the call would
+  be invisible -- and unobservable behaviorally, since this vine's context
+  assembles conditioning and therefore never builds batched state to drop.
+  """
+  calls: list[int] = []
+
+  class RecordingVinecop(RosenblattVinecop):
+    def _invalidate_batched(self) -> None:
+      calls.append(1)
+      super()._invalidate_batched()
+
+  vine = RecordingVinecop(None, make_structure(), device="cpu")
+  before = len(calls)
+
+  pairs: list[list[BicopLike[torch.Tensor]]] = [
+    list(row) for row in make_pairs()
+  ]
+  vine.set_pair_copulas(pairs)
+
+  assert len(calls) == before + 1
+  assert vine._batched is None

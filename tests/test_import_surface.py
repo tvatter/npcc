@@ -97,6 +97,29 @@ def test_validating_backend_kwargs_needs_no_optional_extra() -> None:
   )
 
 
+def _all_imports(path: Path) -> set[str]:
+  """Every module named by an import in ``path``, at any scope, dotted.
+
+  Parameters
+  ----------
+  path : pathlib.Path
+      The Python file to read.
+
+  Returns
+  -------
+  set of str
+      Full dotted module names, so a layer prefix can be matched.
+  """
+  tree = ast.parse(path.read_text())
+  names: set[str] = set()
+  for node in ast.walk(tree):
+    if isinstance(node, ast.Import):
+      names.update(alias.name for alias in node.names)
+    elif isinstance(node, ast.ImportFrom) and node.module:
+      names.add(node.module)
+  return names
+
+
 def _module_scope_imports(path: Path) -> set[str]:
   """Top-level module names imported at module scope in ``path``.
 
@@ -196,10 +219,22 @@ def test_every_adapter_is_reached_only_through_a_factory(path: Path) -> None:
   ids=lambda p: str(p.relative_to(_SRC)),
 )
 def test_core_never_imports_the_layer_above_it(path: Path) -> None:
-  """``npcc.experiments`` is above ``npcc.core``; the edge points one way."""
-  text = path.read_text()
+  """``npcc.experiments`` is above ``npcc.core``; the edge points one way.
 
-  assert "npcc.experiments" not in text
+  Read from the AST rather than as a substring: a docstring or comment naming
+  the layer above is documentation -- a branch in ``core`` may exist because of
+  a data shape the experiments package produces, and saying so is useful --
+  while an ``import`` is the dependency this forbids.
+  """
+  imported = {
+    name
+    for name in _all_imports(path)
+    if name == "npcc.experiments" or name.startswith("npcc.experiments.")
+  }
+
+  assert imported == set(), (
+    f"{path.relative_to(_ROOT)} imports {sorted(imported)}"
+  )
 
 
 def test_every_core_name_is_also_reachable_from_the_top() -> None:

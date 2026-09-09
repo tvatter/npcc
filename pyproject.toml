@@ -101,14 +101,21 @@ conflicts = [
 [tool.uv.sources]
 # pyvinecopulib 1.0.0 is not on PyPI yet (0.7.6 is the newest release, and
 # there is no v1.0.0 tag), so the 1.0 extension-point API this package builds
-# on is only reachable from git. Drop this override once 1.0.0 is published;
-# the `>=1.0.0` floor above is already the right specifier.
+# on is only reachable from git.
 #
-# Pinned ahead of `main` to vinecopulib/pyvinecopulib#334, which publishes the
-# input pipeline's steps -- `place`, `reference_array`, `to_numpy`, `trim`,
-# `prepare_covariates` -- and names `VinecopBase._invalidate_batched`. Each
-# replaces a stand-in here; see `core/_placement.py`. Move to the merge commit
-# once #334 lands.
+# Pinned *ahead* of `main` to vinecopulib/pyvinecopulib#334, which publishes
+# the input pipeline's steps -- `place`, `reference_array`, `to_numpy`, `trim`,
+# `prepare_covariates` -- and names `VinecopBase._invalidate_batched`. What
+# each buys here: `to_numpy` replaced the copy in `core/_placement.py`;
+# `prepare_covariates` now owns the covariate layout check in `core/bicop.py`
+# and `core/margin.py`; `_invalidate_batched` replaced a bare attribute write
+# in `core/vinecop.py`. `place` and `reference_array` replace nothing -- they
+# are the paths `_placement.py`'s reference tensor exists to satisfy. `trim` is
+# refused on purpose: `core/_trim.py`'s `check_uv` stays, and AGENTS.md says
+# why.
+#
+# Two steps out of here, in order: move to the merge commit once #334 lands,
+# then drop the override entirely once a published 1.0.0 carries these.
 pyvinecopulib = { git = "https://github.com/vinecopulib/pyvinecopulib.git", rev = "92f21fb10d862b5f12f10cfbe3b29d16101d719e" }
 # Temporary: install Synthefy Nori from the fork branch that uncaps torch
 # (PR https://github.com/Synthefy/synthefy-nori/pull/79). Drop once on PyPI.

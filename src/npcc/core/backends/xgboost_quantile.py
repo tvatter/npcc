@@ -18,9 +18,9 @@ from __future__ import annotations
 from typing import Any, Literal
 
 import torch
+from pyvinecopulib.core import to_numpy
 from xgboost import XGBRegressor
 
-from npcc.core._placement import to_numpy
 from npcc.core.margin_quantile_table import (
   QuantileTableConfig,
   QuantileTableDistribution1D,

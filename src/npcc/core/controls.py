@@ -34,10 +34,12 @@ class FitControlsRosenblattBicop:
   transform
     Transformation applied to copula-scale responses before backend fitting.
   device
-    Torch device used for fitting and evaluation. ``None`` leaves placement to
-    the input data.
+    Device used for fitting and evaluation. If omitted, CUDA is selected when
+    available and CPU otherwise; input data is placed onto the resolved device
+    rather than read for one.
   batch_size
-    Default backend inference batch size.
+    Default backend inference batch size. If omitted, 400 is used on CPU and
+    2000 on CUDA.
   backend_kwargs
     Backend-specific constructor arguments.
   sinkhorn_iters

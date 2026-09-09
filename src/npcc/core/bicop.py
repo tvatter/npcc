@@ -53,10 +53,15 @@ from dataclasses import fields
 from typing import Self
 
 import torch
-from pyvinecopulib.core import BicopBase, ControlsLike
+from pyvinecopulib.core import (
+  BicopBase,
+  ControlsLike,
+  prepare_covariates,
+  to_numpy,
+)
 
 from npcc.core._interp import interp
-from npcc.core._placement import TensorPlacement, to_numpy
+from npcc.core._placement import TensorPlacement
 from npcc.core._trim import check_uv
 from npcc.core.controls import FitControlsRosenblattBicop
 from npcc.core.margin import ConditionalMargin
@@ -344,7 +349,19 @@ class RosenblattBicop(TensorPlacement, BicopBase[torch.Tensor]):
     Placement and layout only, never the domain step: covariates are arbitrary
     reals rather than copula arguments, so they are brought onto this
     estimator's dtype and device but never clamped. That is the split
-    pyvinecopulib draws in ``core._covariates.prepare``.
+    :func:`pyvinecopulib.core.prepare_covariates` draws, and whose
+    row-alignment check this delegates to.
+
+    A one-dimensional ``x`` is reshaped to ``(n, 1)`` **before** that check,
+    which is the one place this is wider than upstream: a conditional
+    simulation over a single covariate produces a ``linspace``, which the
+    simulation study hands in directly.
+    Upstream refuses ``(n,)`` because it is ambiguous per row, which it is for
+    an arbitrary ``p`` -- but not once the column count is known to be one.
+
+    Note the reshape does not reach the methods inherited from ``BicopBase``:
+    ``loglik`` and ``sample`` call ``prepare_covariates`` themselves, so a
+    one-dimensional ``x`` is accepted here and refused there.
     """
     if x is None:
       return self._default_x(n)
@@ -354,16 +371,10 @@ class RosenblattBicop(TensorPlacement, BicopBase[torch.Tensor]):
     if x_t.ndim == 1:
       x_t = x_t.reshape(-1, 1)
 
-    if x_t.ndim != 2:
-      raise ValueError(
-        f"x must have shape (n,) or (n, p); got {tuple(x_t.shape)}"
-      )
-
-    if x_t.shape[0] != n:
-      raise ValueError(
-        f"x must have shape ({n}, p), with one row per observation; "
-        f"got {tuple(x_t.shape)}"
-      )
+    # For the layout and row-alignment check, and its message. `place`
+    # short-circuits on a tensor `_prep` already placed, so this returns
+    # `x_t` itself and no gradient is severed.
+    prepare_covariates(self, x_t, n)
 
     return x_t
 
@@ -1003,11 +1014,12 @@ class RosenblattBicop(TensorPlacement, BicopBase[torch.Tensor]):
     return out
 
   # -------------------------------------------------------------------
-  # Kendall's tau (sample-based, mirroring pyvinecopulib's KernelBicop)
+  # Kendall's tau (sample-based, mirroring vinecopulib's KernelBicop, which
+  # has no Python binding)
   # -------------------------------------------------------------------
 
   # Default seeds used by pyvinecopulib's
-  # ``KernelBicop::parameters_to_tau``.  Reusing them gives byte-identical
+  # ``KernelBicop::parameters_to_tau``.  Reusing them gives bit-identical
   # reproducibility against vinecopulib.
   _GHALTON_DEFAULT_SEEDS: tuple[int, ...] = (
     204967043,
@@ -1024,10 +1036,11 @@ class RosenblattBicop(TensorPlacement, BicopBase[torch.Tensor]):
     n: int = 1000,
     seeds: list[int] | None = None,
   ) -> float:
-    """Kendall's tau via the recipe used by ``pv.KernelBicop::parameters_to_tau``.
+    """Kendall's tau via vinecopulib's ``KernelBicop::parameters_to_tau`` recipe.
 
     1. Draw a deterministic 2-D Generalised-Halton quasi-random sample
-       ``(u_i, alpha_i)`` of size ``n`` via :func:`pyvinecopulib.ghalton`.
+       ``(u_i, alpha_i)`` of size ``n`` via
+       :func:`pyvinecopulib.utils.ghalton`.
     2. Apply the inverse Rosenblatt transform along the first axis:
        ``v_i = F_{V | U, X}^{-1}(alpha_i | u_i, x_row)``.  The resulting
        ``(u_i, v_i)`` pairs are distributed according to the fitted

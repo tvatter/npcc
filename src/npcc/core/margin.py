@@ -23,7 +23,7 @@ from abc import ABC, abstractmethod
 from typing import Literal, NoReturn, Self
 
 import torch
-from pyvinecopulib.core import MarginBase
+from pyvinecopulib.core import MarginBase, prepare_covariates
 
 from npcc.core._placement import TensorPlacement
 from npcc.core._trim import logit
@@ -161,6 +161,12 @@ class ConditionalMargin(TensorPlacement, MarginBase[torch.Tensor], ABC):
     one: the inner regressors are third-party estimators that require at least
     one feature, so an unconditional margin is fitted as a conditional one on a
     covariate that carries no information.
+
+    A one-dimensional ``x`` is reshaped to ``(n, 1)`` before the layout check,
+    which :func:`pyvinecopulib.core.prepare_covariates` then performs. Note it
+    does not reach the methods inherited from ``MarginBase`` -- ``logpdf``,
+    ``cdf_left``, ``loglik`` and ``sample`` call ``prepare_covariates``
+    themselves, so a one-dimensional ``x`` is accepted here and refused there.
     """
     n = values.shape[0]
 
@@ -175,16 +181,8 @@ class ConditionalMargin(TensorPlacement, MarginBase[torch.Tensor], ABC):
 
     if x_t.ndim == 1:
       x_t = x_t.reshape(-1, 1)
-    elif x_t.ndim != 2:
-      raise ValueError(
-        f"x must have shape (n,) or (n, p); got {tuple(x_t.shape)}"
-      )
 
-    if x_t.shape[0] != n:
-      raise ValueError(
-        f"x must have shape ({n}, p), with one row per observation; "
-        f"got {tuple(x_t.shape)}"
-      )
+    prepare_covariates(self, x_t, n)
 
     return x_t
 

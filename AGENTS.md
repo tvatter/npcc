@@ -20,8 +20,12 @@ idiom, module naming, the typing policy. Where this repository
 departs, the departure is named below with its reason.
 
 pyvinecopulib 1.0.0 is not on PyPI yet, so `[tool.uv.sources]` pins a git
-revision. Drop that override once 1.0.0 publishes; the `>=1.0.0` floor in
-`[project]` is already the right specifier.
+revision — currently *ahead* of upstream `main`, at the pull request that
+publishes the input pipeline's steps and names
+`VinecopBase._invalidate_batched`. That is two steps, in order: the pin moves
+to the merge commit once that lands, and the override goes away only once a
+published 1.0.0 carries them. The `>=1.0.0` floor in `[project]` is already
+the right specifier. The comment beside the pin says which symbols and why.
 
 ## Commands
 
@@ -89,8 +93,8 @@ would pin a fact about someone else's dependency tree.
   does** — `_placement.py`, `_interp.py`, `_trim.py` — following
   pyvinecopulib's `_<level>_<thing>` scheme.
 - **Names inside an underscore-prefixed module carry no second underscore.**
-  `_placement.py` exports `place`, `to_numpy`, `resolve_device`, not
-  `_place`. The module's prefix already says "not an import path".
+  `_placement.py` exports `resolve_device`, not `_resolve_device`. The
+  module's prefix already says "not an import path".
 - A module docstring does not restate the file name.
 
 ## Code style
@@ -145,22 +149,38 @@ Inherited from pyvinecopulib, and not to be diverged from:
 
 ## Placement, layout, domain
 
-Three separable steps on every input, one hook each:
+Three separable steps on every input:
 
-| step | hook | what it does |
+| step | where it runs | what it does |
 |---|---|---|
-| placement | `_prep` | onto this estimator's dtype (`float64`) and device |
-| layout | `_layout` | which shapes are admissible |
-| domain | `check_uv` | copula arguments into the open unit interval |
+| placement | the `_prep` hook | onto this estimator's dtype (`float64`) and device |
+| layout | the `_layout` hook | which shapes are admissible |
+| domain | `check_uv`, called from `_prepare_joint_inputs` | copula arguments into the open unit interval |
 
-`_prep_args` is the composite. Two rules that are easy to get wrong:
+Only the first two are hooks. Upstream's domain step is the module-level
+`trim` that `_prep_args` applies after them; `check_uv` is a free function
+this package calls at one site, and `_prepare_grid_inputs` rejects-then-clamps
+inline rather than calling it, because `check_uv` requires `u` and `v` to have
+equal shapes and a grid pair is a cross product.
+
+Three rules that are easy to get wrong:
 
 - **Place every argument, not just the copula ones.** Covariates are placed
   and never clamped — they are arbitrary reals — but they *are* placed, since
   they get concatenated with values that live on the estimator's device.
 - **`TensorPlacement` must be mixed in ahead of the canonical base**, so
-  `_prep` resolves to it rather than to pyvinecopulib's array-API inference,
-  which finds nothing on these estimators and returns its argument untouched.
+  `_prep` resolves to it rather than to the array-API inference the base
+  ships. Not because that inference fails — `_set_placement` plants a
+  reference tensor so it resolves — but because `torch.as_tensor` carries a
+  gradient across a dtype or device change where `place`'s `xp.asarray`
+  severs it, and because the placement here is *declared* (`float64` on
+  `_device`) rather than read off whichever array the object happens to hold.
+- **`_set_placement`, not `self._device = ...`.** The reference tensor it
+  plants is what makes `place(self, ...)` correct on the paths the base owns
+  and the override cannot reach: `prepare_covariates` places through the
+  module-level `place`, never through `_prep`, so `BicopBase.loglik`,
+  `sample`, and the vine cascade all depend on the object *holding* an
+  array.
 
 `check_uv` **departs** from pyvinecopulib's `trim` on purpose: it rejects a
 copula argument at or outside `{0, 1}` before clamping to a caller-chosen
@@ -169,10 +189,21 @@ an npcc estimator comes from a probability integral transform, so an exact 0
 or 1 is a defect upstream rather than a rounding artifact, and clamping would
 turn it into a plausible number and hide it.
 
+That rejection is scoped to `RosenblattBicop`'s own entry points. On the
+methods inherited from `VinecopBase`, `_prep_args` runs upstream's `trim`
+before the cascade reaches a pair, so the clamp is silent there and the pair's
+`check_uv` only ever sees legal interior values; a vine distribution reaches
+the same clamp through the vine it holds. Closing that gap would mean
+overriding `_prep_args` at the vine level, which is new behavior and not a
+decision this file has made.
+
 **One NumPy boundary.** Everything that hands a tensor to a third-party model
-goes through `npcc.core._placement.to_numpy`. The exception is a transfer that
-also *changes dtype* — the CatBoost and Nori adapters downcast to float32 —
-which is a different operation and stays explicit.
+goes through `pyvinecopulib.core.to_numpy`, which detaches and transfers and
+adopts no dtype. Two kinds of site stay outside it, and both should: five
+transfers in the CatBoost and Nori adapters *name* a dtype while moving
+(`to_numpy` would hand the model float64 where it wants float32), and nine
+hand off to a CPU torch tensor rather than to NumPy, because that is what the
+third-party call takes.
 
 ## Docstrings and prose
 

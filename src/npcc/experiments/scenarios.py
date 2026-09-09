@@ -27,17 +27,17 @@ import pyvinecopulib as pv
 import torch
 
 # Families restricted to the single-parameter set, for which
-# ``tau_to_parameters`` is an unambiguous scalar map. Resolved via getattr
-# because pyvinecopulib's type stub does not expose the enum members.
-_FAMILY_NAMES: tuple[str, ...] = (
-  "clayton",
-  "gumbel",
-  "frank",
-  "gaussian",
-  "joe",
-)
+# ``tau_to_parameters`` is an unambiguous scalar map. The insertion order is
+# part of the simulation seed: `runner.py` hashes each family's index into
+# `_cell_seed`, so reordering these re-seeds every cell. That is also why this
+# is not `pyvinecopulib.families.one_par`, which holds the same five in a
+# different order.
 FAMILIES: dict[str, pv.BicopFamily] = {
-  name: getattr(pv.BicopFamily, name) for name in _FAMILY_NAMES
+  "clayton": pv.BicopFamily.clayton,
+  "gumbel": pv.BicopFamily.gumbel,
+  "frank": pv.BicopFamily.frank,
+  "gaussian": pv.BicopFamily.gaussian,
+  "joe": pv.BicopFamily.joe,
 }
 
 QUANTITIES: tuple[str, ...] = ("pdf", "cdf", "hfunc1", "hfunc2")

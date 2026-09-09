@@ -3,35 +3,39 @@
 pyvinecopulib draws three separable steps over every input -- *placement*,
 onto the dtype and device the object's own tensors live on; *layout*, the
 shapes it admits; and *domain*, clamping copula arguments into the open unit
-square -- and gives each one an overridable hook per level (``_prep``,
-``_layout``, ``trim``), composed by ``_prep_args``.
+square. The first two are overridable hooks per level, ``_prep`` and
+``_layout``; the domain step is the module-level ``trim`` that ``_prep_args``
+applies after them.
 
-Its default ``_prep``, from ``PlacementMixin``, *infers* the placement from
-arrays the object already holds. That inference finds nothing here: none of
-this package's estimators is a ``torch.nn.Module``, and none holds a bare
-float tensor at rest -- a :class:`~npcc.core.bicop.RosenblattBicop` holds two
-backend estimators, a ``torch.device`` and Python scalars. So the inherited
-hook hands its argument straight back, which is indistinguishable from having
-placed it, and a mis-placed input surfaces much later as a device mismatch
-inside a concatenation.
+:class:`TensorPlacement` overrides ``_prep``. Three reasons it has to, none of
+which is that the inherited inference fails -- :meth:`_set_placement` plants a
+reference tensor precisely so that it does not:
 
-:class:`TensorPlacement` replaces the inference with the answer this package
-already carries: an explicit ``_device`` per estimator, and ``float64``
-throughout. It is the counterpart of pyvinecopulib's own
+1. **The MRO.** All four canonical bases already inherit ``PlacementMixin``,
+   so a mixin placed *after* the base never wins the lookup at all. Mixing in
+   ahead of the base is what makes the override reachable.
+2. **Autograd.** ``torch.as_tensor`` carries a gradient across a dtype or
+   device change; the inherited hook reaches placement through
+   ``array_api_compat``'s ``xp.asarray``, which severs the graph. A float32
+   tensor that requires grad comes back from ``place`` detached and from
+   ``_prep`` still in the graph.
+3. **Declared rather than read.** ``_prep`` states ``float64`` on ``_device``
+   unconditionally and returns an annotated ``torch.Tensor``; the inherited
+   one returns ``Any`` and adopts whatever the first float array the object
+   happens to hold says.
+
+It is the counterpart of pyvinecopulib's own
 ``torch._placement.TensorPlacementMixin``, which reads a registered tensor off
-an ``nn.Module`` instead, and it is mixed in **ahead** of the canonical base
-for the same reason -- ``_prep`` has to resolve here rather than to the
-array-API inference behind it.
+an ``nn.Module`` instead.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-import numpy as np
 import torch
 
-__all__ = ["TensorPlacement", "resolve_device", "to_numpy"]
+__all__ = ["TensorPlacement", "resolve_device"]
 
 
 def resolve_device(device: str | torch.device | None) -> torch.device:
@@ -62,39 +66,6 @@ def resolve_device(device: str | torch.device | None) -> torch.device:
   return resolved
 
 
-def to_numpy(a: Any) -> np.ndarray:  # noqa: ANN401 - any array type, converted
-  """Host NumPy view of ``a`` -- placement's return trip.
-
-  Every third-party model this package drives reads NumPy, so a tensor has to
-  come back across that boundary. ``np.asarray`` alone raises on a tensor that
-  requires grad and again on one that lives on an accelerator, so this
-  detaches and transfers first, both through ``getattr`` since a NumPy array
-  has neither method.
-
-  Mirrors ``pyvinecopulib.core._placement.to_numpy``, which is private
-  upstream; the one implementation here replaces the three spellings of it
-  that the backends had grown.
-
-  Parameters
-  ----------
-  a : array
-      Values in any array namespace.
-
-  Returns
-  -------
-  numpy.ndarray
-      The same values, on the host, detached.
-  """
-  v: Any = a
-  detach = getattr(v, "detach", None)
-  if detach is not None:
-    v = detach()
-  cpu = getattr(v, "cpu", None)
-  if cpu is not None:
-    v = cpu()
-  return np.asarray(v)
-
-
 class TensorPlacement:
   """The ``_prep`` hook for an estimator placed on its own ``_device``.
 
@@ -106,7 +77,7 @@ class TensorPlacement:
   that a base also defines would silently shadow it.
 
   Overriding ``_prep`` is not sufficient on its own, which is what
-  :meth:`_set_placement` is for. ``pyvinecopulib.core._covariates.prepare``
+  :meth:`_set_placement` is for. ``pyvinecopulib.core.prepare_covariates``
   places a covariate matrix through the module-level ``place`` rather than
   through the object's ``_prep``, so the override never sees that path -- and
   ``place`` answers by looking for an array the object *holds*. Holding one is
@@ -115,6 +86,10 @@ class TensorPlacement:
   """
 
   _device: torch.device
+  #: An empty ``float64`` tensor on :attr:`_device`, so that upstream's
+  #: module-level ``place`` can read a placement off this object. See the
+  #: class docstring for why holding one is necessary.
+  _placement_ref: torch.Tensor
 
   def _set_placement(self, device: str | torch.device | None) -> None:
     """Record the device this estimator evaluates on, and a reference tensor.

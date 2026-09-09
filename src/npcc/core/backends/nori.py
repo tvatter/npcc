@@ -22,7 +22,6 @@ from typing import Any, Literal
 import torch
 from synthefy_nori import NoriRegressor
 
-from npcc.core._placement import to_numpy
 from npcc.core.margin_quantile_table import (
   QuantileTableConfig,
   QuantileTableDistribution1D,
@@ -122,7 +121,7 @@ class NoriBackend(QuantileTableDistribution1D):
     predicted = self.model_.predict(
       x_host,
       output_type="quantiles",
-      quantiles=to_numpy(alphas).tolist(),
+      quantiles=alphas.tolist(),
     )
 
     quantiles = torch.as_tensor(

@@ -20,9 +20,9 @@ from __future__ import annotations
 from typing import Any, Literal
 
 import torch
+from pyvinecopulib.core import to_numpy
 from tabicl import TabICLRegressor
 
-from npcc.core._placement import to_numpy
 from npcc.core.margin_quantile_table import (
   QuantileTableConfig,
   QuantileTableDistribution1D,
@@ -97,7 +97,7 @@ class TabICLBackend(QuantileTableDistribution1D):
     predicted = self.model_.predict(
       to_numpy(x),
       output_type="quantiles",
-      alphas=to_numpy(alphas).tolist(),
+      alphas=alphas.tolist(),
     )
 
     quantiles = torch.as_tensor(
