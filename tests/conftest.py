@@ -2,8 +2,8 @@
 Shared test fixtures and fakes for npcc tests.
 
 Skips the entire suite when ``tabpfn`` cannot be imported (the package
-is a hard runtime dependency, but importing it is gated on a working
-auth setup, so we cushion the test layer).
+is a hard runtime dependency, but importing it needs a working auth
+setup, so the test layer absorbs its absence).
 
 Provides a ``_UniformQuantileRegressor`` fake that mimics
 ``TabPFNRegressor`` and supports both density-recovery paths:
@@ -29,10 +29,10 @@ import torch
 
 pytest.importorskip("tabpfn")
 
-from npcc.core.margin import (  # noqa: E402
+from npcc.core.margin import (
   ConditionalMargin,
 )
-from npcc.core.quantile_table_distribution1d import (  # noqa: E402
+from npcc.core.margin_quantile_table import (
   QuantileTableDistribution1D,
 )
 
@@ -178,7 +178,7 @@ def uniform_density_y(y: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Hermetic, TabPFN-free backends (no monkeypatch): same Z ~ Uniform(-2, 2)
 # ground truth as the fakes above, so ``uniform_density_y`` still applies.
-# Used to prove the registry + pluggable-backend seam end-to-end without
+# Used to prove the registry and pluggable-backend extension point without
 # touching TabPFN.
 # ---------------------------------------------------------------------------
 

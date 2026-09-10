@@ -18,11 +18,12 @@ This backend requires the ``pytabkit`` optional dependency.
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import torch
+from pyvinecopulib.core.extend import to_numpy
 
-from npcc.core.quantile_table_distribution1d import (
+from npcc.core.margin_quantile_table import (
   QuantileTableConfig,
   QuantileTableDistribution1D,
 )
@@ -82,8 +83,8 @@ class _PyTabKitBackend(QuantileTableDistribution1D):
     model = estimator_class(**model_kwargs)
 
     model.fit(
-      x.detach().cpu().numpy(),
-      z.detach().cpu().numpy(),
+      to_numpy(x),
+      to_numpy(z),
     )
 
     self.model_ = model
@@ -96,7 +97,7 @@ class _PyTabKitBackend(QuantileTableDistribution1D):
     """Predict one quantile table for a chunk of conditioning rows."""
     assert self.model_ is not None
 
-    predicted = self.model_.predict(x.detach().cpu().numpy())
+    predicted = self.model_.predict(to_numpy(x))
 
     quantiles = torch.as_tensor(
       predicted,
@@ -133,11 +134,11 @@ class PyTabKitRealMLPBackend(_PyTabKitBackend):
     if hpo:
       from pytabkit import RealMLP_HPO_Regressor
 
-      return RealMLP_HPO_Regressor
+      return cast("type", RealMLP_HPO_Regressor)
 
     from pytabkit import RealMLP_TD_Regressor
 
-    return RealMLP_TD_Regressor
+    return cast("type", RealMLP_TD_Regressor)
 
 
 class PyTabKitTabMBackend(_PyTabKitBackend):
@@ -148,8 +149,8 @@ class PyTabKitTabMBackend(_PyTabKitBackend):
     if hpo:
       from pytabkit import TabM_HPO_Regressor
 
-      return TabM_HPO_Regressor
+      return cast("type", TabM_HPO_Regressor)
 
     from pytabkit import TabM_D_Regressor
 
-    return TabM_D_Regressor
+    return cast("type", TabM_D_Regressor)

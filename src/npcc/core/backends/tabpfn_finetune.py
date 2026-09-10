@@ -1,5 +1,4 @@
-"""
-tabpfn_finetune.py — fine-tuned TabPFN backend (native head).
+"""Fine-tuned TabPFN backend, read through its native head.
 
 Fine-tunes TabPFN (`FinetunedTabPFNRegressor`, which fine-tunes the v2.5
 checkpoint) with a proper-scoring-rule loss, then reads the predictive
@@ -26,6 +25,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 import torch
+from pyvinecopulib.core.extend import to_numpy
 
 from npcc.core.backends.tabpfn_criterion import TabPFNCriterionBackend
 
@@ -39,8 +39,7 @@ class FinetunedTabPFNCriterionBackend(TabPFNCriterionBackend):
       Forwarded to :class:`TabPFNCriterionBackend`.
   epochs, learning_rate
       Fine-tuning schedule for ``FinetunedTabPFNRegressor``.
-  ce_loss_weight, crps_loss_weight, crls_loss_weight, mse_loss_weight,
-  mae_loss_weight
+  ce_loss_weight, crps_loss_weight, crls_loss_weight, mse_loss_weight, mae_loss_weight
       Proper-scoring-rule loss weights.  Default = pure bar-distribution NLL
       (`ce_loss_weight=1`, rest 0) — the density-optimal objective for copula
       KL (see module docstring).
@@ -94,5 +93,5 @@ class FinetunedTabPFNCriterionBackend(TabPFNCriterionBackend):
       mae_loss_weight=self.mae_loss_weight,
       **self.finetune_kwargs,
     )
-    model.fit(x.detach().cpu().numpy(), z.detach().cpu().numpy())
+    model.fit(to_numpy(x), to_numpy(z))
     self.model_ = model

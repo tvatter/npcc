@@ -21,8 +21,9 @@ from typing import Any, Literal
 
 import torch
 from catboost import CatBoostRegressor
+from pyvinecopulib.core.extend import to_numpy
 
-from npcc.core.quantile_table_distribution1d import (
+from npcc.core.margin_quantile_table import (
   QuantileTableConfig,
   QuantileTableDistribution1D,
 )
@@ -36,9 +37,12 @@ class CatBoostBackend(QuantileTableDistribution1D):
   transform
     Response transformation inherited from
     :class:`QuantileTableDistribution1D`.
-  config
-    Quantile-grid configuration.
-  device:
+  quantile_table_config
+    Quantile-table reconstruction configuration.
+  eps
+    Distance used when clipping values away from the boundaries of
+    ``(0, 1)`` before the logit or probit transform.
+  device
     Device used for model fitting, prediction, and returned tensors.
   batch_size
     Maximum number of conditioning rows evaluated in one prediction call.
@@ -98,7 +102,7 @@ class CatBoostBackend(QuantileTableDistribution1D):
       )
       .numpy()
     )
-    z_host = z.detach().cpu().numpy()
+    z_host = to_numpy(z)
 
     model.fit(x_host, z_host)
 

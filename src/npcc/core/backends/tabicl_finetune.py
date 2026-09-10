@@ -1,5 +1,4 @@
-"""
-tabicl_finetune.py — fine-tuned TabICL backend (quantile head).
+"""Fine-tuned TabICL backend, read through its quantile head.
 
 Fine-tunes TabICL (`FinetunedTabICLRegressor`) and reads the predictive
 distribution off the same quantile head as
@@ -21,9 +20,10 @@ from __future__ import annotations
 from typing import Any, Literal
 
 import torch
+from pyvinecopulib.core.extend import to_numpy
 
 from npcc.core.backends.tabicl import TabICLBackend
-from npcc.core.quantile_table_distribution1d import QuantileTableConfig
+from npcc.core.margin_quantile_table import QuantileTableConfig
 
 
 class FinetunedTabICLBackend(TabICLBackend):
@@ -31,7 +31,7 @@ class FinetunedTabICLBackend(TabICLBackend):
 
   Parameters
   ----------
-  transform, config, device, batch_size
+  transform, quantile_table_config, eps, device, batch_size
       Forwarded to :class:`TabICLBackend`.
   epochs, learning_rate
       Fine-tuning schedule for ``FinetunedTabICLRegressor``.
@@ -72,5 +72,5 @@ class FinetunedTabICLBackend(TabICLBackend):
       learning_rate=self.learning_rate,
       **self.finetune_kwargs,
     )
-    model.fit(x.detach().cpu().numpy(), z.detach().cpu().numpy())
+    model.fit(to_numpy(x), to_numpy(z))
     self.model_ = model

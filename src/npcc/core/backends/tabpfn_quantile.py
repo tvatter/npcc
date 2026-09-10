@@ -22,7 +22,7 @@ from npcc.core.backends.tabpfn_common import (
   ModelVersion,
   make_tabpfn_regressor,
 )
-from npcc.core.quantile_table_distribution1d import (
+from npcc.core.margin_quantile_table import (
   QuantileTableConfig,
   QuantileTableDistribution1D,
 )
@@ -36,8 +36,11 @@ class TabPFNQuantileBackend(QuantileTableDistribution1D):
   transform
     Response transformation inherited from
     :class:`QuantileTableDistribution1D`.
-  config
-    Quantile-grid configuration.
+  quantile_table_config
+    Quantile-table reconstruction configuration.
+  eps
+    Distance used when clipping values away from the boundaries of
+    ``(0, 1)`` before the logit or probit transform.
   device
     Device used by the TabPFN model and returned tensors.
   batch_size
@@ -106,7 +109,7 @@ class TabPFNQuantileBackend(QuantileTableDistribution1D):
     predicted = self.model_.predict(
       x.detach().cpu(),
       output_type="quantiles",
-      quantiles=alphas.detach().cpu().tolist(),
+      quantiles=alphas.tolist(),
     )
 
     quantiles = torch.as_tensor(

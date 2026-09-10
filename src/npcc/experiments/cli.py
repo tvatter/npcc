@@ -12,6 +12,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 from npcc.experiments.config import GridConfig, RunConfig, load_grid
 from npcc.experiments.runner import (
@@ -82,7 +83,9 @@ def _build_parser() -> argparse.ArgumentParser:
   return p
 
 
-def _config_echo(grid: GridConfig, run: RunConfig, wall: float) -> dict:
+def _config_echo(
+  grid: GridConfig, run: RunConfig, wall: float
+) -> dict[str, Any]:
   return {
     "grid": {
       "families": grid.families,
@@ -120,7 +123,7 @@ def _config_echo(grid: GridConfig, run: RunConfig, wall: float) -> dict:
 def main(argv: list[str] | None = None) -> int:
   # Reduce CUDA fragmentation across the many per-estimator fits (read lazily
   # by the caching allocator on first allocation, so setting it here is early
-  # enough); also honours the value if already exported in the shell.
+  # enough); also honors the value if already exported in the shell.
   os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
   args = _build_parser().parse_args(argv)

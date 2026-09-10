@@ -9,7 +9,7 @@ A *scenario* pairs a copula family with a Kendall's-tau regime and defines:
 
 Everything is backed by :mod:`pyvinecopulib`: ``Bicop.tau_to_parameters`` maps a
 target Kendall's tau to the family's parameter, and ``Bicop.hinv1`` provides a
-generic inverse-Rosenblatt sampler, so the study generalises to any
+generic inverse-Rosenblatt sampler, so the study generalizes to any
 one-parameter family without per-family closed forms.
 
 Conditional scenarios vary ``tau`` with a scalar covariate ``x`` (``x`` is a
@@ -27,17 +27,17 @@ import pyvinecopulib as pv
 import torch
 
 # Families restricted to the single-parameter set, for which
-# ``tau_to_parameters`` is an unambiguous scalar map. Resolved via getattr
-# because pyvinecopulib's type stub does not expose the enum members.
-_FAMILY_NAMES: tuple[str, ...] = (
-  "clayton",
-  "gumbel",
-  "frank",
-  "gaussian",
-  "joe",
-)
+# ``tau_to_parameters`` is an unambiguous scalar map. The insertion order is
+# part of the simulation seed: `runner.py` hashes each family's index into
+# `_cell_seed`, so reordering these re-seeds every cell. That is also why this
+# is not `pyvinecopulib.families.one_par`, which holds the same five in a
+# different order.
 FAMILIES: dict[str, pv.BicopFamily] = {
-  name: getattr(pv.BicopFamily, name) for name in _FAMILY_NAMES
+  "clayton": pv.BicopFamily.clayton,
+  "gumbel": pv.BicopFamily.gumbel,
+  "frank": pv.BicopFamily.frank,
+  "gaussian": pv.BicopFamily.gaussian,
+  "joe": pv.BicopFamily.joe,
 }
 
 QUANTITIES: tuple[str, ...] = ("pdf", "cdf", "hfunc1", "hfunc2")
@@ -155,7 +155,7 @@ def eval_grid(
     return EvalGrid(
       u_flat=u_pairs.repeat_interleave(conditional_x_grid_n),
       v_flat=v_pairs.repeat_interleave(conditional_x_grid_n),
-      x_flat=x_axis.repeat(n_pairs),
+      x_flat=x_axis.repeat(n_pairs).reshape(-1, 1),
       shape=(n_pairs, conditional_x_grid_n),
       conditional=True,
       x_axis=x_axis,
@@ -194,7 +194,7 @@ def eval_grid_for_x(
   return EvalGrid(
     u_flat=u_pairs.repeat_interleave(x_axis.shape[0]),
     v_flat=v_pairs.repeat_interleave(x_axis.shape[0]),
-    x_flat=x_axis.repeat(n_pairs),
+    x_flat=x_axis.repeat(n_pairs).reshape(-1, 1),
     shape=(n_pairs, x_axis.shape[0]),
     conditional=True,
     x_axis=x_axis,
@@ -276,10 +276,10 @@ def sample(
   )
   v = torch.empty(n, dtype=torch.float64)
   # ponytail: one Bicop per row because tau(x) is continuous and pyvinecopulib
-  # does not vectorise hinv1 over row-specific parameters. O(n) Bicop builds is
+  # does not vectorize hinv1 over row-specific parameters. O(n) Bicop builds is
   # negligible next to the TabPFN fit; if it ever bites, group by rounded tau.
   for i in range(n):
     cop = _bicop(fam, float(tau_x[i]))
     uv_host = torch.stack([u[i], w[i]]).reshape(1, 2).numpy()
     v[i] = float(cop.hinv1(uv_host).item())
-  return u, v, x
+  return u, v, x.reshape(-1, 1)

@@ -2,22 +2,24 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import ClassVar
+from collections.abc import Callable, Sequence
+from typing import Any, ClassVar, Self
 
+import numpy as np
 import torch
 from pyvinecopulib import RVineStructure
 from pyvinecopulib.core import (
   BicopLike,
+  ControlsLike,
   NonSimplifiedContext,
   VinecopBase,
 )
 
-from npcc.core._common import _resolve_device
+from npcc.core._placement import TensorPlacement, resolve_device
 from npcc.core.bicop import RosenblattBicop
 
 
-class RosenblattVinecop(VinecopBase[torch.Tensor]):
+class RosenblattVinecop(TensorPlacement, VinecopBase[torch.Tensor]):
   """Fixed-structure non-simplified vine of Rosenblatt pair copulas.
 
   Each edge contains a fitted :class:`RosenblattBicop`. Higher-tree edges
@@ -35,8 +37,11 @@ class RosenblattVinecop(VinecopBase[torch.Tensor]):
     Variable types in variable order. Only continuous variables are currently
     supported by :class:`RosenblattBicop`.
   device
-    Device used for random sampling. When omitted for a fitted vine, it is
-    inferred from the pair copulas.
+    Device this vine evaluates on: every input is placed onto it, and it is
+    where sampling draws. For a fitted vine, omitting it adopts the pair
+    copulas' common device and supplying a different one is refused. For an
+    unfitted vine there are no pairs to read, so it resolves the same way the
+    fit controls do -- CUDA when available, CPU otherwise.
 
   Notes
   -----
@@ -65,39 +70,43 @@ class RosenblattVinecop(VinecopBase[torch.Tensor]):
     )
 
     if pair_copulas is None:
-      self._device = _resolve_device(device)
+      self._set_placement(device)
       return
 
-    copied_pairs = self._copy_pair_copulas(pair_copulas)
-    self._validate_pair_copulas(copied_pairs)
+    checked_pairs = self._check_pair_copulas(pair_copulas)
+    self._validate_pair_copulas(checked_pairs)
 
-    self.pair_copulas = copied_pairs
-    self._device = self._resolve_vine_device(
-      copied_pairs,
-      device=device,
-    )
+    self.pair_copulas = checked_pairs
+    self._set_placement(self._resolve_vine_device(checked_pairs, device=device))
 
   @staticmethod
-  def _copy_pair_copulas(
+  def _check_pair_copulas(
     pair_copulas: Sequence[Sequence[BicopLike[torch.Tensor]]],
   ) -> list[list[RosenblattBicop]]:
-    """Validate pair implementations and copy the nested containers."""
-    copied: list[list[RosenblattBicop]] = []
+    """Check every pair's implementation and rebuild the nested containers.
+
+    The pairs themselves are shared, not copied: a caller handing in fitted
+    pair copulas keeps them, and the fit engine's output has no other owner.
+    Only the lists are this vine's own, so a later mutation of the caller's
+    sequence cannot reshape the vine.
+    """
+    checked: list[list[RosenblattBicop]] = []
 
     for row in pair_copulas:
-      copied_row: list[RosenblattBicop] = []
+      checked_row: list[RosenblattBicop] = []
 
       for pair in row:
         if not isinstance(pair, RosenblattBicop):
           raise TypeError(
-            "RosenblattVinecop only accepts RosenblattBicop pairs."
+            f"RosenblattVinecop hosts RosenblattBicop pairs; got "
+            f"{type(pair).__name__}."
           )
 
-        copied_row.append(pair)
+        checked_row.append(pair)
 
-      copied.append(copied_row)
+      checked.append(checked_row)
 
-    return copied
+    return checked
 
   def _validate_pair_copulas(
     self,
@@ -136,7 +145,7 @@ class RosenblattVinecop(VinecopBase[torch.Tensor]):
         f"All pair copulas must use the same device; found: {devices}."
       )
 
-    requested_device = None if device is None else _resolve_device(device)
+    requested_device = None if device is None else resolve_device(device)
 
     if pair_devices:
       pair_device = next(iter(pair_devices))
@@ -150,9 +159,58 @@ class RosenblattVinecop(VinecopBase[torch.Tensor]):
       return pair_device
 
     return (
-      requested_device
-      if requested_device is not None
-      else _resolve_device(None)
+      requested_device if requested_device is not None else resolve_device(None)
+    )
+
+  def fit(
+    self,
+    u: np.ndarray | torch.Tensor,
+    /,
+    controls: ControlsLike | None = None,
+    *,
+    var_types: list[str] | None = None,
+    x: torch.Tensor | None = None,
+    fit_edge: Callable[..., Any] | None = None,
+    fit_level: Callable[..., Any] | None = None,
+  ) -> Self:
+    """Fit every pair along the fixed structure, on this vine's placement.
+
+    Overridden only to place the inputs. The inherited implementation hands
+    them to the fit engine untouched -- which is right for a vine whose pairs
+    answer in whatever namespace they were given, and wrong here: the engine
+    allocates its per-tree scratch in the namespace of the ``u`` it received,
+    while a :class:`~npcc.core.bicop.RosenblattBicop` always answers in torch
+    on its own device. Handed a NumPy ``u``, the cascade would try to assign a
+    CUDA tensor into a NumPy row.
+
+    Parameters
+    ----------
+    u : array, shape (n, d), dtype float
+        Pseudo-observations, in any form ``torch.as_tensor`` accepts.
+    controls : ControlsLike, or None, optional
+        Backend and numerical configuration, passed to every pair.
+    var_types : list of str, or None, optional
+        One ``"c"`` per variable; only continuous pairs are supported.
+    x : array, shape (n, p), or None, optional
+        External covariates, threaded to every pair alongside each edge's
+        conditioning values.
+    fit_edge : callable, or None, optional
+        Per-edge pair fitter; defaults to fitting ``bicop_class``.
+    fit_level : callable, or None, optional
+        Whole-tree fitter.
+
+    Returns
+    -------
+    RosenblattVinecop
+        ``self``, so the call chains.
+    """
+    return super().fit(
+      self._prep(u),
+      controls,
+      var_types=var_types,
+      x=None if x is None else self._prep(x),
+      fit_edge=fit_edge,
+      fit_level=fit_level,
     )
 
   def get_pair_copula(
@@ -168,12 +226,18 @@ class RosenblattVinecop(VinecopBase[torch.Tensor]):
     pair_copulas: list[list[BicopLike[torch.Tensor]]],
   ) -> None:
     """Install pair copulas produced by the inherited fit engine."""
-    copied_pairs = self._copy_pair_copulas(pair_copulas)
-    self._validate_pair_copulas(copied_pairs)
+    checked_pairs = self._check_pair_copulas(pair_copulas)
+    self._validate_pair_copulas(checked_pairs)
 
-    self.pair_copulas = copied_pairs
-    self._device = self._resolve_vine_device(copied_pairs)
-    self._batched = None
+    self.pair_copulas = checked_pairs
+    self._set_placement(self._resolve_vine_device(checked_pairs))
+    # The pairs change here without the structure changing, which is the case
+    # `_bind_vine` does not cover, so the base asks an implementation to drop
+    # anything it memoized from them -- and names the hook rather than the
+    # attribute behind it. Nothing here memoizes the pairs: this vine's
+    # context assembles conditioning, so no batched state is ever built. The
+    # call is the contract.
+    self._invalidate_batched()
 
   def _sample_uniform(
     self,
@@ -186,11 +250,7 @@ class RosenblattVinecop(VinecopBase[torch.Tensor]):
       from pyvinecopulib.utils import sample_uniform
 
       draws = sample_uniform(n, self.d, qrng=True, seeds=list(seeds))
-      return torch.as_tensor(
-        draws,
-        dtype=torch.float64,
-        device=self._device,
-      )
+      return self._prep(draws)
 
     generator = torch.Generator(device=self._device)
     if seeds:

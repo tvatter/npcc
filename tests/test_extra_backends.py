@@ -10,12 +10,14 @@ failures (skipped, like the real-TabPFN smoke).
 from __future__ import annotations
 
 import os
+from typing import cast
 
 import pytest
 import torch
 
 from npcc.core.bicop import RosenblattBicop
-from npcc.core.quantile_table_distribution1d import QuantileTableConfig
+from npcc.core.controls import FitControlsRosenblattBicop
+from npcc.core.margin_quantile_table import QuantileTableConfig
 
 
 def _gaussian_copula_sample(
@@ -28,7 +30,10 @@ def _gaussian_copula_sample(
   standard_normal = torch.distributions.Normal(0.0, 1.0)
   u = standard_normal.cdf(z1)
   v = standard_normal.cdf(z2)
-  return u.clamp(1e-3, 1 - 1e-3), v.clamp(1e-3, 1 - 1e-3)
+  return (
+    cast("torch.Tensor", u.clamp(1e-3, 1 - 1e-3)),
+    cast("torch.Tensor", v.clamp(1e-3, 1 - 1e-3)),
+  )
 
 
 def _check_fitted_model(m: RosenblattBicop) -> None:
@@ -52,9 +57,11 @@ def test_gbm_backend_smoke() -> None:
   pytest.importorskip("sklearn")
   u, v = _gaussian_copula_sample(80, rho=0.6, seed=0)
   m = RosenblattBicop(
-    backend="gbm",
-    quantile_table_config=QuantileTableConfig(n_quantiles=11),
-    backend_kwargs={"n_estimators": 20, "max_depth": 2},
+    FitControlsRosenblattBicop(
+      backend="gbm",
+      quantile_table_config=QuantileTableConfig(n_quantiles=11),
+      backend_kwargs={"n_estimators": 20, "max_depth": 2},
+    )
   ).fit(torch.column_stack([u, v]))
   _check_fitted_model(m)
 
@@ -63,8 +70,10 @@ def test_ngboost_backend_smoke() -> None:
   pytest.importorskip("ngboost")
   u, v = _gaussian_copula_sample(80, rho=0.6, seed=1)
   m = RosenblattBicop(
-    backend="ngboost",
-    backend_kwargs={"n_estimators": 40},
+    FitControlsRosenblattBicop(
+      backend="ngboost",
+      backend_kwargs={"n_estimators": 40},
+    )
   ).fit(torch.column_stack([u, v]))
   _check_fitted_model(m)
 
@@ -73,9 +82,11 @@ def test_catboost_backend_smoke() -> None:
   pytest.importorskip("catboost")
   u, v = _gaussian_copula_sample(80, rho=0.6, seed=3)
   m = RosenblattBicop(
-    backend="catboost",
-    backend_kwargs={"iterations": 100},
-    quantile_table_config=QuantileTableConfig(n_quantiles=21),
+    FitControlsRosenblattBicop(
+      backend="catboost",
+      backend_kwargs={"iterations": 100},
+      quantile_table_config=QuantileTableConfig(n_quantiles=21),
+    )
   ).fit(torch.column_stack([u, v]))
   _check_fitted_model(m)
 
@@ -84,9 +95,11 @@ def test_pytabkit_realmlp_backend_smoke() -> None:
   pytest.importorskip("pytabkit")
   u, v = _gaussian_copula_sample(80, rho=0.6, seed=5)
   m = RosenblattBicop(
-    backend="pytabkit-realmlp",
-    backend_kwargs={"n_epochs": 8},
-    quantile_table_config=QuantileTableConfig(n_quantiles=21),
+    FitControlsRosenblattBicop(
+      backend="pytabkit-realmlp",
+      backend_kwargs={"n_epochs": 8},
+      quantile_table_config=QuantileTableConfig(n_quantiles=21),
+    )
   ).fit(torch.column_stack([u, v]))
   _check_fitted_model(m)
 
@@ -96,8 +109,10 @@ def test_nori_backend_smoke() -> None:
   u, v = _gaussian_copula_sample(80, rho=0.6, seed=7)
   try:
     m = RosenblattBicop(
-      backend="nori",
-      quantile_table_config=QuantileTableConfig(n_quantiles=41),
+      FitControlsRosenblattBicop(
+        backend="nori",
+        quantile_table_config=QuantileTableConfig(n_quantiles=41),
+      )
     ).fit(torch.column_stack([u, v]))
   except Exception as exc:  # noqa: BLE001 - weight download / runtime issues
     pytest.skip(f"Nori unavailable at runtime: {exc}")
@@ -117,8 +132,10 @@ def test_tabpfn_finetune_backend_smoke() -> None:
   u, v = _gaussian_copula_sample(120, rho=0.6, seed=6)
   try:
     m = RosenblattBicop(
-      backend="tabpfn-finetune",
-      backend_kwargs={"epochs": 1, "early_stopping": False},
+      FitControlsRosenblattBicop(
+        backend="tabpfn-finetune",
+        backend_kwargs={"epochs": 1, "early_stopping": False},
+      )
     ).fit(torch.column_stack([u, v]))
     pdf = m.pdf(torch.tensor([[0.5, 0.5]]))
   except Exception as exc:  # noqa: BLE001 - license/download/runtime issues
@@ -131,8 +148,10 @@ def test_tabicl_backend_smoke() -> None:
   u, v = _gaussian_copula_sample(80, rho=0.6, seed=2)
   try:
     m = RosenblattBicop(
-      backend="tabicl",
-      backend_kwargs={"model_kwargs": {"n_estimators": 1}},
+      FitControlsRosenblattBicop(
+        backend="tabicl",
+        backend_kwargs={"model_kwargs": {"n_estimators": 1}},
+      )
     ).fit(torch.column_stack([u, v]))
     pdf = m.pdf(torch.tensor([[0.3, 0.4], [0.5, 0.6]]))
   except Exception as exc:  # noqa: BLE001 - weight download / runtime issues

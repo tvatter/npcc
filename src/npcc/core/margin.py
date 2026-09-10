@@ -1,5 +1,4 @@
-"""
-Backend-neutral conditional margins.
+"""Backend-neutral conditional margins.
 
 A concrete conditional margin represents the distribution of a univariate
 response ``Y`` given an optional feature matrix ``X``. It implements
@@ -19,17 +18,19 @@ All public numerical inputs and outputs are torch tensors.
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 import math
-from typing import Literal, Self
+from abc import ABC, abstractmethod
+from typing import Literal, NoReturn, Self
 
 import torch
 from pyvinecopulib.core import MarginBase
+from pyvinecopulib.core.extend import prepare_covariates
 
-from npcc.core._common import _logit, _resolve_device
+from npcc.core._placement import TensorPlacement
+from npcc.core._trim import logit
 
 
-class ConditionalMargin(MarginBase[torch.Tensor], ABC):
+class ConditionalMargin(TensorPlacement, MarginBase[torch.Tensor], ABC):
   """Abstract backend-powered conditional continuous margin.
 
   Parameters
@@ -73,7 +74,7 @@ class ConditionalMargin(MarginBase[torch.Tensor], ABC):
 
     self.transform = transform
     self.eps = eps
-    self._device = _resolve_device(device)
+    self._set_placement(device)
 
     if batch_size is None:
       self.batch_size = 2000 if self._device.type == "cuda" else 400
@@ -94,6 +95,48 @@ class ConditionalMargin(MarginBase[torch.Tensor], ABC):
     """Name shown in margin summaries."""
     return type(self).__name__
 
+  @property
+  def n_parameters(self) -> float:
+    """Zero -- these backends estimate no free parameters in this sense.
+
+    A distributional-regression backend has no well-defined count of freely
+    estimated parameters: a gradient-boosted ensemble's is a function of its
+    tree structure, and a pretrained foundation model does not estimate any at
+    fit time at all. ``MarginBase`` derives its information criteria from this
+    number, so rather than let it silently stand for one, :meth:`aic`,
+    :meth:`bic` and :meth:`aicc` are refused below.
+
+    Returns
+    -------
+    float
+        Always ``0.0``. Read as "not a parameter count", not as "unpenalized".
+    """
+    return 0.0
+
+  def _refuse_criterion(self, name: str) -> NoReturn:
+    """Raise, naming the criterion and why this margin has none."""
+    raise NotImplementedError(
+      f"{type(self).__name__} has no well-defined free-parameter count, so "
+      f"{name} would penalize the fit by zero and rank every backend by "
+      "log-likelihood alone. Compare backends on held-out log-likelihood "
+      "instead."
+    )
+
+  def aic(self, y: torch.Tensor | None = None, /) -> float:
+    """Refuse: see :attr:`n_parameters`."""
+    del y
+    self._refuse_criterion("aic")
+
+  def bic(self, y: torch.Tensor | None = None, /) -> float:
+    """Refuse: see :attr:`n_parameters`."""
+    del y
+    self._refuse_criterion("bic")
+
+  def aicc(self, y: torch.Tensor | None = None, /) -> float:
+    """Refuse: see :attr:`n_parameters`."""
+    del y
+    self._refuse_criterion("aicc")
+
   def _resolve_batch_size(self, batch_size: int | None) -> int:
     """Resolve and validate a method-level batch-size override."""
     effective = self.batch_size if batch_size is None else batch_size
@@ -113,7 +156,18 @@ class ConditionalMargin(MarginBase[torch.Tensor], ABC):
     values: torch.Tensor,
     x: torch.Tensor | None,
   ) -> torch.Tensor:
-    """Prepare conditioning features."""
+    """Place conditioning features and check they are row-aligned.
+
+    An absent ``x`` becomes a single constant column rather than a zero-width
+    one: the inner regressors are third-party estimators that require at least
+    one feature, so an unconditional margin is fitted as a conditional one on a
+    covariate that carries no information.
+
+    The layout is upstream's:
+    :func:`pyvinecopulib.core.extend.prepare_covariates` performs the check
+    and ``(n,)`` is refused, so every entry point on this margin agrees with
+    the ones it inherits.
+    """
     n = values.shape[0]
 
     if x is None:
@@ -123,15 +177,50 @@ class ConditionalMargin(MarginBase[torch.Tensor], ABC):
         device=self._device,
       )
 
-    if x.ndim == 1:
-      x = x.reshape(-1, 1)
-    elif x.ndim != 2:
-      raise ValueError("x must have shape (n,) or (n, p).")
+    x_t = self._prep(x)
 
-    if x.shape[0] != n:
-      raise ValueError("values and x must have the same number of rows.")
+    prepare_covariates(self, x_t, n)
 
-    return x
+    return x_t
+
+  def _grid_covariates(self, x: torch.Tensor) -> torch.Tensor:
+    """Place the conditioning rows of a Cartesian-grid query, and check them.
+
+    The grid methods take ``(n, p)`` like every other entry point, so this
+    refuses ``(n,)`` for the reason
+    :func:`pyvinecopulib.core.extend.prepare_covariates` does -- it says
+    nothing about which axis is which. These methods accept ``p > 1``, so the
+    check here is the general one rather than anything single-covariate.
+
+    Placement is the other half. These methods reach the backend without
+    passing through ``_prep``, so before this a NumPy ``x`` raised from inside
+    the alpha grid rather than at the boundary, and a float32 one drove that
+    grid at float32.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Conditioning rows, shape ``(n, p)``.
+
+    Returns
+    -------
+    torch.Tensor
+        The same rows, ``float64`` on this margin's device.
+
+    Raises
+    ------
+    ValueError
+        If ``x`` is not two-dimensional.
+    """
+    x_t = self._prep(x)
+
+    if x_t.ndim != 2:
+      raise ValueError(
+        f"x must have shape (n, p), with one row per observation; "
+        f"got {tuple(x_t.shape)}"
+      )
+
+    return x_t
 
   def _transform_y(self, y: torch.Tensor) -> torch.Tensor:
     """Transform responses to the backend's modeled scale."""
@@ -140,7 +229,7 @@ class ConditionalMargin(MarginBase[torch.Tensor], ABC):
 
     if self.transform == "logit":
       y_clip = torch.clamp(y, self.eps, 1.0 - self.eps)
-      return _logit(y_clip)
+      return logit(y_clip)
 
     if self.transform == "probit":
       y_clip = torch.clamp(y, self.eps, 1.0 - self.eps)
@@ -187,10 +276,28 @@ class ConditionalMargin(MarginBase[torch.Tensor], ABC):
     x: torch.Tensor | None = None,
     weights: torch.Tensor | None = None,
   ) -> Self:
-    """Fit the backend to responses and optional conditioning features."""
-    del controls, weights
+    """Fit the backend to responses and optional conditioning features.
 
-    y_t = y.reshape(-1)
+    Neither ``controls`` nor ``weights`` is accepted -- this margin is
+    configured entirely at construction, which is what
+    :attr:`supports_controls` ``False`` and :attr:`supports_weights` ``False``
+    declare. Both are refused rather than dropped, so a caller who passes one
+    is told instead of being handed a fit that quietly ignored it.
+    """
+    if controls is not None:
+      raise ValueError(
+        f"{type(self).__name__} declares `supports_controls = False`, so it "
+        "is configured at construction and takes no `controls`; pass the "
+        "backend settings to the constructor instead."
+      )
+
+    if weights is not None:
+      raise ValueError(
+        f"{type(self).__name__} declares `supports_weights = False`, so it "
+        "cannot apply observation weights; drop `weights`."
+      )
+
+    y_t = self._prep(y).reshape(-1)
 
     x_t = self._conditioning(y_t, x=x)
     z_t = self._transform_y(y_t)

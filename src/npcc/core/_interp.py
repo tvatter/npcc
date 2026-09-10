@@ -1,68 +1,41 @@
-"""Small Torch helpers shared across NPCC modules."""
+"""Linear interpolation and finite differences over a sampled axis.
+
+The quantile-table margins reconstruct a density, a distribution function and
+a quantile function from a table of predicted quantiles, which is
+interpolation in three directions plus one derivative. NumPy has
+:func:`numpy.interp` and :func:`numpy.gradient` for the unbatched cases and
+nothing for the batched ones; these are the Torch equivalents, on the device
+the table was predicted on.
+
+pyvinecopulib's own interpolation helpers do not cover this: its
+``torch._bicop_interp`` is bilinear on the unit square for pair-copula density
+grids, and ``torch._margin_kde1d_interp`` is cubic over kernel-density cells.
+Both are private, and neither is a general one-dimensional linear
+interpolator.
+"""
 
 from __future__ import annotations
 
 import torch
 
-
-def _resolve_device(device: str | torch.device | None) -> torch.device:
-  """Resolve ``None`` to ``cuda`` if available, else ``cpu``.
-
-  A bare ``cuda`` device (no index) is normalised to ``cuda:<current index>``
-  so it compares equal to the device tensors actually materialise on (e.g.
-  ``cuda:0``); ``torch.device("cuda") != torch.device("cuda:0")`` otherwise.
-  """
-  if device is None:
-    resolved = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-  else:
-    resolved = torch.device(device)
-
-  if resolved.type == "cuda" and resolved.index is None:
-    resolved = torch.device("cuda", torch.cuda.current_device())
-
-  return resolved
+__all__ = [
+  "gradient_1d",
+  "interp",
+  "interp_batched_fp",
+  "interp_batched_xp",
+]
 
 
-def _check_uv(
-  u: torch.Tensor,
-  v: torch.Tensor,
-  eps: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-  """Validate copula coordinates and clip them away from ``{0, 1}``."""
-  u_t = u.reshape(-1)
-  v_t = v.reshape(-1)
-
-  if u_t.shape != v_t.shape:
-    raise ValueError("u and v must have the same shape.")
-
-  if torch.any((u_t <= 0.0) | (u_t >= 1.0)) or torch.any(
-    (v_t <= 0.0) | (v_t >= 1.0)
-  ):
-    raise ValueError("u and v must lie strictly inside (0, 1).")
-
-  return (
-    torch.clamp(u_t, eps, 1.0 - eps),
-    torch.clamp(v_t, eps, 1.0 - eps),
-  )
-
-
-def _logit(p: torch.Tensor) -> torch.Tensor:
-  """Numerically stable logit ``log(p) - log1p(-p)``."""
-  return torch.log(p) - torch.log1p(-p)
-
-
-def _torch_interp(
-  x: torch.Tensor, xp: torch.Tensor, fp: torch.Tensor
-) -> torch.Tensor:
-  """1-D linear interpolation, analogue of :func:`numpy.interp`.
+def interp(x: torch.Tensor, xp: torch.Tensor, fp: torch.Tensor) -> torch.Tensor:
+  """1-D linear interpolation, analog of :func:`numpy.interp`.
 
   ``xp`` must be sorted ascending.  Values of ``x`` outside
   ``[xp[0], xp[-1]]`` are clamped to the endpoints (flat extrapolation),
-  matching NumPy's default behaviour.  Inputs are 1-D; output has the
+  matching NumPy's default behavior.  Inputs are 1-D; output has the
   shape of ``x``.
   """
   n = xp.shape[0]
-  idx = torch.searchsorted(xp, x).clamp(1, n - 1)
+  idx = torch.searchsorted(xp, x.contiguous()).clamp(1, n - 1)
   x0 = xp[idx - 1]
   x1 = xp[idx]
   y0 = fp[idx - 1]
@@ -72,7 +45,7 @@ def _torch_interp(
   return y0 + t * (y1 - y0)
 
 
-def _torch_interp_batched_xp(
+def interp_batched_xp(
   x: torch.Tensor, xp: torch.Tensor, fp: torch.Tensor
 ) -> torch.Tensor:
   """Per-row linear interpolation with row-specific ``xp`` and ``fp``.
@@ -96,7 +69,7 @@ def _torch_interp_batched_xp(
   return y0 + t * (y1 - y0)
 
 
-def _torch_interp_batched_fp(
+def interp_batched_fp(
   x: torch.Tensor, xp: torch.Tensor, fp: torch.Tensor
 ) -> torch.Tensor:
   """Per-row linear interpolation with shared ``xp`` and row-specific ``fp``.
@@ -105,7 +78,7 @@ def _torch_interp_batched_fp(
   is shape ``(n, k)``.  Output has shape ``(n,)``.
   """
   k = xp.shape[0]
-  idx = torch.searchsorted(xp, x).clamp(1, k - 1)
+  idx = torch.searchsorted(xp, x.contiguous()).clamp(1, k - 1)
   rows = torch.arange(x.shape[0], device=xp.device)
   x0 = xp[idx - 1]
   x1 = xp[idx]
@@ -116,7 +89,7 @@ def _torch_interp_batched_fp(
   return y0 + t * (y1 - y0)
 
 
-def _torch_gradient_1d(y: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+def gradient_1d(y: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
   """Central differences over the last axis, with one-sided edges.
 
   Mirrors :func:`numpy.gradient` for a 1-D coordinate ``x`` and a

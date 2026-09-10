@@ -1,5 +1,4 @@
-"""
-tabpfn_common.py — shared TabPFN construction seam.
+"""The one place the concrete ``TabPFNRegressor`` is imported.
 
 Both TabPFN backends (criterion and quantile) build their regressor
 through :func:`make_tabpfn_regressor`, so this is the single place the

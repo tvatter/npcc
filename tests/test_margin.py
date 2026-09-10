@@ -5,12 +5,13 @@ from __future__ import annotations
 import copy
 import math
 
+import numpy
 import pytest
 import torch
 from pyvinecopulib.core import MarginBase
 
 from npcc.core.margin import ConditionalMargin
-from npcc.core.quantile_table_distribution1d import QuantileTableConfig
+from npcc.core.margin_quantile_table import QuantileTableConfig
 from npcc.core.registry import create_backend
 
 
@@ -64,7 +65,7 @@ def test_invalid_eps_is_rejected(
   ("x", "expected_width"),
   [
     (None, 1),
-    (torch.ones(8), 1),
+    (torch.ones((8, 1)), 1),
     (torch.ones((8, 3)), 3),
   ],
 )
@@ -122,7 +123,7 @@ def test_rejects_mismatched_rows(
 ) -> None:
   margin = make_margin(register_uniform_backends)
 
-  with pytest.raises(ValueError, match="same number of rows"):
+  with pytest.raises(ValueError, match="one row per observation"):
     margin.fit(
       torch.linspace(-1.0, 1.0, 8, dtype=torch.float64),
       x=torch.ones((7, 2), dtype=torch.float64),
@@ -220,3 +221,136 @@ def test_copied_margins_are_independent(
 
   assert first.is_fitted is True
   assert second.is_fitted is False
+
+
+def test_information_criteria_are_refused(
+  register_uniform_backends: None,
+) -> None:
+  """A distributional-regression backend has no free-parameter count.
+
+  ``MarginBase`` derives its criteria from ``_n_free``, which defaults to
+  ``0.0`` -- so inheriting them would have ranked every backend by
+  log-likelihood alone under a name that claims to penalize complexity.
+  """
+  margin = make_margin(register_uniform_backends)
+  margin.fit(torch.linspace(-1.0, 1.0, 20, dtype=torch.float64))
+
+  assert margin.n_parameters == 0.0
+
+  for name in ("aic", "bic", "aicc"):
+    with pytest.raises(NotImplementedError, match="free-parameter count"):
+      getattr(margin, name)()
+
+
+def test_fit_refuses_controls_it_cannot_honor(
+  register_uniform_backends: None,
+) -> None:
+  """``supports_controls = False`` means refuse, not drop."""
+  margin = make_margin(register_uniform_backends)
+
+  with pytest.raises(ValueError, match="takes no `controls`"):
+    margin.fit(
+      torch.rand(20, dtype=torch.float64),
+      object(),
+    )
+
+
+def test_fit_refuses_weights_it_cannot_apply(
+  register_uniform_backends: None,
+) -> None:
+  """``supports_weights = False`` means refuse, not drop."""
+  margin = make_margin(register_uniform_backends)
+
+  with pytest.raises(ValueError, match="cannot apply observation weights"):
+    margin.fit(
+      torch.rand(20, dtype=torch.float64),
+      weights=torch.ones(20, dtype=torch.float64),
+    )
+
+
+def test_fit_rejects_a_one_dimensional_covariate(
+  register_uniform_backends: None,
+) -> None:
+  """``(n,)`` is refused here, as it already was on the inherited methods.
+
+  Before this contract was narrowed, a one-dimensional ``x`` was reshaped on
+  this margin's own methods and refused on ``logpdf`` / ``cdf_left`` /
+  ``loglik`` / ``sample``, which call ``prepare_covariates`` themselves. Two
+  contracts on one object; this pins the one that is left.
+  """
+  margin = make_margin(register_uniform_backends)
+
+  with pytest.raises(ValueError, match=r"must have shape \(n, p\)"):
+    margin.fit(
+      torch.linspace(-1.0, 1.0, 8, dtype=torch.float64),
+      x=torch.ones(8, dtype=torch.float64),
+    )
+
+
+def test_grid_methods_refuse_a_one_dimensional_covariate(
+  register_uniform_backends: None,
+) -> None:
+  """The Cartesian-grid methods take ``(n, p)`` like every other entry point.
+
+  These six sites reshaped ``(n,)`` and, unlike the pointwise path, performed
+  no layout check at all -- so this is the only test that can see the choice.
+  The hermetic backends read a covariate's row count and nothing else, which
+  is why no existing test constrained it.
+  """
+  margin = create_backend(
+    "uniform-quantile",
+    transform="identity",
+    quantile_table_config=QuantileTableConfig(),
+    eps=1e-6,
+    device="cpu",
+    batch_size=None,
+  )
+  margin.fit(torch.linspace(-1.0, 1.0, 12, dtype=torch.float64))
+  y_grid = torch.linspace(-0.5, 0.5, 4, dtype=torch.float64)
+
+  with pytest.raises(ValueError, match=r"must have shape \(n, p\)"):
+    margin.pdf_grid(y_grid, x=torch.zeros(3, dtype=torch.float64))
+
+  with pytest.raises(ValueError, match=r"must have shape \(n, p\)"):
+    margin.cdf_grid(y_grid, x=torch.zeros(3, dtype=torch.float64))
+
+  # And the wider contract survives: `p > 1` is still accepted, so this path
+  # needs the general check rather than a single-covariate one.
+  assert margin.pdf_grid(
+    y_grid, x=torch.zeros((3, 2), dtype=torch.float64)
+  ).shape == (
+    3,
+    4,
+  )
+
+
+def test_grid_methods_place_both_arguments(
+  register_uniform_backends: None,
+) -> None:
+  """A NumPy grid and a NumPy covariate both arrive placed.
+
+  These methods reach the backend without passing through the pointwise
+  boundary, so before ``_grid_covariates`` a foreign array raised from inside
+  the alpha grid rather than at the edge -- and placing one argument without
+  the other split them across devices.
+  """
+  margin = create_backend(
+    "uniform-quantile",
+    transform="identity",
+    quantile_table_config=QuantileTableConfig(),
+    eps=1e-6,
+    device="cpu",
+    batch_size=None,
+  )
+  margin.fit(torch.linspace(-1.0, 1.0, 12, dtype=torch.float64))
+
+  # NumPy on purpose. The declared contract is torch-only, so `ty` is right
+  # to object; what is pinned here is that a foreign array is *placed* at the
+  # boundary rather than raising from inside the alpha grid several frames on.
+  out = margin.pdf_grid(
+    numpy.linspace(-0.5, 0.5, 4),  # ty: ignore[invalid-argument-type]
+    x=numpy.zeros((3, 1)),  # ty: ignore[invalid-argument-type]
+  )
+
+  assert out.dtype is torch.float64
+  assert out.shape == (3, 4)

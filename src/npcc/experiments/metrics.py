@@ -25,7 +25,7 @@ def curve_metrics(
 ) -> dict[str, float]:
   """Integrated absolute / squared error (and optional KL) over ``x_grid``.
 
-  KL normalises both curves to unit mass before comparing, so it is only
+  KL normalizes both curves to unit mass before comparing, so it is only
   meaningful for densities (pass ``include_kl=True`` for ``pdf``).
   """
   err = y_hat - y_true

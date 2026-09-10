@@ -1,5 +1,4 @@
-"""
-Conditional margins reconstructed from predicted quantile tables.
+"""Conditional margins reconstructed from predicted quantile tables.
 
 Given a backend that predicts a conditional quantile function
 
@@ -24,10 +23,10 @@ from typing import Literal
 
 import torch
 
-from npcc.core._common import (
-  _torch_gradient_1d,
-  _torch_interp_batched_fp,
-  _torch_interp_batched_xp,
+from npcc.core._interp import (
+  gradient_1d,
+  interp_batched_fp,
+  interp_batched_xp,
 )
 from npcc.core.margin import ConditionalMargin
 
@@ -207,7 +206,7 @@ class QuantileTableDistribution1D(ConditionalMargin):
       batch_size=batch_size,
     )
 
-    quantile_derivative = _torch_gradient_1d(
+    quantile_derivative = gradient_1d(
       sorted_quantiles,
       alphas,
     )
@@ -218,13 +217,13 @@ class QuantileTableDistribution1D(ConditionalMargin):
 
     density_at_quantiles = 1.0 / quantile_derivative
 
-    alpha_at_z = _torch_interp_batched_xp(
+    alpha_at_z = interp_batched_xp(
       z,
       sorted_quantiles,
       alphas.expand_as(sorted_quantiles),
     )
 
-    transformed_density = _torch_interp_batched_fp(
+    transformed_density = interp_batched_fp(
       alpha_at_z,
       alphas,
       density_at_quantiles,
@@ -254,12 +253,12 @@ class QuantileTableDistribution1D(ConditionalMargin):
     self._check_fitted()
     effective_batch_size = self._resolve_batch_size(batch_size)
 
-    y_grid_t = y_grid.reshape(-1)
+    y_grid_t = self._prep(y_grid).reshape(-1)
 
     if y_grid_t.numel() == 0:
       raise ValueError("y_grid must contain at least one value.")
 
-    x_t = x.reshape(-1, 1) if x.ndim == 1 else x
+    x_t = self._grid_covariates(x)
 
     n_y = y_grid_t.shape[0]
     z_grid = self._transform_y(y_grid_t)
@@ -276,7 +275,7 @@ class QuantileTableDistribution1D(ConditionalMargin):
       )
 
       quantile_derivative = torch.clamp(
-        _torch_gradient_1d(sorted_quantiles, alphas),
+        gradient_1d(sorted_quantiles, alphas),
         min=self.quantile_table_config.min_qprime,
       )
       density_at_quantiles = 1.0 / quantile_derivative
@@ -287,13 +286,13 @@ class QuantileTableDistribution1D(ConditionalMargin):
       quantiles_repeated = sorted_quantiles.repeat_interleave(n_y, dim=0)
       densities_repeated = density_at_quantiles.repeat_interleave(n_y, dim=0)
 
-      alpha_at_z = _torch_interp_batched_xp(
+      alpha_at_z = interp_batched_xp(
         z_flat,
         quantiles_repeated,
         alphas.expand_as(quantiles_repeated),
       )
 
-      density = _torch_interp_batched_fp(
+      density = interp_batched_fp(
         alpha_at_z,
         alphas,
         densities_repeated,
@@ -343,7 +342,7 @@ class QuantileTableDistribution1D(ConditionalMargin):
       batch_size=batch_size,
     )
 
-    return _torch_interp_batched_xp(
+    return interp_batched_xp(
       z,
       sorted_quantiles,
       alphas.expand_as(sorted_quantiles),
@@ -361,12 +360,12 @@ class QuantileTableDistribution1D(ConditionalMargin):
     self._check_fitted()
     effective_batch_size = self._resolve_batch_size(batch_size)
 
-    y_grid_t = y_grid.reshape(-1)
+    y_grid_t = self._prep(y_grid).reshape(-1)
 
     if y_grid_t.numel() == 0:
       raise ValueError("y_grid must contain at least one value.")
 
-    x_t = x.reshape(-1, 1) if x.ndim == 1 else x
+    x_t = self._grid_covariates(x)
 
     n_y = y_grid_t.shape[0]
     z_grid = self._transform_y(y_grid_t)
@@ -386,7 +385,7 @@ class QuantileTableDistribution1D(ConditionalMargin):
 
       quantiles_repeated = sorted_quantiles.repeat_interleave(n_y, dim=0)
 
-      cdf_flat = _torch_interp_batched_xp(
+      cdf_flat = interp_batched_xp(
         z_flat,
         quantiles_repeated,
         alphas.expand_as(quantiles_repeated),
@@ -427,7 +426,7 @@ class QuantileTableDistribution1D(ConditionalMargin):
       batch_size=batch_size,
     )
 
-    transformed_quantiles = _torch_interp_batched_fp(
+    transformed_quantiles = interp_batched_fp(
       p_t,
       table_alphas,
       sorted_quantiles,

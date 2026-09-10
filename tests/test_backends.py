@@ -1,6 +1,6 @@
-"""Registry behaviour and TabPFN-free pluggable-backend tests.
+"""Registry behavior and TabPFN-free pluggable-backend tests.
 
-These prove the backend seam end-to-end without touching TabPFN: a
+These prove the backend extension point end-to-end without touching TabPFN: a
 hermetic quantile backend and a hermetic native backend (both
 ``Z ~ Uniform(-2, 2)``) are registered and driven through
 ``RosenblattBicop``.  They also lock the core speed invariant — grid
@@ -24,7 +24,7 @@ from npcc.core.errors import (
   MissingBackendDependencyError,
   UnknownBackendError,
 )
-from npcc.core.quantile_table_distribution1d import QuantileTableConfig
+from npcc.core.margin_quantile_table import QuantileTableConfig
 from npcc.core.registry import (
   available_backends,
   create_backend,
@@ -151,7 +151,7 @@ class TestHermeticBackendEndToEnd:
     )
 
     # Symmetric average of two identical Uniform(-2,2)-logit densities.
-    y = torch.tensor([0.3, 0.5, 0.7])
+    y = torch.tensor([0.3, 0.5, 0.7], dtype=torch.float64)
     out = m.pdf(torch.column_stack((y, y)))
     expected = 0.25 / (y * (1.0 - y))
     torch.testing.assert_close(out, expected, atol=1e-6, rtol=1e-6)
@@ -302,7 +302,8 @@ class TestGridPredictsOncePerRow:
     assert calls == math.ceil(n_w / backend.batch_size) == 3
 
 
-def test_native_backend_is_conditional_distribution() -> None:
+def test_native_backend_is_a_conditional_margin() -> None:
+  """The non-quantile path implements the margin contract directly."""
   from npcc.core.margin import ConditionalMargin
 
   assert issubclass(_UniformNativeBackend, ConditionalMargin)
@@ -363,8 +364,10 @@ def test_fit_controls_replace_conditional_estimators(
   register_uniform_backends: None,
 ) -> None:
   pair = RosenblattBicop(
-    backend="uniform-quantile",
-    device="cpu",
+    FitControlsRosenblattBicop(
+      backend="uniform-quantile",
+      device="cpu",
+    )
   )
   old_forward = pair.v_given_ux_
   old_reverse = pair.u_given_vx_
@@ -394,9 +397,11 @@ def test_fit_without_controls_retains_configuration(
   register_uniform_backends: None,
 ) -> None:
   pair = RosenblattBicop(
-    backend="uniform-native",
-    device="cpu",
-    batch_size=23,
+    FitControlsRosenblattBicop(
+      backend="uniform-native",
+      device="cpu",
+      batch_size=23,
+    )
   )
   forward = pair.v_given_ux_
   reverse = pair.u_given_vx_

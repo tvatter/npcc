@@ -18,12 +18,13 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from time import perf_counter
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import pandas as pd
 import torch
 
 from npcc.core.bicop import RosenblattBicop
+from npcc.core.controls import FitControlsRosenblattBicop
 from npcc.experiments import metrics, scenarios
 from npcc.experiments.config import Cell, EstimatorSpec, GridConfig, RunConfig
 from npcc.experiments.scenarios import EvalGrid
@@ -41,7 +42,7 @@ def _norm_label(norm: int | None) -> str:
   return "none" if norm is None else str(norm)
 
 
-def _data_frame(rows: list[dict]) -> pd.DataFrame:
+def _data_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
   """Build a DataFrame without pandas' optional Arrow-backed string inference."""
   with pd.option_context("future.infer_string", False):
     return pd.DataFrame(rows)
@@ -108,7 +109,12 @@ _SHARD_TABLES: tuple[str, ...] = (
   "diagnostics",
   "runtime",
 )
-_CellRows = tuple[list[dict], list[dict], list[dict], list[dict]]
+_CellRows = tuple[
+  list[dict[str, Any]],
+  list[dict[str, Any]],
+  list[dict[str, Any]],
+  list[dict[str, Any]],
+]
 
 
 def _cell_key(cell: Cell) -> str:
@@ -281,7 +287,9 @@ def _metric_rows_for_quantity(
   return [{**base, "x": float("nan"), "tau_true": float(tau), **stats}]
 
 
-def _surface_x_rows(scenario: str, tau_levels: list[float]) -> list[dict]:
+def _surface_x_rows(
+  scenario: str, tau_levels: list[float]
+) -> list[dict[str, Any]]:
   """Map target Kendall-tau levels to deterministic x slice(s)."""
   spec = scenarios.TAU_SCENARIOS[scenario]
   if not spec.conditional:
@@ -299,7 +307,7 @@ def _surface_x_rows(scenario: str, tau_levels: list[float]) -> list[dict]:
     scenarios.X_MIN, scenarios.X_MAX, 2001, dtype=torch.float64
   )
   tau_dense = spec.tau_of_x(x_dense)
-  rows: list[dict] = []
+  rows: list[dict[str, Any]] = []
   for target in tau_levels:
     roots: list[float] = []
     delta = tau_dense - target
@@ -464,7 +472,12 @@ def summarize_one_cell(
   surface_families: list[str],
   enable_tau_diagnostics: bool,
   tau_diagnostic_n: int,
-) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+) -> tuple[
+  list[dict[str, Any]],
+  list[dict[str, Any]],
+  list[dict[str, Any]],
+  list[dict[str, Any]],
+]:
   """Fit every estimator on one cell's data and return all output rows."""
   seed = _cell_seed(base_seed, cell)
 
@@ -498,10 +511,10 @@ def summarize_one_cell(
       [row["tau_true"] for row in surface_rows], dtype=torch.float64
     )
 
-  metric_rows: list[dict] = []
-  quantity_rows: list[dict] = []
-  diagnostic_rows: list[dict] = []
-  runtime_rows: list[dict] = []
+  metric_rows: list[dict[str, Any]] = []
+  quantity_rows: list[dict[str, Any]] = []
+  diagnostic_rows: list[dict[str, Any]] = []
+  runtime_rows: list[dict[str, Any]] = []
 
   for est in estimator_specs:
     t0 = perf_counter()
@@ -510,11 +523,13 @@ def summarize_one_cell(
     if torch.cuda.is_available():
       torch.cuda.reset_peak_memory_stats()
     model = RosenblattBicop(
-      backend=est.backend,
-      transform=cast(Literal["identity", "logit", "probit"], est.transform),
-      device=device,
-      projection_grid_size=projection_grid_size,
-      backend_kwargs=dict(est.backend_kwargs),
+      FitControlsRosenblattBicop(
+        backend=est.backend,
+        transform=cast("Literal['identity', 'logit', 'probit']", est.transform),
+        device=device,
+        projection_grid_size=projection_grid_size,
+        backend_kwargs=dict(est.backend_kwargs),
+      )
     )
     model.fit(torch.column_stack([u, v]), x=x)
     fit_time = perf_counter() - t0
@@ -743,10 +758,10 @@ def run_study(
     len(grid.normalize),
   )
 
-  metric_rows: list[dict] = []
-  quantity_rows: list[dict] = []
-  diagnostic_rows: list[dict] = []
-  runtime_rows: list[dict] = []
+  metric_rows: list[dict[str, Any]] = []
+  quantity_rows: list[dict[str, Any]] = []
+  diagnostic_rows: list[dict[str, Any]] = []
+  runtime_rows: list[dict[str, Any]] = []
 
   def _accumulate(rows: _CellRows) -> None:
     metric_rows.extend(rows[0])
@@ -846,7 +861,7 @@ _ESTIMATOR_AXES: tuple[str, ...] = (
 def _summary_stats(
   df: pd.DataFrame, group: list[str], value_col: str
 ) -> pd.DataFrame:
-  return df.groupby(group, as_index=False, dropna=False).agg(
+  stats = df.groupby(group, as_index=False, dropna=False).agg(
     rep_mean=(value_col, "mean"),
     rep_std=(value_col, "std"),
     rep_median=(value_col, "median"),
@@ -854,6 +869,7 @@ def _summary_stats(
     rep_p95=(value_col, lambda s: _nan_quantile(s, 0.95)),
     rep_max=(value_col, "max"),
   )
+  return cast("pd.DataFrame", stats)
 
 
 def _metric_summary(metric_df: pd.DataFrame, group: list[str]) -> pd.DataFrame:
@@ -885,7 +901,7 @@ def _summary_over_x(metric_df: pd.DataFrame) -> pd.DataFrame:
 
 def _runtime_summary(runtime_df: pd.DataFrame) -> pd.DataFrame:
   rt_group = list(_ESTIMATOR_AXES)
-  return runtime_df.groupby(rt_group, as_index=False).agg(
+  summary = runtime_df.groupby(rt_group, as_index=False).agg(
     fit_time_mean=("fit_time", "mean"),
     fit_time_std=("fit_time", "std"),
     pdf_time_mean=("pdf_time", "mean"),
@@ -895,6 +911,7 @@ def _runtime_summary(runtime_df: pd.DataFrame) -> pd.DataFrame:
     surface_time_mean=("surface_time", "mean"),
     total_estimator_time_mean=("total_estimator_time", "mean"),
   )
+  return cast("pd.DataFrame", summary)
 
 
 def _selection_summary(summary_over_x: pd.DataFrame) -> pd.DataFrame:
@@ -906,7 +923,7 @@ def _selection_summary(summary_over_x: pd.DataFrame) -> pd.DataFrame:
     na_position="last",
   ).reset_index(drop=True)
   ranked.insert(0, "rank", range(1, len(ranked) + 1))
-  return ranked
+  return cast("pd.DataFrame", ranked)
 
 
 def _tau_summary(diagnostic_df: pd.DataFrame) -> pd.DataFrame:
@@ -978,11 +995,10 @@ def _projection_summary(
   value_cols = [
     col
     for col in paired.columns
-    if col.endswith("_none")
-    or col.endswith("_projected")
-    or col.endswith("_delta")
+    if col.endswith(("_none", "_projected", "_delta"))
   ]
-  return paired.groupby(group, as_index=False, dropna=False)[value_cols].mean()
+  means = paired.groupby(group, as_index=False, dropna=False)[value_cols].mean()
+  return cast("pd.DataFrame", means)
 
 
 def aggregate_results(

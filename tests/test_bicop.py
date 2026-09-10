@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy
 import pytest
 import torch
 from pyvinecopulib.core import BicopBase, BicopLike
@@ -9,7 +10,10 @@ from pyvinecopulib.core import BicopBase, BicopLike
 from npcc.core.backends.tabpfn_criterion import TabPFNCriterionBackend
 from npcc.core.backends.tabpfn_quantile import TabPFNQuantileBackend
 from npcc.core.bicop import RosenblattBicop, _sinkhorn_project
-from npcc.core.controls import FitControlsRosenblattBicop
+from npcc.core.controls import (
+  FitControlsRosenblattBicop,
+  FitControlsRosenblattVinecop,
+)
 
 
 def random_uv(n: int = 30, *, seed: int = 0) -> torch.Tensor:
@@ -47,7 +51,7 @@ def fit_bicop(
   sinkhorn_iters: int | None = None,
 ) -> RosenblattBicop:
   del patch_uniform
-  model = RosenblattBicop(device="cpu")
+  model = RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))
   return model.fit(
     random_uv(),
     make_controls(
@@ -61,13 +65,13 @@ def fit_bicop(
 
 class TestRosenblattBicopConstruction:
   def test_implements_bicop_contract(self) -> None:
-    model = RosenblattBicop(device="cpu")
+    model = RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))
 
     assert isinstance(model, BicopBase)
     assert isinstance(model, BicopLike)
 
   def test_default_backend_is_criterion(self) -> None:
-    model = RosenblattBicop(device="cpu")
+    model = RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))
 
     assert model.backend == "tabpfn-criterion"
     assert model.transform == "logit"
@@ -78,7 +82,7 @@ class TestRosenblattBicopConstruction:
     self,
     patch_uniform: None,
   ) -> None:
-    model = RosenblattBicop(device="cpu")
+    model = RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))
     controls = make_controls(
       "quantiles",
       transform="identity",
@@ -94,7 +98,7 @@ class TestRosenblattBicopConstruction:
     assert isinstance(model.u_given_vx_, TabPFNQuantileBackend)
 
   def test_default_batch_size_on_cpu_is_400(self) -> None:
-    model = RosenblattBicop(device="cpu")
+    model = RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))
 
     assert model.batch_size == 400
     assert model.v_given_ux_.batch_size == 400
@@ -116,7 +120,7 @@ class TestRosenblattBicopValidation:
     method: str,
     uv: torch.Tensor,
   ) -> None:
-    model = RosenblattBicop(device="cpu")
+    model = RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))
 
     with pytest.raises(ValueError, match=r"shape \(n, 2\)"):
       model.fit(uv, make_controls(method))
@@ -126,9 +130,9 @@ class TestRosenblattBicopValidation:
     patch_uniform: None,
     method: str,
   ) -> None:
-    model = RosenblattBicop(device="cpu")
+    model = RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))
 
-    with pytest.raises(ValueError, match="same number"):
+    with pytest.raises(ValueError, match="one row per observation"):
       model.fit(
         random_uv(10),
         make_controls(method),
@@ -142,7 +146,7 @@ class TestRosenblattBicopValidation:
   ) -> None:
     model = fit_bicop(patch_uniform, method)
 
-    with pytest.raises(ValueError, match="same number"):
+    with pytest.raises(ValueError, match="one row per observation"):
       model.pdf(
         random_uv(10),
         x=torch.zeros((5, 2), dtype=torch.float64),
@@ -157,7 +161,7 @@ class TestRosenblattBicopValidation:
       [[0.5, 0.3], [0.0, 0.4]],
       dtype=torch.float64,
     )
-    model = RosenblattBicop(device="cpu")
+    model = RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))
 
     with pytest.raises(ValueError, match="strictly inside"):
       model.fit(uv, make_controls(method))
@@ -473,3 +477,133 @@ class TestSinkhornProjection:
     assert result.shape == (8, 8)
     assert torch.isfinite(result).all()
     assert torch.all(result >= 0.0)
+
+
+class TestPlacement:
+  """Inputs are brought onto the estimator's dtype and device.
+
+  ``PlacementMixin._prep`` infers a placement from arrays the object holds,
+  and finds none on these estimators -- so it returned its argument untouched,
+  and the half-placement written in its stead placed the copula arguments and
+  left the covariates alone. On CUDA that met a host ``x`` with a device ``u``
+  inside a ``column_stack``; on every device it let a float32 input stay
+  float32 under a float64 contract.
+  """
+
+  def test_prep_normalizes_dtype_and_device(self, patch_uniform: None) -> None:
+    model = fit_bicop(patch_uniform)
+
+    placed = model._prep(numpy.asarray([[0.3, 0.4]], dtype=numpy.float32))
+
+    assert placed.dtype is torch.float64
+    assert placed.device == model._device
+
+  @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+  def test_pdf_returns_float64_whatever_it_is_given(
+    self, patch_uniform: None, dtype: torch.dtype
+  ) -> None:
+    model = fit_bicop(patch_uniform)
+    uv = torch.tensor([[0.3, 0.4], [0.6, 0.7]], dtype=dtype)
+
+    assert model.pdf(uv).dtype is torch.float64
+
+  def test_covariates_are_placed_alongside_the_observations(
+    self, patch_uniform: None
+  ) -> None:
+    """A float32 covariate matrix must not poison the feature matrix.
+
+    `u` and `x` are concatenated, so placing only one of them is what a
+    device mismatch -- and, on one device, a silent downcast -- comes from.
+    """
+    x = torch.zeros((30, 2), dtype=torch.float64)
+    model = fit_bicop(patch_uniform, x=x)
+
+    out = model.pdf(
+      torch.tensor([[0.3, 0.4]], dtype=torch.float32),
+      x=torch.zeros((1, 2), dtype=torch.float32),
+    )
+
+    assert out.dtype is torch.float64
+
+  def test_the_inherited_plot_runs(self, patch_uniform: None) -> None:
+    """``BicopBase.plot`` manufactures a NumPy grid and places it via ``_prep``.
+
+    The one path that reaches these estimators with a foreign array type, and
+    the reason ``_prep`` returning its argument untouched was survivable
+    before: the density evaluation re-placed it. Nothing re-places the grid.
+    """
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+
+    model = fit_bicop(patch_uniform)
+    model.plot(grid_size=8)
+
+    matplotlib.pyplot.close("all")
+
+  def test_cdf_grid_accumulates_in_float64(self, patch_uniform: None) -> None:
+    """The cumulative integral used to land in a dtype-less ``torch.zeros``."""
+    model = fit_bicop(patch_uniform)
+    grid = torch.linspace(0.1, 0.9, 5, dtype=torch.float64)
+
+    assert model.cdf_grid(grid, grid, n_int=8).dtype is torch.float64
+
+
+class TestControlsContract:
+  def test_tau_accepts_a_one_dimensional_covariate_row(
+    self, patch_uniform: None
+  ) -> None:
+    """``(p,)`` is documented, and was rejected.
+
+    The reshape tested ``x_row.dim == 1``, comparing a bound method to an
+    int, so a 1-D row was never reshaped and then tripped the shape check.
+    """
+    x = torch.zeros((30, 1), dtype=torch.float64)
+    model = fit_bicop(patch_uniform, x=x)
+
+    flat = model.tau(torch.zeros(1, dtype=torch.float64), n=50)
+    column = model.tau(torch.zeros((1, 1), dtype=torch.float64), n=50)
+
+    assert flat == pytest.approx(column)
+
+  def test_an_array_in_the_controls_slot_names_the_argument_order(
+    self, patch_uniform: None
+  ) -> None:
+    """``fit(uv, x)`` binds covariates to ``controls``; say so."""
+    del patch_uniform
+    model = RosenblattBicop(FitControlsRosenblattBicop(device="cpu"))
+
+    with pytest.raises(TypeError, match="array where `controls` goes"):
+      model.fit(
+        random_uv(),
+        # A tensor where controls go, on purpose: the guard under test.
+        torch.zeros((30, 2), dtype=torch.float64),  # ty: ignore[invalid-argument-type]
+      )
+
+  def test_a_setting_that_cannot_be_honored_is_refused(self) -> None:
+    """``ControlsLike`` asks a consumer to refuse, not to drop silently."""
+
+    class ForeignControls:
+      def to_dict(self) -> dict[str, object]:
+        return {"backend": "tabpfn-criterion", "tree_criterion": "tau"}
+
+    with pytest.raises(ValueError, match="cannot honor tree_criterion"):
+      RosenblattBicop(ForeignControls())
+
+  def test_a_foreign_controls_object_carrying_only_known_settings_works(
+    self,
+  ) -> None:
+    class ForeignControls:
+      def to_dict(self) -> dict[str, object]:
+        return {"backend": "tabpfn-criterion", "device": "cpu", "eps": 1e-5}
+
+    model = RosenblattBicop(ForeignControls())
+
+    assert model.eps == pytest.approx(1e-5)
+    assert model._device == torch.device("cpu")
+
+  def test_vine_controls_are_valid_pair_controls(self) -> None:
+    model = RosenblattBicop(
+      FitControlsRosenblattVinecop(device="cpu", eps=1e-4)
+    )
+
+    assert model.eps == pytest.approx(1e-4)

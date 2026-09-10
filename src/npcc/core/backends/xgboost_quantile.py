@@ -18,9 +18,10 @@ from __future__ import annotations
 from typing import Any, Literal
 
 import torch
+from pyvinecopulib.core.extend import to_numpy
 from xgboost import XGBRegressor
 
-from npcc.core.quantile_table_distribution1d import (
+from npcc.core.margin_quantile_table import (
   QuantileTableConfig,
   QuantileTableDistribution1D,
 )
@@ -34,9 +35,12 @@ class XGBQuantileBackend(QuantileTableDistribution1D):
   transform
     Response transformation inherited from
     :class:`QuantileTableDistribution1D`.
-  config
-    Quantile-grid configuration.
-  device:
+  quantile_table_config
+    Quantile-table reconstruction configuration.
+  eps
+    Distance used when clipping values away from the boundaries of
+    ``(0, 1)`` before the logit or probit transform.
+  device
     Device used for model fitting, prediction, and returned tensors.
   batch_size
     Maximum number of conditioning rows evaluated in one prediction call.
@@ -95,8 +99,8 @@ class XGBQuantileBackend(QuantileTableDistribution1D):
     )
 
     model.fit(
-      x.detach(),
-      z.detach(),
+      to_numpy(x),
+      to_numpy(z),
     )
     self.model_ = model
 
@@ -110,7 +114,7 @@ class XGBQuantileBackend(QuantileTableDistribution1D):
 
     del alphas
 
-    predicted = self.model_.predict(x.detach())
+    predicted = self.model_.predict(to_numpy(x))
 
     quantiles = torch.as_tensor(
       predicted,

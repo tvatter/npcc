@@ -5,8 +5,10 @@ from __future__ import annotations
 import torch
 from pyvinecopulib.core import ControlsLike, VinedistBase
 
+from npcc.core._placement import TensorPlacement, resolve_device
 
-class RosenblattVinedist(VinedistBase[torch.Tensor]):
+
+class RosenblattVinedist(TensorPlacement, VinedistBase[torch.Tensor]):
   """Original-scale distribution backed by a Rosenblatt vine.
 
   The distribution is constructed from an unfitted or fitted vine copula and
@@ -14,8 +16,9 @@ class RosenblattVinedist(VinedistBase[torch.Tensor]):
   existing margins, transforms the observations to the copula scale, and then
   fits the existing vine copula along its fixed structure.
 
-  All observations, covariates, margins, and pair copulas are expected to use
-  the same torch device.
+  The fit controls name the placement, and the observations are brought onto
+  it -- so a NumPy array or a CPU tensor handed to a CUDA-configured
+  distribution is converted rather than refused.
 
   Notes
   -----
@@ -28,21 +31,62 @@ class RosenblattVinedist(VinedistBase[torch.Tensor]):
   supports_weighted_copula: bool = False
   supports_fit_covariates: bool = True
 
+  def __init__(self, vinecop: object, margins: object) -> None:
+    super().__init__(vinecop, margins)
+    # The copula names the placement, since it was constructed with it and
+    # holds the pair copulas that evaluate on it. Recording it here is what
+    # lets the inherited data-scale surface place a foreign array: the base's
+    # `_prep` infers a placement from arrays this object holds, and a vine
+    # distribution holds only its two parts.
+    self._set_placement(getattr(vinecop, "_device", None))
+
   @classmethod
   def _coerce_fit_data(
     cls,
-    y: torch.Tensor,
+    # Anything `torch.as_tensor` accepts, which is this hook's whole job: a
+    # caller may reasonably hand a NumPy array to a torch distribution.
+    y: object,
     weights: torch.Tensor | None,
     controls: ControlsLike | None,
   ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Keep fitting data in the caller-provided torch placement.
+    """Put the fit inputs on the placement the controls name.
 
-    Device and dtype conversion are intentionally omitted. The observations,
-    covariates, margins, and copula are expected to have matching placement.
+    The **controls** decide the placement and the data follow, not the other
+    way round. Every other part of the lane is built from the controls -- the
+    conditional margins through
+    :func:`~npcc.core.registry.create_backend`, the vine through its own
+    ``device`` argument -- so reading the placement off ``y`` instead would
+    leave the margins wherever the caller's data happened to be while the pair
+    copulas went to the controls' device, and the first concatenation of the
+    two would fail.
+
+    ``float64`` throughout, which is this package's working precision: an
+    integer ``y`` would otherwise give the margins an integer grid.
+
+    Parameters
+    ----------
+    y : object
+        The caller's observations, in any form ``torch.as_tensor`` accepts.
+    weights : torch.Tensor, or None
+        Observation weights. Refused one level up, since
+        :attr:`supports_weighted_copula` is ``False``; placed here anyway so
+        the hook stays correct if that changes.
+    controls : ControlsLike, or None
+        Fit configuration. Its ``device``, when it has one, is the placement.
+
+    Returns
+    -------
+    tuple of (torch.Tensor, torch.Tensor or None)
+        The observations and weights, on one device in one dtype.
     """
-    del cls, controls
+    del cls
 
-    if not isinstance(y, torch.Tensor):
-      raise TypeError("y must be a torch tensor.")
+    device = resolve_device(getattr(controls, "device", None))
+    placed = torch.as_tensor(y).to(device=device, dtype=torch.float64)
 
-    return y, weights
+    if weights is None:
+      return placed, None
+
+    return placed, torch.as_tensor(weights).to(
+      device=device, dtype=torch.float64
+    )

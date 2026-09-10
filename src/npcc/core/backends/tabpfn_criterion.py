@@ -63,7 +63,7 @@ class TabPFNCriterionBackend(ConditionalMargin):
   device
     Device used by the TabPFN model and returned tensors.
   batch_size
-    Maximum number of conditioning rows evalutated in one prediction call.
+    Maximum number of conditioning rows evaluated in one prediction call.
   model_kwargs
     Additional arguments passed to ``TabPFNRegressor``.
   model_version
@@ -307,12 +307,12 @@ class TabPFNCriterionBackend(ConditionalMargin):
     self._check_fitted()
     effective_batch_size = self._resolve_batch_size(batch_size)
 
-    y_grid_t = y_grid.reshape(-1)
+    y_grid_t = self._prep(y_grid).reshape(-1)
 
     if y_grid_t.numel() == 0:
       raise ValueError("y_grid must contain at least one value.")
 
-    x_t = x.reshape(-1, 1) if x.ndim == 1 else x
+    x_t = self._grid_covariates(x)
     transformed_grid = self._transform_y(y_grid_t)
     jacobian = self._jacobian_inverse(y_grid_t)
 
@@ -358,12 +358,12 @@ class TabPFNCriterionBackend(ConditionalMargin):
     self._check_fitted()
     effective_batch_size = self._resolve_batch_size(batch_size)
 
-    y_grid_t = y_grid.reshape(-1)
+    y_grid_t = self._prep(y_grid).reshape(-1)
 
     if y_grid_t.numel() == 0:
       raise ValueError("y_grid must contain at least one value.")
 
-    x_t = x.reshape(-1, 1) if x.ndim == 1 else x
+    x_t = self._grid_covariates(x)
     transformed_grid = self._transform_y(y_grid_t)
 
     n_grid = y_grid_t.shape[0]

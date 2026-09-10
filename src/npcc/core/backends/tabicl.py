@@ -20,9 +20,10 @@ from __future__ import annotations
 from typing import Any, Literal
 
 import torch
+from pyvinecopulib.core.extend import to_numpy
 from tabicl import TabICLRegressor
 
-from npcc.core.quantile_table_distribution1d import (
+from npcc.core.margin_quantile_table import (
   QuantileTableConfig,
   QuantileTableDistribution1D,
 )
@@ -36,9 +37,12 @@ class TabICLBackend(QuantileTableDistribution1D):
   transform
     Response transformation inherited from
     :class:`QuantileTableDistribution1D`.
-  config
-    Quantile-grid configuration.
-  device:
+  quantile_table_config
+    Quantile-table reconstruction configuration.
+  eps
+    Distance used when clipping values away from the boundaries of
+    ``(0, 1)`` before the logit or probit transform.
+  device
     Device used for model fitting, prediction, and returned tensors.
   batch_size
     Maximum number of conditioning rows evaluated in one prediction call.
@@ -78,8 +82,8 @@ class TabICLBackend(QuantileTableDistribution1D):
     self.model_ = TabICLRegressor(**self.model_kwargs)
 
     self.model_.fit(
-      x.detach().cpu().numpy(),
-      z.detach().cpu().numpy(),
+      to_numpy(x),
+      to_numpy(z),
     )
 
   def _predict_quantiles(
@@ -91,9 +95,9 @@ class TabICLBackend(QuantileTableDistribution1D):
     assert self.model_ is not None
 
     predicted = self.model_.predict(
-      x.detach().cpu().numpy(),
+      to_numpy(x),
       output_type="quantiles",
-      alphas=alphas.detach().cpu().tolist(),
+      alphas=alphas.tolist(),
     )
 
     quantiles = torch.as_tensor(

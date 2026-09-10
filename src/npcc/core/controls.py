@@ -8,7 +8,7 @@ from typing import Literal
 
 import torch
 
-from npcc.core.quantile_table_distribution1d import QuantileTableConfig
+from npcc.core.margin_quantile_table import QuantileTableConfig
 from npcc.core.registry import validate_backend_kwargs
 
 Transform = Literal["identity", "logit", "probit"]
@@ -34,10 +34,12 @@ class FitControlsRosenblattBicop:
   transform
     Transformation applied to copula-scale responses before backend fitting.
   device
-    Torch device used for fitting and evaluation. ``None`` leaves placement to
-    the input data.
+    Device used for fitting and evaluation. If omitted, CUDA is selected when
+    available and CPU otherwise; input data is placed onto the resolved device
+    rather than read for one.
   batch_size
-    Default backend inference batch size.
+    Default backend inference batch size. If omitted, 400 is used on CPU and
+    2000 on CUDA.
   backend_kwargs
     Backend-specific constructor arguments.
   sinkhorn_iters
@@ -47,19 +49,41 @@ class FitControlsRosenblattBicop:
   """
 
   backend: str = "tabpfn-criterion"
-  quantile_table_config: QuantileTableConfig = field(
+  quantile_table_config: QuantileTableConfig | None = field(
     default_factory=QuantileTableConfig
   )
   eps: float = 1e-6
   transform: Transform = "logit"
   device: str | torch.device | None = None
   batch_size: int | None = None
-  backend_kwargs: Mapping[str, object] = field(default_factory=dict)
+  backend_kwargs: Mapping[str, object] | None = field(default_factory=dict)
   sinkhorn_iters: int | None = None
   projection_grid_size: int = 101
 
   def __post_init__(self) -> None:
-    """Validate and normalize the controls."""
+    """Validate and normalize the controls.
+
+    ``None`` is accepted for the two composite settings and means "the
+    default": a caller assembling controls from a table reaches for
+    ``table.get(name)``, which is ``None`` for an entry with nothing to
+    configure, and that is not an error.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    ValueError
+        If any setting is outside its admissible range, or if
+        ``backend_kwargs`` has keys the named backend does not accept.
+    """
+    if self.quantile_table_config is None:
+      self.quantile_table_config = QuantileTableConfig()
+
+    if self.backend_kwargs is None:
+      self.backend_kwargs = {}
+
     if self.transform not in ("identity", "logit", "probit"):
       raise ValueError("transform must be 'identity', 'logit', or 'probit'.")
 
@@ -90,7 +114,7 @@ class FitControlsRosenblattBicop:
       "transform": self.transform,
       "device": self.device,
       "batch_size": self.batch_size,
-      "backend_kwargs": dict(self.backend_kwargs),
+      "backend_kwargs": dict(self.backend_kwargs or {}),
       "sinkhorn_iters": self.sinkhorn_iters,
       "projection_grid_size": self.projection_grid_size,
     }
