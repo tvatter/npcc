@@ -11,15 +11,15 @@
 
 from __future__ import annotations
 
-import numpy as np
+import torch
 
 _EPS: float = 1e-12
 
 
 def curve_metrics(
-  y_true: np.ndarray,
-  y_hat: np.ndarray,
-  x_grid: np.ndarray,
+  y_true: torch.Tensor,
+  y_hat: torch.Tensor,
+  x_grid: torch.Tensor,
   *,
   include_kl: bool = False,
 ) -> dict[str, float]:
@@ -28,51 +28,47 @@ def curve_metrics(
   KL normalises both curves to unit mass before comparing, so it is only
   meaningful for densities (pass ``include_kl=True`` for ``pdf``).
   """
-  y_true = np.asarray(y_true, dtype=np.float64)
-  y_hat = np.asarray(y_hat, dtype=np.float64)
   err = y_hat - y_true
 
-  iae = float(np.trapezoid(np.abs(err), x_grid))
-  ise = float(np.trapezoid(err**2, x_grid))
+  iae = float(torch.trapezoid(err.abs(), x_grid))
+  ise = float(torch.trapezoid(err.square(), x_grid))
 
-  kl = np.nan
+  kl = float("nan")
   if include_kl:
-    y_true_pos = np.clip(y_true, _EPS, None)
-    y_hat_pos = np.clip(y_hat, _EPS, None)
-    true_mass = float(np.trapezoid(y_true_pos, x_grid))
-    hat_mass = float(np.trapezoid(y_hat_pos, x_grid))
+    y_true_pos = y_true.clamp_min(_EPS)
+    y_hat_pos = y_hat.clamp_min(_EPS)
+    true_mass = float(torch.trapezoid(y_true_pos, x_grid))
+    hat_mass = float(torch.trapezoid(y_hat_pos, x_grid))
     p = y_true_pos / max(true_mass, _EPS)
     q = y_hat_pos / max(hat_mass, _EPS)
-    kl = float(np.trapezoid(p * np.log(p / q), x_grid))
+    kl = float(torch.trapezoid(p * torch.log(p / q), x_grid))
 
   return {"IAE": iae, "ISE": ise, "KL": kl}
 
 
 def grid_metrics(
-  y_true: np.ndarray,
-  y_hat: np.ndarray,
+  y_true: torch.Tensor,
+  y_hat: torch.Tensor,
   *,
   include_kl: bool = False,
 ) -> dict[str, float]:
   """Mean absolute / squared error (and optional KL) over a flattened grid."""
-  y_true = np.asarray(y_true, dtype=np.float64)
-  y_hat = np.asarray(y_hat, dtype=np.float64)
   err = y_hat - y_true
 
-  iae = float(np.mean(np.abs(err)))
-  ise = float(np.mean(err**2))
+  iae = float(err.abs().mean())
+  ise = float(err.square().mean())
 
-  kl = np.nan
+  kl = float("nan")
   if include_kl:
-    p = np.clip(y_true, _EPS, None)
-    q = np.clip(y_hat, _EPS, None)
-    kl = float(np.mean(p * (np.log(p) - np.log(q))))
+    p = y_true.clamp_min(_EPS)
+    q = y_hat.clamp_min(_EPS)
+    kl = float((p * (p.log() - q.log())).mean())
 
   return {"IAE": iae, "ISE": ise, "KL": kl}
 
 
 def marginal_diagnostics(
-  c: np.ndarray, u_grid: np.ndarray, v_grid: np.ndarray
+  c: torch.Tensor, u_grid: torch.Tensor, v_grid: torch.Tensor
 ) -> dict[str, float]:
   """Absolute deviation of a density grid's margins from the constraint = 1.
 
@@ -81,16 +77,15 @@ def marginal_diagnostics(
   evaluating potentially unstable copula densities at zero or one while still
   integrating over the full unit interval.
   """
-  c = np.asarray(c, dtype=np.float64)
-  if c.shape != (u_grid.size, v_grid.size):
+  if c.shape != (u_grid.numel(), v_grid.numel()):
     raise ValueError(
       "c must have shape (len(u_grid), len(v_grid)); "
-      f"got {c.shape} for ({u_grid.size}, {v_grid.size})."
+      f"got {c.shape} for ({u_grid.numel()}, {v_grid.numel()})."
     )
-  int_over_v = np.mean(c, axis=1)
-  int_over_u = np.mean(c, axis=0)
-  err_rows = np.abs(int_over_v - 1.0)
-  err_cols = np.abs(int_over_u - 1.0)
+  int_over_v = c.mean(dim=1)
+  int_over_u = c.mean(dim=0)
+  err_rows = (int_over_v - 1.0).abs()
+  err_cols = (int_over_u - 1.0).abs()
   return {
     "row_mean_abs_err": float(err_rows.mean()),
     "row_max_abs_err": float(err_rows.max()),

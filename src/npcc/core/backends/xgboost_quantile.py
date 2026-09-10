@@ -1,44 +1,51 @@
 """
-xgboost_quantile.py — XGBoost multi-quantile backend (extra).
+XGBoost multi-quantile conditional margin.
 
-XGBoost's ``reg:quantileerror`` objective with a vector ``quantile_alpha``
-fits a single multi-output model predicting all quantile levels at once,
-mapping onto
-:class:`~npcc.core.quantile_table_distribution1d.QuantileTableDistribution1D`.
+XGBoost's ``reg:quantileerror`` objective fits a single multi-output model
+predicting every probability level in ``config.alphas()``.
 
-Requires the ``xgboost`` extra (``pip install npcc[xgboost]``; XGBoost >= 2.0
-for vector-valued ``quantile_alpha``).
+PDF, CDF, inverse CDF, and grid evaluation are inherited from
+:class:`QuantileTableDistribution1D`.
 
-Reference: Chen & Guestrin, "XGBoost: A Scalable Tree Boosting System",
-KDD 2016.
+XGBoost supports torch tensors directly. Model predictions are converted
+immediately to torch tensors on the input device and with the input dtype.
+
+This backend requires XGBoost 2.0 or newer.
 """
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
-import numpy as np
 import torch
 from xgboost import XGBRegressor
 
 from npcc.core.quantile_table_distribution1d import (
-  QuantileGridConfig,
+  QuantileTableConfig,
   QuantileTableDistribution1D,
 )
 
 
 class XGBQuantileBackend(QuantileTableDistribution1D):
-  """Conditional predictive distribution via XGBoost multi-quantile regression.
+  """Conditional margin using XGBoost multi-quantile regression.
 
   Parameters
   ----------
-  transform, config, device, batch_size
-      Forwarded to :class:`QuantileTableDistribution1D`.
-  n_estimators, tree_method
-      XGBoost boosting rounds / tree method.
+  transform
+    Response transformation inherited from
+    :class:`QuantileTableDistribution1D`.
+  config
+    Quantile-grid configuration.
+  device:
+    Device used for model fitting, prediction, and returned tensors.
+  batch_size
+    Maximum number of conditioning rows evaluated in one prediction call.
+  n_estimators
+    Number of XGBoost boosting rounds.
+  tree_method
+    XGBoost tree construction algorithm.
   **xgb_kwargs
-      Extra ``XGBRegressor`` kwargs (e.g. ``max_depth``, ``learning_rate``,
-      ``device="cuda"``).
+      Additional arguments passed to ``XGBRegressor``.
   """
 
   model_: XGBRegressor | None
@@ -47,47 +54,71 @@ class XGBQuantileBackend(QuantileTableDistribution1D):
     self,
     *,
     transform: Literal["identity", "logit", "probit"] = "logit",
-    config: QuantileGridConfig | None = None,
+    quantile_table_config: QuantileTableConfig | None = None,
+    eps: float = 1e-6,
     device: str | torch.device | None = None,
     batch_size: int | None = None,
     n_estimators: int = 200,
     tree_method: str = "hist",
-    **xgb_kwargs: Any,  # noqa: ANN401 - passthrough to XGBRegressor
+    **xgb_kwargs: Any,  # noqa: ANN401 - forwarded to XGBRegressor
   ) -> None:
     super().__init__(
       transform=transform,
-      config=config,
+      quantile_table_config=quantile_table_config,
+      eps=eps,
       device=device,
       batch_size=batch_size,
     )
     self.n_estimators = n_estimators
     self.tree_method = tree_method
     self.xgb_kwargs = dict(xgb_kwargs)
+    self.xgb_kwargs.setdefault(
+      "device",
+      str(self._device),
+    )
     self.model_ = None
 
-  def _fit_model(self, w: torch.Tensor, z: torch.Tensor) -> None:
+  def _fit_model(self, x: torch.Tensor, z: torch.Tensor) -> None:
+    """Fit the multi-quantile XGBoost model."""
+    alphas = self.quantile_table_config.alphas(
+      device="cpu",
+      dtype=torch.float64,
+    )
+
     model = XGBRegressor(
       objective="reg:quantileerror",
-      quantile_alpha=np.asarray(self.config.alphas(), dtype=float),
+      quantile_alpha=alphas.tolist(),
       tree_method=self.tree_method,
       multi_strategy="multi_output_tree",
       n_estimators=self.n_estimators,
       **self.xgb_kwargs,
     )
+
     model.fit(
-      w.detach().cpu().numpy().astype(np.float32),
-      z.detach().cpu().numpy(),
+      x.detach(),
+      z.detach(),
     )
     self.model_ = model
 
   def _predict_quantiles(
-    self, w: torch.Tensor, alphas: np.ndarray
+    self,
+    x: torch.Tensor,
+    alphas: torch.Tensor,
   ) -> torch.Tensor:
+    """Predict one quantile table for a chunk of conditioning rows."""
     assert self.model_ is not None
-    q = np.asarray(
-      self.model_.predict(w.detach().cpu().numpy().astype(np.float32)),
-      dtype=float,
+
+    del alphas
+
+    predicted = self.model_.predict(x.detach())
+
+    quantiles = torch.as_tensor(
+      predicted,
+      dtype=x.dtype,
+      device=x.device,
     )
-    if q.ndim == 1:
-      q = q[:, None]
-    return torch.as_tensor(q, dtype=torch.float64, device=self._device)
+
+    if quantiles.ndim == 1:
+      quantiles = quantiles.unsqueeze(1)
+
+    return quantiles

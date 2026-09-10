@@ -11,7 +11,7 @@ uniform-margin property of the copula scale ``U``::
 
 So estimating a *conditional bivariate copula density* reduces to
 estimating a *univariate conditional density*, which is exactly what a
-:class:`~npcc.core.conditional_distribution1d.ConditionalDistribution1D`
+:class:`~npcc.core.margin.ConditionalMargin`
 backend provides.  The features fed to the inner regressor are::
 
     W = [u, x]    (when predicting V | U, X)
@@ -65,25 +65,23 @@ is what plotting always produces) automatically take the fast
 
 from __future__ import annotations
 
-from typing import Any, Literal, Self
+from collections.abc import Mapping
+from typing import Self
 
-import numpy as np
 import torch
 from pyvinecopulib.core import BicopBase
 
 from npcc.core._common import (
-  TensorLike,
-  _as_2d,
   _check_uv,
-  _normalize_inputs,
   _resolve_device,
-  _to_tensor,
   _torch_interp,
-  _wrap_output,
-  is_torch_array,
 )
-from npcc.core.conditional_distribution1d import ConditionalDistribution1D
-from npcc.core.quantile_table_distribution1d import QuantileGridConfig
+from npcc.core.controls import (
+  FitControlsRosenblattBicop,
+  Transform,
+)
+from npcc.core.margin import ConditionalMargin
+from npcc.core.quantile_table_distribution1d import QuantileTableConfig
 from npcc.core.registry import create_backend
 
 
@@ -157,7 +155,7 @@ def _sinkhorn_project(
   return r, s
 
 
-class RosenblattBicop(BicopBase[TensorLike]):
+class RosenblattBicop(BicopBase[torch.Tensor]):
   """Rosenblatt conditional bivariate copula estimator.
 
   Parameters
@@ -168,10 +166,12 @@ class RosenblattBicop(BicopBase[TensorLike]):
       TabPFN's native head; ``"tabpfn-quantiles"`` inverts TabPFN's
       quantile output; optional extras include ``"ngboost"``, ``"gbm"``,
       and ``"tabicl"``.
-  quantile_config
-      :class:`QuantileGridConfig` instance.  Its ``eps`` field controls
-      boundary clipping used by the estimator (and quantile-based
-      backends); its alpha grid configures quantile backends.
+  quantile_table_config
+      :class:`QuantileTableConfig` instance configuring quantile-table
+      reconstruction for quantile-based backends.
+  eps
+      Boundary clipping distance used throughout copula and transformed-margin
+      computations.
   transform
       Support transform used by the inner backend.  ``"logit"`` (default)
       maps copula values in ``(0, 1)`` to ``R`` before fitting;
@@ -200,54 +200,71 @@ class RosenblattBicop(BicopBase[TensorLike]):
   -----
   - The estimator fits both Rosenblatt directions and averages them to
     reduce directional bias (see the module docstring).
-  - Public methods accept either NumPy arrays or torch tensors.  A NumPy
-    ``uv`` produces NumPy output; a torch ``uv`` produces torch output on
-    ``device``.  The type of an optional ``x`` does not change that routing.
+  - Public numerical methods accept and return torch tensors. The inherited
+  plotting implementation may construct a NumPy evaluation grid, which is
+  converted to the model's device at that boundary.
   """
 
   def __init__(
     self,
     *,
     backend: str = "tabpfn-criterion",
-    quantile_config: QuantileGridConfig | None = None,
-    transform: Literal["identity", "logit", "probit"] = "logit",
+    quantile_table_config: QuantileTableConfig | None = None,
+    eps: float = 1e-6,
+    transform: Transform = "logit",
     device: str | torch.device | None = None,
     batch_size: int | None = None,
-    backend_kwargs: dict[str, Any] | None = None,
+    backend_kwargs: Mapping[str, object] | None = None,
     sinkhorn_iters: int | None = None,
     projection_grid_size: int = 101,
   ) -> None:
-    if sinkhorn_iters is not None and sinkhorn_iters <= 0:
-      raise ValueError("sinkhorn_iters must be None or a positive integer.")
+    initial_controls = FitControlsRosenblattBicop(
+      backend=backend,
+      quantile_table_config=quantile_table_config or QuantileTableConfig(),
+      eps=eps,
+      transform=transform,
+      device=device,
+      batch_size=batch_size,
+      backend_kwargs=backend_kwargs or {},
+      sinkhorn_iters=sinkhorn_iters,
+      projection_grid_size=projection_grid_size,
+    )
+    self._apply_controls(initial_controls)
 
-    self.backend = backend
-    self.quantile_config = quantile_config or QuantileGridConfig()
-    self.transform = transform
-    self._device = _resolve_device(device)
-    if batch_size is None:
+  def _apply_controls(
+    self,
+    controls: FitControlsRosenblattBicop,
+  ) -> None:
+    """Apply fit controls and create fresh conditional estimators."""
+    self.backend = controls.backend
+    self.quantile_table_config = controls.quantile_table_config
+    self.eps = controls.eps
+    self.transform = controls.transform
+    self._device = _resolve_device(controls.device)
+
+    if controls.batch_size is None:
       self.batch_size = 2000 if self._device.type == "cuda" else 400
     else:
-      if batch_size <= 0:
-        raise ValueError("batch_size must be positive.")
-      self.batch_size = batch_size
-    self.backend_kwargs = dict(backend_kwargs or {})
-    self.sinkhorn_iters = sinkhorn_iters
-    if projection_grid_size < 2:
-      raise ValueError("projection_grid_size must be at least 2.")
-    self.projection_grid_size = projection_grid_size
+      self.batch_size = controls.batch_size
 
-    self.v_given_ux_: ConditionalDistribution1D = self._make_distribution()
-    self.u_given_vx_: ConditionalDistribution1D = self._make_distribution()
+    self.backend_kwargs = dict(controls.backend_kwargs)
+    self.sinkhorn_iters = controls.sinkhorn_iters
+    self.projection_grid_size = controls.projection_grid_size
+
+    self.v_given_ux_: ConditionalMargin = self._make_distribution()
+    self.u_given_vx_: ConditionalMargin = self._make_distribution()
 
     # Grid borders (cached after fit)
     self._v_grid_borders_: torch.Tensor | None = None
     self._u_grid_borders_: torch.Tensor | None = None
 
-  def _make_distribution(self) -> ConditionalDistribution1D:
+  def _make_distribution(self) -> ConditionalMargin:
+    """Construct one conditional estimator from the active controls."""
     return create_backend(
       self.backend,
       transform=self.transform,
-      config=self.quantile_config,
+      quantile_table_config=self.quantile_table_config,
+      eps=self.eps,
       device=self._device,
       batch_size=self.batch_size,
       backend_kwargs=self.backend_kwargs,
@@ -261,7 +278,7 @@ class RosenblattBicop(BicopBase[TensorLike]):
     ``pdf_grid`` fast path evaluates the density there in a single
     forward pass per grid row.
     """
-    eps = self.quantile_config.eps
+    eps = self.eps
     borders = torch.linspace(
       eps,
       1 - eps,
@@ -297,54 +314,59 @@ class RosenblattBicop(BicopBase[TensorLike]):
     return torch.empty((n, 0), dtype=torch.float64, device=self._device)
 
   def _prepare_joint_inputs(
-    self, uv: TensorLike, x: TensorLike | None
+    self,
+    uv: torch.Tensor,
+    x: torch.Tensor | None,
   ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    uv_t = _to_tensor(uv, device=self._device)
+    """Validate paired copula observations and optional covariates."""
+    # Required because BicopBase.plot() constructs a NumPy evaluation grid.
+    # Existing same-device tensors are not copied.
+    uv_t = torch.as_tensor(uv, device=self._device)
+
     if uv_t.ndim != 2 or uv_t.shape[1] != 2:
       raise ValueError("uv must have shape (n, 2).")
-    u_t, v_t = _check_uv(
-      uv_t[:, 0], uv_t[:, 1], self.quantile_config.eps, device=self._device
-    )
-    x_t = (
-      self._default_x(u_t.shape[0])
-      if x is None
-      else _as_2d(x, device=self._device)
-    )
 
-    if x_t.shape[0] != u_t.shape[0]:
+    u_t, v_t = _check_uv(uv_t[:, 0], uv_t[:, 1], self.eps)
+
+    if x is None:
+      x_t = uv_t.new_empty((uv_t.shape[0], 0))
+    else:
+      x_t = x.reshape(-1, 1) if x.ndim == 1 else x
+
+    if x_t.ndim != 2:
+      raise ValueError("x must have shape (n,) or (n, p).")
+
+    if x_t.shape[0] != uv_t.shape[0]:
       raise ValueError("x and uv must have the same number of observations.")
 
     return u_t, v_t, x_t
 
   def _prepare_grid_inputs(
-    self, u_grid: TensorLike, v_grid: TensorLike, x_row: TensorLike | None
+    self,
+    u_grid: torch.Tensor,
+    v_grid: torch.Tensor,
+    x_row: torch.Tensor | None,
   ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    _, (u_in, v_in, x_in) = _normalize_inputs(
-      u_grid, v_grid, x_row, device=self._device
-    )
+    """Validate copula grids and an optional shared covariate row."""
+    u = u_grid.reshape(-1)
+    v = v_grid.reshape(-1)
 
-    assert u_in is not None and v_in is not None
-
-    u_t = u_in.reshape(-1)
-    v_t = v_in.reshape(-1)
-
-    if torch.any((u_t <= 0.0) | (u_t >= 1.0)) or torch.any(
-      (v_t <= 0.0) | (v_t >= 1.0)
-    ):
+    if torch.any((u <= 0.0) | (u >= 1.0)) or torch.any((v <= 0.0) | (v >= 1.0)):
       raise ValueError("u_grid and v_grid must lie strictly inside (0, 1).")
 
-    eps = self.quantile_config.eps
-    u_t = torch.clamp(u_t, eps, 1.0 - eps)
-    v_t = torch.clamp(v_t, eps, 1.0 - eps)
+    eps = self.eps
+    u = torch.clamp(u, eps, 1.0 - eps)
+    v = torch.clamp(v, eps, 1.0 - eps)
 
-    if x_in is None:
-      x_row_t = self._default_x(1)
+    if x_row is None:
+      x_row_t = u_grid.new_empty((1, 0))
     else:
-      x_row_t = _as_2d(x_in, device=self._device)
-      if x_row_t.shape[0] != 1:
-        raise ValueError("x_row must contain exactly one row.")
+      x_row_t = x_row.reshape(1, -1) if x_row.ndim == 1 else x_row
 
-    return u_t, v_t, x_row_t
+      if x_row_t.ndim != 2 or x_row_t.shape[0] != 1:
+        raise ValueError("x_row must have shape (p,) or (1, p).")
+
+    return u, v, x_row_t
 
   @staticmethod
   def _trapezoidal_weights(grid: torch.Tensor) -> torch.Tensor:
@@ -371,23 +393,37 @@ class RosenblattBicop(BicopBase[TensorLike]):
 
   def fit(
     self,
-    uv: TensorLike,
-    x: TensorLike | None = None,
+    u: torch.Tensor,
+    /,
+    controls: FitControlsRosenblattBicop | None = None,
+    *,
+    var_types: list[str] | None = None,
+    x: torch.Tensor | None = None,
   ) -> Self:
-    """Fit the inner conditional density estimators.
+    """Fit both Rosenblatt directions.
 
-    Fits both Rosenblatt directions, ``f(V | U, X)`` and
-    ``f(U | V, X)``.  ``x=None`` is shorthand for the unconditional case
-    (an empty covariate matrix).
-
-    When ``self.sinkhorn_iters`` is not ``None``, the uniform 1-D grid
-    used for the optional Sinkhorn projection is initialized and cached
-    during fit.
+    Parameters
+    ----------
+    u
+      Continuous bivariate pseudo-observations with shape ``(n, 2)``.
+    controls
+      Backend and numerical configuration. When omitted, the configuration
+      currently stored on the object is retained.
+    var_types
+      Variable types supplied by pyvinecopulib. RosenblattBicop currently models
+      continuous pairs, so no type-specific fitting is required.
+    x
+      Optional external covariates with shape ``(n, p)``.
     """
-    u_t, v_t, x_t = self._prepare_joint_inputs(uv, x)
+    del var_types
 
-    self.v_given_ux_.fit(self._features(u_t, x_t), v_t)
-    self.u_given_vx_.fit(self._features(v_t, x_t), u_t)
+    if controls is not None:
+      self._apply_controls(controls)
+
+    u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
+
+    self.v_given_ux_.fit(v_t, x=self._features(u_t, x_t))
+    self.u_given_vx_.fit(u_t, x=self._features(v_t, x_t))
 
     # Cache grid borders for Sinkhorn projection (if enabled)
     if self.sinkhorn_iters is not None:
@@ -397,12 +433,12 @@ class RosenblattBicop(BicopBase[TensorLike]):
 
   def pdf(
     self,
-    u: TensorLike,
-    x: TensorLike | None = None,
+    u: torch.Tensor,
     *,
+    x: torch.Tensor | None = None,
     batch_size: int | None = None,
     sinkhorn_iters: int | None = None,
-  ) -> TensorLike:
+  ) -> torch.Tensor:
     """Return the conditional copula density ``c(u_i, v_i | x_i)``.
 
     ``batch_size`` overrides the model-level default chunk size for this
@@ -410,20 +446,18 @@ class RosenblattBicop(BicopBase[TensorLike]):
     iteration count; ``None`` means "use ``self.sinkhorn_iters``".  If the
     effective value is ``None``, no projection is applied.
     """
-    return_as_torch = is_torch_array(u)
     with torch.inference_mode():
-      out = self._pdf_torch(
+      return self._pdf_torch(
         u,
         x,
         batch_size=self._resolve_batch_size(batch_size),
         sinkhorn_iters=self._resolve_sinkhorn_iters(sinkhorn_iters),
       )
-    return _wrap_output(out, return_as_torch=return_as_torch)
 
   def _pdf_torch(
     self,
-    uv: TensorLike,
-    x: TensorLike | None,
+    uv: torch.Tensor,
+    x: torch.Tensor | None,
     *,
     batch_size: int,
     sinkhorn_iters: int | None,
@@ -515,13 +549,12 @@ class RosenblattBicop(BicopBase[TensorLike]):
     batch_size: int,
   ) -> torch.Tensor:
     c_v_given_u = self.v_given_ux_.pdf(
-      self._features(u, x), v, batch_size=batch_size
+      v, x=self._features(u, x), batch_size=batch_size
     )
     c_u_given_v = self.u_given_vx_.pdf(
-      self._features(v, x), u, batch_size=batch_size
+      u, x=self._features(v, x), batch_size=batch_size
     )
-    assert isinstance(c_v_given_u, torch.Tensor)
-    assert isinstance(c_u_given_v, torch.Tensor)
+
     return 0.5 * (c_v_given_u + c_u_given_v)
 
   def _raw_pdf_grid_torch(
@@ -569,9 +602,8 @@ class RosenblattBicop(BicopBase[TensorLike]):
     first_vu = u_grid.repeat_interleave(n_x)
     x_vu = x_unique.repeat(n_u, 1)
     grid_vu = self.v_given_ux_.pdf_grid(
-      self._features(first_vu, x_vu), v_grid, batch_size=batch_size
+      v_grid, x=self._features(first_vu, x_vu), batch_size=batch_size
     )
-    assert isinstance(grid_vu, torch.Tensor)
     grid_vu = grid_vu.reshape(n_u, n_x, n_v)
 
     # U|V: conditioning rows (v_j, x_k) -> [v, x, u]; permute to [u, x, v]
@@ -579,45 +611,42 @@ class RosenblattBicop(BicopBase[TensorLike]):
     first_uv = v_grid.repeat_interleave(n_x)
     x_uv = x_unique.repeat(n_v, 1)
     grid_uv = self.u_given_vx_.pdf_grid(
-      self._features(first_uv, x_uv), u_grid, batch_size=batch_size
+      u_grid, x=self._features(first_uv, x_uv), batch_size=batch_size
     )
-    assert isinstance(grid_uv, torch.Tensor)
     grid_uv = grid_uv.reshape(n_v, n_x, n_u).permute(2, 1, 0)
 
     return 0.5 * (grid_vu + grid_uv)
 
   def log_pdf(
     self,
-    uv: TensorLike,
-    x: TensorLike | None = None,
+    uv: torch.Tensor,
     *,
+    x: torch.Tensor | None = None,
     batch_size: int | None = None,
     sinkhorn_iters: int | None = None,
-  ) -> TensorLike:
+  ) -> torch.Tensor:
     """Log of the optionally projected :py:meth:`pdf`, floored at tiny.
 
     ``batch_size`` and ``sinkhorn_iters`` match :py:meth:`pdf`.
     """
-    return_as_torch = is_torch_array(uv)
     with torch.inference_mode():
-      c = self._pdf_torch(
+      density = self._pdf_torch(
         uv,
         x,
         batch_size=self._resolve_batch_size(batch_size),
         sinkhorn_iters=self._resolve_sinkhorn_iters(sinkhorn_iters),
       )
-    out = torch.log(torch.clamp(c, min=torch.finfo(c.dtype).tiny))
-    return _wrap_output(out, return_as_torch=return_as_torch)
+    return torch.log(torch.clamp(density, min=torch.finfo(density.dtype).tiny))
 
   def pdf_grid(
     self,
-    u_grid: TensorLike,
-    v_grid: TensorLike,
-    x_row: TensorLike | None = None,
+    u_grid: torch.Tensor,
+    v_grid: torch.Tensor,
     *,
+    x_row: torch.Tensor | None = None,
     batch_size: int | None = None,
     sinkhorn_iters: int | None = None,
-  ) -> TensorLike:
+  ) -> torch.Tensor:
     """Density on the Cartesian product ``out[i, j] = c(u_grid[i], v_grid[j] | x)``.
 
     Available for every backend (each backend's ``pdf_grid`` predicts once
@@ -628,24 +657,20 @@ class RosenblattBicop(BicopBase[TensorLike]):
 
     ``batch_size`` and ``sinkhorn_iters`` match :py:meth:`pdf`.
     """
-    return_as_torch, _ = _normalize_inputs(
-      u_grid, v_grid, x_row, device=self._device
-    )
     with torch.inference_mode():
-      out = self._pdf_grid_torch(
+      return self._pdf_grid_torch(
         u_grid,
         v_grid,
         x_row,
         batch_size=self._resolve_batch_size(batch_size),
         sinkhorn_iters=self._resolve_sinkhorn_iters(sinkhorn_iters),
       )
-    return _wrap_output(out, return_as_torch=return_as_torch)
 
   def _pdf_grid_torch(
     self,
-    u_grid: TensorLike,
-    v_grid: TensorLike,
-    x_row: TensorLike | None,
+    u_grid: torch.Tensor,
+    v_grid: torch.Tensor,
+    x_row: torch.Tensor | None,
     *,
     batch_size: int,
     sinkhorn_iters: int | None,
@@ -683,9 +708,10 @@ class RosenblattBicop(BicopBase[TensorLike]):
 
   def hfunc1(
     self,
-    u: TensorLike,
-    x: TensorLike | None = None,
-  ) -> TensorLike:
+    u: torch.Tensor,
+    *,
+    x: torch.Tensor | None = None,
+  ) -> torch.Tensor:
     """``h_1(u, v | x) = P(V <= v | U = u, X = x) = F_{V | U, X}(v | u, x)``.
 
     Always available (the V|U regressor is always fitted).  This is a
@@ -695,23 +721,22 @@ class RosenblattBicop(BicopBase[TensorLike]):
     Convention matches :py:meth:`pyvinecopulib.Bicop.hfunc1`: ``hfunc1``
     conditions on the first argument.
     """
-    return_as_torch = is_torch_array(u)
     u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
 
-    out = self.v_given_ux_.cdf(self._features(u_t, x_t), v_t)
-    assert isinstance(out, torch.Tensor)
-    out = torch.clamp(
+    out = self.v_given_ux_.cdf(v_t, x=self._features(u_t, x_t))
+
+    return torch.clamp(
       out,
-      self.quantile_config.eps,
-      1.0 - self.quantile_config.eps,
+      self.eps,
+      1.0 - self.eps,
     )
-    return _wrap_output(out, return_as_torch=return_as_torch)
 
   def hfunc2(
     self,
-    u: TensorLike,
-    x: TensorLike | None = None,
-  ) -> TensorLike:
+    u: torch.Tensor,
+    *,
+    x: torch.Tensor | None = None,
+  ) -> torch.Tensor:
     """``h_2(u, v | x) = P(U <= u | V = v, X = x) = F_{U | V, X}(u | v, x)``.
 
     A direct read of the U|V regressor's conditional CDF.
@@ -719,41 +744,34 @@ class RosenblattBicop(BicopBase[TensorLike]):
     Convention matches :py:meth:`pyvinecopulib.Bicop.hfunc2`: ``hfunc2``
     conditions on the second argument.
     """
-    return_as_torch = is_torch_array(u)
     u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
 
-    out = self.u_given_vx_.cdf(self._features(v_t, x_t), u_t)
-    assert isinstance(out, torch.Tensor)
-    out = torch.clamp(
+    out = self.u_given_vx_.cdf(u_t, x=self._features(v_t, x_t))
+
+    return torch.clamp(
       out,
-      self.quantile_config.eps,
-      1.0 - self.quantile_config.eps,
+      self.eps,
+      1.0 - self.eps,
     )
-    return _wrap_output(out, return_as_torch=return_as_torch)
 
   def hinv1(
     self,
-    u: TensorLike,
-    x: TensorLike | None = None,
-  ) -> TensorLike:
+    u: torch.Tensor,
+    *,
+    x: torch.Tensor | None = None,
+  ) -> torch.Tensor:
     """Invert :meth:`hfunc1` using the V|U backend's native quantiles."""
-    return_as_torch = is_torch_array(u)
     u_t, alpha_t, x_t = self._prepare_joint_inputs(u, x)
-    out = self.v_given_ux_.icdf(self._features(u_t, x_t), alpha_t)
-    assert isinstance(out, torch.Tensor)
-    return _wrap_output(out, return_as_torch=return_as_torch)
+    return self.v_given_ux_.icdf(alpha_t, x=self._features(u_t, x_t))
 
   def hinv2(
     self,
-    u: TensorLike,
-    x: TensorLike | None = None,
-  ) -> TensorLike:
+    u: torch.Tensor,
+    x: torch.Tensor | None = None,
+  ) -> torch.Tensor:
     """Invert :meth:`hfunc2` using the U|V backend's native quantiles."""
-    return_as_torch = is_torch_array(u)
     alpha_t, v_t, x_t = self._prepare_joint_inputs(u, x)
-    out = self.u_given_vx_.icdf(self._features(v_t, x_t), alpha_t)
-    assert isinstance(out, torch.Tensor)
-    return _wrap_output(out, return_as_torch=return_as_torch)
+    return self.u_given_vx_.icdf(alpha_t, x=self._features(v_t, x_t))
 
   def _sample_uniform(
     self,
@@ -786,12 +804,12 @@ class RosenblattBicop(BicopBase[TensorLike]):
 
   def cdf(
     self,
-    u: TensorLike,
-    x: TensorLike | None = None,
+    u: torch.Tensor,
     *,
+    x: torch.Tensor | None = None,
     n_int: int = 12,
     batch_size: int | None = None,
-  ) -> TensorLike:
+  ) -> torch.Tensor:
     """Joint CDF ``C(u_i, v_i | x_i)`` evaluated row-by-row.
 
     Trapezoidal integration of the inner conditional CDF, averaged over
@@ -809,9 +827,8 @@ class RosenblattBicop(BicopBase[TensorLike]):
     """
     if n_int < 2:
       raise ValueError("n_int must be at least 2.")
-    effective_batch_size = self._resolve_batch_size(batch_size)
 
-    return_as_torch = is_torch_array(u)
+    effective_batch_size = self._resolve_batch_size(batch_size)
     u_t, v_t, x_t = self._prepare_joint_inputs(u, x)
 
     cdf_v_dir = self._integrate_one_direction(
@@ -830,9 +847,7 @@ class RosenblattBicop(BicopBase[TensorLike]):
       n_int=n_int,
       batch_size=effective_batch_size,
     )
-    return _wrap_output(
-      0.5 * (cdf_v_dir + cdf_u_dir), return_as_torch=return_as_torch
-    )
+    return 0.5 * (cdf_v_dir + cdf_u_dir)
 
   def _integrate_one_direction(
     self,
@@ -840,12 +855,12 @@ class RosenblattBicop(BicopBase[TensorLike]):
     upper: torch.Tensor,
     conditioned: torch.Tensor,
     x: torch.Tensor,
-    module: ConditionalDistribution1D,
+    module: ConditionalMargin,
     n_int: int,
     batch_size: int,
   ) -> torch.Tensor:
     """Compute int_eps^{upper_i} F(conditioned_i | s, x_i) ds for each row."""
-    eps = self.quantile_config.eps
+    eps = self.eps
     n = upper.shape[0]
     upper_safe = torch.clamp(upper, min=eps + 1e-12)
 
@@ -857,24 +872,23 @@ class RosenblattBicop(BicopBase[TensorLike]):
     cond_flat = conditioned.repeat_interleave(n_int + 1)
     x_flat = x.repeat_interleave(n_int + 1, dim=0)
 
-    feats = self._features(s_flat, x_flat)
-    F_flat = module.cdf(feats, cond_flat, batch_size=batch_size)
-    assert isinstance(F_flat, torch.Tensor)
-    F_grid = F_flat.reshape(n, n_int + 1)
+    features = self._features(s_flat, x_flat)
+    cdf_flat = module.cdf(cond_flat, x=features, batch_size=batch_size)
+    cdf_grid = cdf_flat.reshape(n, n_int + 1)
 
     # Per-row trapezoidal integral over the s axis.
     ds = torch.diff(s_grids, dim=1)
-    avgs = 0.5 * (F_grid[:, :-1] + F_grid[:, 1:])
+    avgs = 0.5 * (cdf_grid[:, :-1] + cdf_grid[:, 1:])
     return torch.sum(avgs * ds, dim=1)
 
   def cdf_grid(
     self,
-    u_grid: TensorLike,
-    v_grid: TensorLike,
-    x_row: TensorLike | None = None,
+    u_grid: torch.Tensor,
+    v_grid: torch.Tensor,
+    x_row: torch.Tensor | None = None,
     *,
     n_int: int = 64,
-  ) -> TensorLike:
+  ) -> torch.Tensor:
     """Cartesian-grid joint CDF ``out[i, j] = C(u_grid[i], v_grid[j] | x_row)``.
 
     Available for every backend (uses the inner ``cdf_grid`` fast path).
@@ -887,9 +901,6 @@ class RosenblattBicop(BicopBase[TensorLike]):
     if n_int < 2:
       raise ValueError("n_int must be at least 2.")
 
-    return_as_torch, _ = _normalize_inputs(
-      u_grid, v_grid, x_row, device=self._device
-    )
     u_t, v_t, x_row_t = self._prepare_grid_inputs(u_grid, v_grid, x_row)
 
     cdf_v_dir = self._integrate_grid_one_direction(
@@ -906,9 +917,7 @@ class RosenblattBicop(BicopBase[TensorLike]):
       module=self.u_given_vx_,
       n_int=n_int,
     )
-    return _wrap_output(
-      0.5 * (cdf_v_dir + cdf_u_dir.T), return_as_torch=return_as_torch
-    )
+    return 0.5 * (cdf_v_dir + cdf_u_dir.T)
 
   def _integrate_grid_one_direction(
     self,
@@ -916,14 +925,14 @@ class RosenblattBicop(BicopBase[TensorLike]):
     upper_grid: torch.Tensor,
     conditioned_grid: torch.Tensor,
     x_row: torch.Tensor,
-    module: ConditionalDistribution1D,
+    module: ConditionalMargin,
     n_int: int,
   ) -> torch.Tensor:
     """Compute int_0^{upper_grid[i]} F(conditioned_grid[j] | s, x_row) ds.
 
     Returns shape ``(len(upper_grid), len(conditioned_grid))``.
     """
-    eps = self.quantile_config.eps
+    eps = self.eps
     n_u, n_v = upper_grid.shape[0], conditioned_grid.shape[0]
 
     # Shared fine s-grid covering [eps, max(upper_grid)].
@@ -933,13 +942,12 @@ class RosenblattBicop(BicopBase[TensorLike]):
     )
 
     x_for_s = x_row.repeat_interleave(s_fine.shape[0], dim=0)
-    feats = self._features(s_fine, x_for_s)
-    F_table = module.cdf_grid(feats, conditioned_grid)
-    assert isinstance(F_table, torch.Tensor)
+    features = self._features(s_fine, x_for_s)
+    cdf_table = module.cdf_grid(conditioned_grid, x=features)
 
     # Cumulative trapezoid along axis=0.
     ds = torch.diff(s_fine)
-    avgs = 0.5 * (F_table[:-1] + F_table[1:])
+    avgs = 0.5 * (cdf_table[:-1] + cdf_table[1:])
     cum = torch.zeros((s_fine.shape[0], n_v), device=self._device)
     cum[1:] = torch.cumsum(avgs * ds.unsqueeze(1), dim=0)
 
@@ -966,7 +974,7 @@ class RosenblattBicop(BicopBase[TensorLike]):
 
   def tau(
     self,
-    x_row: TensorLike | None = None,
+    x_row: torch.Tensor | None = None,
     *,
     n: int = 1000,
     seeds: list[int] | None = None,
@@ -994,143 +1002,33 @@ class RosenblattBicop(BicopBase[TensorLike]):
 
     from pyvinecopulib.utils import ghalton, wdm
 
-    quasi = np.asarray(ghalton(n, 2, seeds_list), dtype=float)
-    eps = self.quantile_config.eps
-    u_np = np.clip(quasi[:, 0], eps, 1.0 - eps)
-    alpha_np = np.clip(quasi[:, 1], eps, 1.0 - eps)
-    u_t = torch.as_tensor(u_np, dtype=torch.float64, device=self._device)
-    alpha_t = torch.as_tensor(
-      alpha_np, dtype=torch.float64, device=self._device
+    quasi = torch.as_tensor(
+      ghalton(n, 2, seeds_list),
+      dtype=torch.float64,
+      device=self._device,
     )
+
+    eps = self.eps
+    u_t = torch.clamp(quasi[:, 0], eps, 1.0 - eps)
+    alpha_t = torch.clamp(quasi[:, 1], eps, 1.0 - eps)
 
     if x_row is None:
       x_t = self._default_x(n)
     else:
-      x_row_t = _as_2d(x_row, device=self._device)
-      if x_row_t.shape[0] != 1:
-        raise ValueError("x_row must contain exactly one row.")
+      x_row_t = x_row.reshape(1, -1) if x_row.dim == 1 else x_row
+
+      if x_row_t.ndim != 2 or x_row_t.shape[0] != 1:
+        raise ValueError("x_row must have shape (p,) or (1, p).")
+
       x_t = x_row_t.repeat_interleave(n, dim=0)
 
     # Inverse Rosenblatt: v = F_{V | U, X}^{-1}(alpha | u, x).
-    v_t = self.v_given_ux_.icdf(self._features(u_t, x_t), alpha_t)
-    assert isinstance(v_t, torch.Tensor)
+    v_t = self.v_given_ux_.icdf(alpha_t, x=self._features(u_t, x_t))
 
-    return float(wdm(u_np, v_t.detach().cpu().numpy(), "tau"))
-
-  # -------------------------------------------------------------------
-  # pyvinecopulib-compatible plotting interface.
-  # -------------------------------------------------------------------
-
-  def as_bicop(self, x_row: TensorLike | None = None) -> _BicopAdapter:
-    """Return a duck-typed bivariate-copula adapter bound to ``x_row``.
-
-    The returned object exposes ``var_types = ["c", "c"]`` and a
-    ``pdf(uv)`` method matching the interface that pyvinecopulib plotting
-    and CDF utilities expect from a bivariate copula.  Pass it directly to
-    ``pyvinecopulib._python_helpers.bicop.bicop_plot``.
-
-    Parameters
-    ----------
-    x_row
-        Single covariate row (shape ``(1, p)``) reused on every queried
-        ``(u, v)`` pair.  ``None`` keeps the empty-covariate default used
-        when fitting without external covariates.
-    """
-    return _BicopAdapter(self, x_row=x_row)
-
-  def plot(
-    self,
-    plot_type: str = "contour",
-    margin_type: str = "norm",
-    xylim: tuple[float, float] | None = None,
-    grid_size: int | None = None,
-    *,
-    x_row: TensorLike | None = None,
-  ) -> None:
-    """Render a copula contour or surface plot of the fitted density.
-
-    Lazily imports ``pyvinecopulib._python_helpers.bicop.bicop_plot``
-    (which itself pulls in ``matplotlib``) so the rest of npcc can run in
-    a headless / matplotlib-free environment.
-
-    Parameters
-    ----------
-    x_row
-        Single covariate row to condition on.  ``None`` uses the
-        empty-covariate default — appropriate when the model was fit without
-        external covariates.
-    plot_type
-        ``"contour"`` (default) or ``"surface"``.
-    margin_type
-        ``"unif"``, ``"norm"`` (default), or ``"exp"``.  Selects which
-        margin transform pyvinecopulib uses for the axes.
-    grid_size, xylim
-        Forwarded to pyvinecopulib's ``bicop_plot``.
-    """
-    from pyvinecopulib._python_helpers.bicop import bicop_plot
-
-    bicop_plot(
-      self.as_bicop(x_row=x_row),
-      plot_type=plot_type,
-      margin_type=margin_type,
-      xylim=xylim,
-      grid_size=grid_size,
+    return float(
+      wdm(
+        u_t.detach().cpu().numpy(),
+        v_t.detach().cpu().numpy(),
+        "tau",
+      )
     )
-
-
-class _BicopAdapter:
-  """pyvinecopulib-compatible adapter around a fitted :class:`RosenblattBicop`.
-
-  pyvinecopulib's plotting helpers call ``cop.pdf(uv)`` on a flattened
-  Cartesian grid and inspect ``cop.var_types``.  This class exposes those,
-  while delegating density evaluation to the wrapped
-  :class:`RosenblattBicop`.  An optional bound covariate row ``x_row`` is
-  reused across all queried points, which is what makes a fixed
-  conditional copula plottable as if it were unconditional.
-
-  When the queried ``(u, v)`` pairs span a Cartesian product
-  (``len(unique_u) * len(unique_v) == len(uv)``), :py:meth:`pdf` takes the
-  faster :py:meth:`RosenblattBicop.pdf_grid` path under the hood — this is
-  always the case for the regular grids built by pyvinecopulib's plotter.
-
-  The adapter is the pyvinecopulib boundary, so its ``pdf`` always returns
-  a NumPy array regardless of input type.
-  """
-
-  var_types: list[str] = ["c", "c"]
-
-  def __init__(
-    self, model: RosenblattBicop, x_row: TensorLike | None = None
-  ) -> None:
-    self._model = model
-    if x_row is None:
-      self._x_row: torch.Tensor | None = None
-    else:
-      x_row_t = _as_2d(x_row, device=model._device)
-      if x_row_t.shape[0] != 1:
-        raise ValueError("x_row must contain exactly one row.")
-      self._x_row = x_row_t
-
-  def pdf(self, uv: TensorLike) -> np.ndarray:
-    """Evaluate ``c(u_i, v_i | x_row)`` for each row of ``uv``.
-
-    ``uv`` must have shape ``(n, 2)``.  When ``uv`` happens to span a
-    Cartesian product (the typical plotting case), the call is rerouted
-    through :py:meth:`RosenblattBicop.pdf_grid` for speed.
-    """
-    uv_t = _to_tensor(uv, device=self._model._device)
-    if uv_t.ndim != 2 or uv_t.shape[1] != 2:
-      raise ValueError("uv must have shape (n, 2).")
-    n = uv_t.shape[0]
-
-    unique_u, inv_u = torch.unique(uv_t[:, 0], return_inverse=True)
-    unique_v, inv_v = torch.unique(uv_t[:, 1], return_inverse=True)
-    if unique_u.shape[0] * unique_v.shape[0] == n:
-      grid = self._model.pdf_grid(unique_u, unique_v, x_row=self._x_row)
-      assert isinstance(grid, torch.Tensor)
-      return grid[inv_u, inv_v].detach().cpu().numpy()
-
-    x = None if self._x_row is None else self._x_row.repeat_interleave(n, dim=0)
-    out = self._model.pdf(uv_t, x)
-    assert isinstance(out, torch.Tensor)
-    return out.detach().cpu().numpy()

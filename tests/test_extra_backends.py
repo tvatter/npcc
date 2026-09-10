@@ -11,40 +11,37 @@ from __future__ import annotations
 
 import os
 
-import numpy as np
 import pytest
+import torch
 
 from npcc.core.bicop import RosenblattBicop
-from npcc.core.quantile_table_distribution1d import QuantileGridConfig
+from npcc.core.quantile_table_distribution1d import QuantileTableConfig
 
 
 def _gaussian_copula_sample(
   n: int, rho: float, seed: int
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[torch.Tensor, torch.Tensor]:
   """Draw ``n`` (u, v) pairs from a Gaussian copula with correlation rho."""
-  scipy_stats = pytest.importorskip("scipy.stats")
-  rng = np.random.default_rng(seed)
-  z = rng.multivariate_normal(
-    mean=[0.0, 0.0], cov=[[1.0, rho], [rho, 1.0]], size=n
-  )
-  u = scipy_stats.norm.cdf(z[:, 0])
-  v = scipy_stats.norm.cdf(z[:, 1])
-  return np.clip(u, 1e-3, 1 - 1e-3), np.clip(v, 1e-3, 1 - 1e-3)
+  generator = torch.Generator().manual_seed(seed)
+  z1 = torch.randn(n, generator=generator)
+  z2 = rho * z1 + (1.0 - rho**2) ** 0.5 * torch.randn(n, generator=generator)
+  standard_normal = torch.distributions.Normal(0.0, 1.0)
+  u = standard_normal.cdf(z1)
+  v = standard_normal.cdf(z2)
+  return u.clamp(1e-3, 1 - 1e-3), v.clamp(1e-3, 1 - 1e-3)
 
 
 def _check_fitted_model(m: RosenblattBicop) -> None:
-  pts = np.array([0.3, 0.5, 0.7])
-  pdf = np.asarray(m.pdf(np.column_stack([pts, pts])))
-  assert np.all(np.isfinite(pdf)) and np.all(pdf >= 0.0)
+  pts = torch.tensor([0.3, 0.5, 0.7])
+  pdf = m.pdf(torch.column_stack([pts, pts]))
+  assert torch.all(torch.isfinite(pdf)) and torch.all(pdf >= 0.0)
 
-  h = np.asarray(m.hfunc1(np.column_stack([pts, pts])))
-  assert np.all((h >= 0.0) & (h <= 1.0))
+  h = m.hfunc1(torch.column_stack([pts, pts]))
+  assert torch.all((h >= 0.0) & (h <= 1.0))
 
-  grid = np.asarray(
-    m.pdf_grid(np.linspace(0.2, 0.8, 4), np.linspace(0.2, 0.8, 5))
-  )
+  grid = m.pdf_grid(torch.linspace(0.2, 0.8, 4), torch.linspace(0.2, 0.8, 5))
   assert grid.shape == (4, 5)
-  assert np.all(grid >= 0.0)
+  assert torch.all(grid >= 0.0)
 
   tau = m.tau(n=200)
   assert isinstance(tau, float)
@@ -56,9 +53,9 @@ def test_gbm_backend_smoke() -> None:
   u, v = _gaussian_copula_sample(80, rho=0.6, seed=0)
   m = RosenblattBicop(
     backend="gbm",
-    quantile_config=QuantileGridConfig(n_quantiles=11),
+    quantile_table_config=QuantileTableConfig(n_quantiles=11),
     backend_kwargs={"n_estimators": 20, "max_depth": 2},
-  ).fit(np.column_stack([u, v]))
+  ).fit(torch.column_stack([u, v]))
   _check_fitted_model(m)
 
 
@@ -68,7 +65,7 @@ def test_ngboost_backend_smoke() -> None:
   m = RosenblattBicop(
     backend="ngboost",
     backend_kwargs={"n_estimators": 40},
-  ).fit(np.column_stack([u, v]))
+  ).fit(torch.column_stack([u, v]))
   _check_fitted_model(m)
 
 
@@ -78,8 +75,8 @@ def test_catboost_backend_smoke() -> None:
   m = RosenblattBicop(
     backend="catboost",
     backend_kwargs={"iterations": 100},
-    quantile_config=QuantileGridConfig(n_quantiles=21),
-  ).fit(np.column_stack([u, v]))
+    quantile_table_config=QuantileTableConfig(n_quantiles=21),
+  ).fit(torch.column_stack([u, v]))
   _check_fitted_model(m)
 
 
@@ -89,8 +86,8 @@ def test_pytabkit_realmlp_backend_smoke() -> None:
   m = RosenblattBicop(
     backend="pytabkit-realmlp",
     backend_kwargs={"n_epochs": 8},
-    quantile_config=QuantileGridConfig(n_quantiles=21),
-  ).fit(np.column_stack([u, v]))
+    quantile_table_config=QuantileTableConfig(n_quantiles=21),
+  ).fit(torch.column_stack([u, v]))
   _check_fitted_model(m)
 
 
@@ -100,8 +97,8 @@ def test_nori_backend_smoke() -> None:
   try:
     m = RosenblattBicop(
       backend="nori",
-      quantile_config=QuantileGridConfig(n_quantiles=41),
-    ).fit(np.column_stack([u, v]))
+      quantile_table_config=QuantileTableConfig(n_quantiles=41),
+    ).fit(torch.column_stack([u, v]))
   except Exception as exc:  # noqa: BLE001 - weight download / runtime issues
     pytest.skip(f"Nori unavailable at runtime: {exc}")
   _check_fitted_model(m)
@@ -122,11 +119,11 @@ def test_tabpfn_finetune_backend_smoke() -> None:
     m = RosenblattBicop(
       backend="tabpfn-finetune",
       backend_kwargs={"epochs": 1, "early_stopping": False},
-    ).fit(np.column_stack([u, v]))
-    pdf = np.asarray(m.pdf(np.array([[0.5, 0.5]])))
+    ).fit(torch.column_stack([u, v]))
+    pdf = m.pdf(torch.tensor([[0.5, 0.5]]))
   except Exception as exc:  # noqa: BLE001 - license/download/runtime issues
     pytest.skip(f"TabPFN fine-tune unavailable at runtime: {exc}")
-  assert np.all(np.isfinite(pdf)) and np.all(pdf >= 0.0)
+  assert torch.all(torch.isfinite(pdf)) and torch.all(pdf >= 0.0)
 
 
 def test_tabicl_backend_smoke() -> None:
@@ -136,8 +133,8 @@ def test_tabicl_backend_smoke() -> None:
     m = RosenblattBicop(
       backend="tabicl",
       backend_kwargs={"model_kwargs": {"n_estimators": 1}},
-    ).fit(np.column_stack([u, v]))
-    pdf = np.asarray(m.pdf(np.array([[0.3, 0.4], [0.5, 0.6]])))
+    ).fit(torch.column_stack([u, v]))
+    pdf = m.pdf(torch.tensor([[0.3, 0.4], [0.5, 0.6]]))
   except Exception as exc:  # noqa: BLE001 - weight download / runtime issues
     pytest.skip(f"TabICL unavailable at runtime: {exc}")
-  assert np.all(np.isfinite(pdf)) and np.all(pdf >= 0.0)
+  assert torch.all(torch.isfinite(pdf)) and torch.all(pdf >= 0.0)

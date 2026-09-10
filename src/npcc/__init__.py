@@ -1,7 +1,9 @@
 from npcc.core.backends.tabpfn_criterion import TabPFNCriterionBackend
 from npcc.core.backends.tabpfn_quantile import TabPFNQuantileBackend
 from npcc.core.bicop import RosenblattBicop
-from npcc.core.conditional_distribution1d import ConditionalDistribution1D
+from npcc.core.margin import ConditionalMargin
+from npcc.core.vinecop import RosenblattVinecop
+from npcc.core.vinedist import RosenblattVinedist
 from npcc.core.errors import (
   BackendError,
   EstimatorConfigError,
@@ -11,7 +13,7 @@ from npcc.core.errors import (
   UnknownBackendError,
 )
 from npcc.core.quantile_table_distribution1d import (
-  QuantileGridConfig,
+  QuantileTableConfig,
   QuantileTableDistribution1D,
 )
 from npcc.core.registry import (
@@ -26,14 +28,16 @@ from npcc.core.registry import (
 __all__ = [
   "BackendError",
   "BackendSpec",
-  "ConditionalDistribution1D",
+  "ConditionalMargin",
   "EstimatorConfigError",
   "InvalidBackendKwargsError",
   "MissingBackendDependencyError",
   "NpccError",
-  "QuantileGridConfig",
+  "QuantileTableConfig",
   "QuantileTableDistribution1D",
   "RosenblattBicop",
+  "RosenblattVinecop",
+  "RosenblattVinedist",
   "TabPFNCriterionBackend",
   "TabPFNQuantileBackend",
   "UnknownBackendError",

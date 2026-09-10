@@ -80,7 +80,7 @@ class FinetunedTabPFNCriterionBackend(TabPFNCriterionBackend):
     self.mae_loss_weight = mae_loss_weight
     self.finetune_kwargs = dict(finetune_kwargs)
 
-  def _fit_model(self, w: torch.Tensor, z: torch.Tensor) -> None:
+  def _fit_model(self, x: torch.Tensor, z: torch.Tensor) -> None:
     from tabpfn.finetuning.finetuned_regressor import FinetunedTabPFNRegressor
 
     model = FinetunedTabPFNRegressor(
@@ -94,5 +94,5 @@ class FinetunedTabPFNCriterionBackend(TabPFNCriterionBackend):
       mae_loss_weight=self.mae_loss_weight,
       **self.finetune_kwargs,
     )
-    model.fit(w.detach().cpu().numpy(), z.detach().cpu().numpy())
+    model.fit(x.detach().cpu().numpy(), z.detach().cpu().numpy())
     self.model_ = model

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import numpy as np
 import pyvinecopulib as pv
 import pytest
+import torch
 
 from npcc.experiments import scenarios
 
@@ -19,9 +19,9 @@ def test_eval_grid_conditional_shapes() -> None:
   assert grid.x_axis is not None
   assert grid.u_axis.shape == (scenarios.CONDITIONAL_UV_GRID_N,)
   expected_axis = (
-    np.arange(scenarios.CONDITIONAL_UV_GRID_N, dtype=np.float64) + 0.5
+    torch.arange(scenarios.CONDITIONAL_UV_GRID_N, dtype=torch.float64) + 0.5
   ) / scenarios.CONDITIONAL_UV_GRID_N
-  np.testing.assert_allclose(grid.u_axis, expected_axis)
+  torch.testing.assert_close(grid.u_axis, expected_axis)
 
 
 def test_eval_grid_unconditional_has_no_x() -> None:
@@ -40,14 +40,16 @@ def test_ground_truth_conditional_matches_pyvinecopulib() -> None:
   spec = scenarios.TAU_SCENARIOS[scenario]
   assert spec.tau_of_x is not None
   tau_x = spec.tau_of_x(grid.x_axis)
-  uu, vv = np.meshgrid(grid.u_axis, grid.v_axis, indexing="ij")
-  uv = np.column_stack([uu.reshape(-1), vv.reshape(-1)])
+  uu, vv = torch.meshgrid(grid.u_axis, grid.v_axis, indexing="ij")
+  uv = torch.column_stack([uu.reshape(-1), vv.reshape(-1)])
 
-  assert np.unique(uv, axis=0).shape[0] == grid.shape[0]
+  assert torch.unique(uv, dim=0).shape[0] == grid.shape[0]
   for x_idx, tau in enumerate(tau_x):
     cop = scenarios._bicop(scenarios.FAMILIES[family], float(tau))
-    expected_pdf = np.asarray(cop.pdf(uv))
-    np.testing.assert_allclose(truth["pdf"][:, x_idx], expected_pdf, atol=1e-10)
+    expected_pdf = torch.from_numpy(cop.pdf(uv.numpy()))
+    torch.testing.assert_close(
+      truth["pdf"][:, x_idx], expected_pdf, atol=1e-10, rtol=1e-7
+    )
   assert truth["pdf"].shape == grid.shape
 
 
@@ -56,8 +58,9 @@ def test_ground_truth_unconditional_matches_pyvinecopulib() -> None:
   truth = scenarios.ground_truth(family, scenario)
   grid = scenarios.eval_grid(scenario)
   cop = scenarios._bicop(scenarios.FAMILIES[family], 0.5)
-  uv = np.column_stack([grid.u_flat, grid.v_flat])
-  np.testing.assert_allclose(truth["cdf"], np.asarray(cop.cdf(uv)), atol=1e-10)
+  uv = torch.column_stack([grid.u_flat, grid.v_flat])
+  expected = torch.from_numpy(cop.cdf(uv.numpy()))
+  torch.testing.assert_close(truth["cdf"], expected, atol=1e-10, rtol=1e-7)
   assert truth["pdf"].shape == grid.shape
 
 
@@ -65,8 +68,9 @@ def test_sample_conditional_returns_x_linspace_in_unit_square() -> None:
   u, v, x = scenarios.sample("gumbel", "linear", n=200, seed=0)
   assert x is not None
   assert u.shape == v.shape == x.shape == (200,)
-  np.testing.assert_allclose(
-    x, np.linspace(scenarios.X_MIN, scenarios.X_MAX, 200)
+  torch.testing.assert_close(
+    x,
+    torch.linspace(scenarios.X_MIN, scenarios.X_MAX, 200, dtype=torch.float64),
   )
   assert (u > 0).all() and (u < 1).all()
   assert (v > 0).all() and (v < 1).all()
@@ -76,7 +80,7 @@ def test_sample_conditional_returns_x_linspace_in_unit_square() -> None:
 def test_sample_unconditional_recovers_target_tau(family: str) -> None:
   u, v, x = scenarios.sample(family, "uncond50", n=4000, seed=1)
   assert x is None
-  tau = float(pv.utils.wdm(u, v, "tau"))
+  tau = float(pv.utils.wdm(u.numpy(), v.numpy(), "tau"))
   assert abs(tau - 0.5) < 0.06
 
 

@@ -1,6 +1,6 @@
 # Neural Pair-Copulas Constructions (NPCCs)
 
-A Python library for **conditional bivariate copula density estimation**
+A Python library for **conditional pair copula and fixed-structure vine density estimation**
 built on top of *any* distributional-regression backend.  The package
 exposes one outer estimator — `RosenblattBicop` — whose inner
 univariate-conditional-predictive-distribution model is **pluggable**
@@ -84,9 +84,9 @@ your own.
 ### Two base classes
 
 Every backend implements the abstract
-`ConditionalDistribution1D` interface — `fit(w, y)`, `pdf(w, y)`,
-`cdf(w, y)`, `icdf(w, alphas)`, plus the Cartesian-grid fast paths
-`pdf_grid(w, y_grid)` / `cdf_grid(w, y_grid)`.  There are two ways to
+`ConditionalMargin` interface — `fit(y, x=w)`, `pdf(y, x=w)`,
+`cdf(y, x=w)`, `icdf(alphas, x=w)`, plus the Cartesian-grid fast paths
+`pdf_grid(y_grid, x=w)` / `cdf_grid(y_grid, x=w)`. There are two ways to
 implement it:
 
 - **Quantile-table backends** subclass `QuantileTableDistribution1D` and
@@ -99,7 +99,7 @@ implement it:
   linear interpolation in the sorted quantile table; $Q'$ floored to a
   positive constant for stability.
 
-- **Native-evaluation backends** subclass `ConditionalDistribution1D`
+- **Native-evaluation backends** subclass `ConditionalMargin`
   directly and evaluate the predictive distribution at arbitrary points.
   `tabpfn-criterion` reads TabPFN's `criterion` head
   (`predict(W, output_type="full")` → logits + `pdf`/`cdf`/`icdf`); it is
@@ -137,10 +137,10 @@ device-aware and overridable model-wide
 | `as_bicop(x_row=None)` | A `pyvinecopulib`-compatible adapter (`var_types = ["c", "c"]`, `pdf(uv)`). |
 | `plot(*, x_row=None, plot_type="contour", margin_type="norm", ...)` | Contour/surface plot via `pyvinecopulib`'s plotter (lazy-imports `matplotlib`). |
 
-Exported names: `RosenblattBicop`, the abstract `ConditionalDistribution1D`
-and `QuantileTableDistribution1D` base classes, `QuantileGridConfig`, the
-`TabPFNCriterionBackend` / `TabPFNQuantileBackend` leaves, and the registry
-helpers `create_backend` / `register_backend` / `available_backends`.
+Exported names: `RosenblattBicop`, `RosenblattVinecop`, `RosenblattVinedist`,
+the abstract `ConditionalMargin` and `QuantileTableDistribution1D` base classes,
+`QuantileTableConfig`, the `TabPFNCriterionBackend` / `TabPFNQuantileBackend` leaves,
+and the registry helpers `create_backend` / `register_backend` / `available_backends`.
 
 ### Quick start
 
@@ -220,6 +220,174 @@ model.pdf(np.column_stack([u_query, v_query]), x_query)     # x_query shape (n_q
 
 ---
 
+## Fixed-structure multivariate vine
+
+`RosenblattVinecop` composes fitted `RosenblattBicop` modules along a
+caller-supplied `pyvinecopulib.RVineStructure`. The structure fixes the variable
+order, edge layout, and truncation level; this estimator does not perform
+automatic structure selection.
+
+The vine is non-simplified. For an edge with conditioned variables
+\(a_e, b_e\) and conditioning set \(D_e\), the pair copula receives
+
+\[
+   x_e = [u_{D_e}, x],
+\]
+
+where \(u_{D_e}\) contains the internal vine conditioning variables and \(x\)
+contains optional external covariates. Consequently, the fitted vine density is
+
+\[
+   \hat c(u_1, \ldots, u_d \mid x)
+   =
+   \prod_e
+   \hat c_{a_e,b_e;D_e}
+   \left(
+      u_{a_e\mid D_e},
+      u_{b_e\mid D_e}
+      \mid
+      u_{D_e}, x
+   \right).
+\]
+
+For tree-zero edges, \(D_e\) is empty, so those pairs receive only the external
+covariates. Higher-tree pair copulas receive the conditioning-set values first and the
+external coavariates last.
+
+```python
+import numpy as np
+import pyvinecopulib as pv
+import torch
+
+from npcc import RosenblattVinecop
+
+# Continuous pseudo-observations and optional external covariates.
+u_train = rng.uniform(0.05, 0.95, size=(500, 3))
+x_train = rng.normal(size=(500, 2))
+
+# The order and truncation level are fixed by the supplied structure.
+structure = pv.RVineStructure.from_order([1, 2, 3])
+
+vine = RosenblattVinecop.from_data(
+   u_train,
+   structure,
+   x=x_train,
+   backend="tabpfn-criterion",
+   device="cpu",
+)
+
+u_query = rng.uniform(0.05, 0.95, size=(2, 3))
+x_query = rng.normal(size=(2, 2))
+
+# NumPy inputs produce NumPy outputs.
+density = vine.pdf(u_query, x=x_query)
+independent = vine.rosenblatt(u_query, x=x_query)
+recovered = vine.inverse_rosenblatt(independent, x=x_query)
+
+# Conditional sample() preserves the covariate array type. Unconditional
+# sample() returns a float64 torch tensor on the configured device.
+samples = vine.sample(2, x=x_query, seeds=[42])
+unconditional_samples = vine.sample(2, seeds=[42])
+
+# With order [1, 2, 3], a one-column conditioning matrix conditions on
+# variable 3, the current order tail.
+u_cond = np.array([[0.3], [0.7]])
+conditional_samples = vine.sample_conditional(
+   u_cond,
+   x=x_query,
+   seeds=[42],
+)
+```
+
+The initial vine integration supports continuous fixed structures only.
+Automatic structure selection and discrete variables are not (yet) implemented.
+Within ordinary evaluator calls, `u` and `x` must both be NumPy arrays or both
+be torch tensors. A joint CDF with external covariates is not currently
+available because it would require a separate Monte Carlo sample for every
+covariate row. For non-simplified vines, `sample_conditional()` can condition
+only on variables already forming the tail of the structure order.
+
+---
+
+## Original-scale vine distribution
+
+`ConditionalMargin` adapts registered distributional-regression backends to
+pyvinecopulib's `MarginBase` interface. `RosenblattVinedist` combines fitted
+conditional margins with a `RosenblattVinecop` on the resulting pseudo
+observations.
+
+For observations \(Y=(Y_1,\ldots,Y_d)\) and optional covariates \(X\), the
+
+\[
+   U_j = F_j(X_j),
+\]
+
+and the resulting conditional joint density is
+
+\[
+   f(y_1,\ldots,y_d)
+   =
+   c\!\left(
+      F_1(y_1\mid x),\ldots.F_d(y_d\mid x)
+      \mid x
+   \right)
+   \prod_{j=1}^d f_j(y_j\mid x)
+\]
+
+```python
+import pyvinecopulib as pv
+import torch
+
+from npcc import QuantileTableConfig, RosenblattVinedist, create_backend
+from npcc.core.controls import FitControlsRosenblattVinecop
+from npcc.core.vinecop import RosenblattVinecop
+
+generator = torch.Generator().manual_seed(42)
+y_train = torch.randn((500, 3), generator=generator, dtype=torch.float64)
+x_train = torch.randn((500, 2), generator=generator, dtype=torch.float64)
+
+structure = pv.RVineStructure.from_order([1, 2, 3])
+table_config = QuantileTableConfig()
+controls = FitControlsRosenblattVinecop(
+   backend="tabpfn-criterion",
+   quantile_table_config=table_config,
+   device="cpu",
+)
+margins = [
+   create_backend(
+      controls.backend,
+      transform="identity",
+      quantile_table_config=table_config,
+      eps=controls.eps,
+      device=controls.device,
+      batch_size=controls.batch_size,
+      backend_kwargs=controls.backend_kwargs,
+   )
+   for _ in range(structure.dim)
+]
+vinecop = RosenblattVinecop(None, structure, device=controls.device)
+dist = RosenblattVinedist(vinecop, margins).fit(y_train, controls, x=x_train)
+
+y_query = torch.randn((5, 3), generator=generator, dtype=torch.float64)
+x_query = torch.randn((5, 2), generator=generator, dtype=torch.float64)
+
+density = dist.pdf(y_query, x=x_query)
+independent = dist.rosenblatt(y_query, x=x_query)
+recovered = dist.inverse_rosenblatt(independent, x=x_query)
+samples = dist.sample(5, x=x_query, seeds=[42])
+```
+
+One `FitControlsRosenblattVinecop` configures the backend family used by the
+margins and pair copulas.
+
+The initial implementation supports continuous real-valued margins only.
+Every margin uses the identity target transform, while pair copulas default to
+the logit transform on the unit interval. A fixed `RVineStructure` is required.
+Custom margins, observation weights, automatic structure selection, and
+variable names are not currently supported.
+
+---
+
 ## Notebooks
 
 Worked demos live under [`notebooks/`](notebooks/) (Clayton demo,
@@ -240,7 +408,7 @@ uv sync --extra cpu
 uv sync --extra cpu --extra ngboost --extra gbm --extra tabicl
 ```
 
-The package depends on `numpy>=2.0`, `pyvinecopulib>=0.7.5`, and
+The package depends on `numpy>=2.0`, `pyvinecopulib>=0.8.0`, and
 `tabpfn>=8.0`.  TabPFN pulls in PyTorch transitively; the flavour extras
 just pin its build.
 

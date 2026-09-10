@@ -1,0 +1,222 @@
+"""Tests for backend-powered conditional margins."""
+
+from __future__ import annotations
+
+import copy
+import math
+
+import pytest
+import torch
+from pyvinecopulib.core import MarginBase
+
+from npcc.core.margin import ConditionalMargin
+from npcc.core.quantile_table_distribution1d import QuantileTableConfig
+from npcc.core.registry import create_backend
+
+
+def make_margin(
+  register_uniform_backends: None,
+) -> ConditionalMargin:
+  """Construct the hermetic native backend on the original scale."""
+  return create_backend(
+    "uniform-native",
+    transform="identity",
+    quantile_table_config=QuantileTableConfig(),
+    eps=1e-6,
+    device="cpu",
+    batch_size=None,
+  )
+
+
+def test_conditional_margin_subclasses_margin_base(
+  register_uniform_backends: None,
+) -> None:
+  margin = make_margin(register_uniform_backends)
+
+  assert isinstance(margin, MarginBase)
+  assert margin.supports_covariates is True
+  assert margin.supports_controls is False
+  assert margin.supports_weights is False
+  assert margin.var_type == "c"
+  assert margin.support == (float("-inf"), float("inf"))
+  assert margin.is_fitted is False
+  assert margin.nobs is None
+  assert margin.n_parameters == 0.0
+
+
+@pytest.mark.parametrize("eps", [0.0, 0.5, -1e-6])
+def test_invalid_eps_is_rejected(
+  register_uniform_backends: None,
+  eps: float,
+) -> None:
+  with pytest.raises(ValueError, match="eps must lie"):
+    create_backend(
+      "uniform-native",
+      transform="identity",
+      quantile_table_config=QuantileTableConfig(),
+      eps=eps,
+      device="cpu",
+      batch_size=None,
+    )
+
+
+@pytest.mark.parametrize(
+  ("x", "expected_width"),
+  [
+    (None, 1),
+    (torch.ones(8), 1),
+    (torch.ones((8, 3)), 3),
+  ],
+)
+def test_fit_constructs_expected_feature_matrix(
+  register_uniform_backends: None,
+  monkeypatch: pytest.MonkeyPatch,
+  x: torch.Tensor | None,
+  expected_width: int,
+) -> None:
+  margin = make_margin(register_uniform_backends)
+  observed_shapes: list[tuple[int, ...]] = []
+  original = margin._fit_model
+
+  def record_fit(features: torch.Tensor, z: torch.Tensor) -> None:
+    observed_shapes.append(tuple(features.shape))
+    original(features, z)
+
+  monkeypatch.setattr(margin, "_fit_model", record_fit)
+
+  y = torch.linspace(-1.0, 1.0, 8, dtype=torch.float64)
+  result = margin.fit(y, x=x)
+
+  assert result is margin
+  assert margin.is_fitted is True
+  assert margin.nobs == 8
+  assert margin.n_parameters == 0.0
+  assert observed_shapes == [(8, expected_width)]
+
+
+def test_identity_scale_distribution_operations(
+  register_uniform_backends: None,
+) -> None:
+  margin = make_margin(register_uniform_backends)
+  margin.fit(torch.linspace(-1.0, 1.0, 20, dtype=torch.float64))
+
+  y = torch.tensor([-1.0, 0.0, 1.0], dtype=torch.float64)
+  p = torch.tensor([0.25, 0.5, 0.75], dtype=torch.float64)
+
+  torch.testing.assert_close(margin.pdf(y), torch.full_like(y, 0.25))
+  torch.testing.assert_close(margin.cdf(y), p)
+  torch.testing.assert_close(margin.icdf(p), y)
+
+
+def test_evaluation_before_fit_raises(
+  register_uniform_backends: None,
+) -> None:
+  margin = make_margin(register_uniform_backends)
+
+  with pytest.raises(RuntimeError, match="model is not fitted"):
+    margin.pdf(torch.tensor([0.0], dtype=torch.float64))
+
+
+def test_rejects_mismatched_rows(
+  register_uniform_backends: None,
+) -> None:
+  margin = make_margin(register_uniform_backends)
+
+  with pytest.raises(ValueError, match="same number of rows"):
+    margin.fit(
+      torch.linspace(-1.0, 1.0, 8, dtype=torch.float64),
+      x=torch.ones((7, 2), dtype=torch.float64),
+    )
+
+
+def test_inherited_margin_operations(
+  register_uniform_backends: None,
+) -> None:
+  margin = make_margin(register_uniform_backends)
+  margin.fit(torch.linspace(-1.0, 1.0, 20, dtype=torch.float64))
+
+  y = torch.tensor([-1.0, 0.0, 1.0], dtype=torch.float64)
+  expected_logpdf = torch.full_like(y, math.log(0.25))
+
+  torch.testing.assert_close(margin.logpdf(y), expected_logpdf)
+  torch.testing.assert_close(margin.cdf_left(y), margin.cdf(y))
+  torch.testing.assert_close(margin.loglik(y), expected_logpdf.sum())
+
+
+def test_cdf_icdf_round_trip_with_covariates(
+  register_uniform_backends: None,
+) -> None:
+  margin = make_margin(register_uniform_backends)
+  train_y = torch.linspace(-1.0, 1.0, 20, dtype=torch.float64)
+  train_x = torch.column_stack((train_y, train_y.square()))
+  margin.fit(train_y, x=train_x)
+
+  p = torch.tensor([0.2, 0.5, 0.8], dtype=torch.float64)
+  x = torch.tensor(
+    [
+      [-1.0, 1.0],
+      [0.0, 0.0],
+      [1.0, 1.0],
+    ],
+    dtype=torch.float64,
+  )
+
+  quantiles = margin.icdf(p, x=x)
+
+  torch.testing.assert_close(margin.cdf(quantiles, x=x), p)
+
+
+def test_grid_evaluation_shapes(
+  register_uniform_backends: None,
+) -> None:
+  margin = make_margin(register_uniform_backends)
+  margin.fit(torch.linspace(-1.0, 1.0, 20, dtype=torch.float64))
+  x = torch.ones((4, 2), dtype=torch.float64)
+  y_grid = torch.linspace(-1.0, 1.0, 7, dtype=torch.float64)
+
+  assert margin.pdf_grid(y_grid, x=x).shape == (4, 7)
+  assert margin.cdf_grid(y_grid, x=x).shape == (4, 7)
+
+
+def test_sample_is_reproducible(
+  register_uniform_backends: None,
+) -> None:
+  margin = make_margin(register_uniform_backends)
+  margin.fit(torch.linspace(-1.0, 1.0, 20, dtype=torch.float64))
+
+  first = margin.sample(10, seeds=[42])
+  second = margin.sample(10, seeds=[42])
+
+  torch.testing.assert_close(first, second)
+  assert torch.all((first >= -2.0) & (first <= 2.0))
+
+
+def test_conditional_sample_returns_tensor(
+  register_uniform_backends: None,
+) -> None:
+  margin = make_margin(register_uniform_backends)
+  train_y = torch.linspace(-1.0, 1.0, 20, dtype=torch.float64)
+  train_x = torch.ones((20, 2), dtype=torch.float64)
+  margin.fit(train_y, x=train_x)
+
+  result = margin.sample(
+    5,
+    x=torch.ones((5, 2), dtype=torch.float64),
+    seeds=[42],
+  )
+
+  assert result.shape == (5,)
+
+
+def test_copied_margins_are_independent(
+  register_uniform_backends: None,
+) -> None:
+  first = make_margin(register_uniform_backends)
+  second = copy.deepcopy(first)
+
+  assert first is not second
+
+  first.fit(torch.linspace(-1.0, 1.0, 20, dtype=torch.float64))
+
+  assert first.is_fitted is True
+  assert second.is_fitted is False

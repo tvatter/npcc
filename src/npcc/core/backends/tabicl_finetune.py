@@ -23,7 +23,7 @@ from typing import Any, Literal
 import torch
 
 from npcc.core.backends.tabicl import TabICLBackend
-from npcc.core.quantile_table_distribution1d import QuantileGridConfig
+from npcc.core.quantile_table_distribution1d import QuantileTableConfig
 
 
 class FinetunedTabICLBackend(TabICLBackend):
@@ -44,7 +44,8 @@ class FinetunedTabICLBackend(TabICLBackend):
     self,
     *,
     transform: Literal["identity", "logit", "probit"] = "logit",
-    config: QuantileGridConfig | None = None,
+    quantile_table_config: QuantileTableConfig | None = None,
+    eps: float = 1e-6,
     device: str | torch.device | None = None,
     batch_size: int | None = None,
     epochs: int = 30,
@@ -53,7 +54,8 @@ class FinetunedTabICLBackend(TabICLBackend):
   ) -> None:
     super().__init__(
       transform=transform,
-      config=config,
+      quantile_table_config=quantile_table_config,
+      eps=eps,
       device=device,
       batch_size=batch_size,
     )
@@ -61,7 +63,7 @@ class FinetunedTabICLBackend(TabICLBackend):
     self.learning_rate = learning_rate
     self.finetune_kwargs = dict(finetune_kwargs)
 
-  def _fit_model(self, w: torch.Tensor, z: torch.Tensor) -> None:
+  def _fit_model(self, x: torch.Tensor, z: torch.Tensor) -> None:
     from tabicl import FinetunedTabICLRegressor
 
     model = FinetunedTabICLRegressor(
@@ -70,5 +72,5 @@ class FinetunedTabICLBackend(TabICLBackend):
       learning_rate=self.learning_rate,
       **self.finetune_kwargs,
     )
-    model.fit(w.detach().cpu().numpy(), z.detach().cpu().numpy())
+    model.fit(x.detach().cpu().numpy(), z.detach().cpu().numpy())
     self.model_ = model
