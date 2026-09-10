@@ -153,12 +153,12 @@ import pyvinecopulib as pv
 
 from npcc import RosenblattBicop
 
-# Simulate from a Clayton bicop
+# Sample from a Clayton bicop
 clayton = pv.Bicop(
     family=pv.BicopFamily.clayton,
     parameters=np.asarray([[3.0]], dtype=np.float64),
 )
-u = clayton.simulate(n=1000, seeds=[2, 2, 4])
+u = clayton.sample(n=1000, seeds=[2, 2, 4])
 
 # Fit the Rosenblatt copula (default backend="tabpfn-criterion")
 model = RosenblattBicop()
@@ -177,9 +177,9 @@ C = model.cdf_grid(u_grid, v_grid)            # shape (30, 30)
 h1 = model.hfunc1(np.array([[0.3, 0.4], [0.5, 0.6]]))   # F_{V|U,X}
 h2 = model.hfunc2(np.array([[0.3, 0.4], [0.5, 0.6]]))   # F_{U|V,X}
 
-# BicopBase API: native inverse h-functions, simulation, and log-likelihood
+# BicopBase API: native inverse h-functions, sampling, and log-likelihood
 v = model.hinv1(np.array([[0.3, 0.25], [0.5, 0.75]]))
-simulated = model.simulate(100, seeds=[42])  # float64 torch tensor
+sampled = model.sample(100, seeds=[42])  # float64 torch tensor
 log_likelihood = model.loglik(u)
 
 # Kendall's tau via the pyvinecopulib quasi-random recipe.

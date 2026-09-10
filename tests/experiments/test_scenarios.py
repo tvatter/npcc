@@ -76,7 +76,7 @@ def test_sample_conditional_returns_x_linspace_in_unit_square() -> None:
 def test_sample_unconditional_recovers_target_tau(family: str) -> None:
   u, v, x = scenarios.sample(family, "uncond50", n=4000, seed=1)
   assert x is None
-  tau = float(pv.wdm(u, v, "tau"))
+  tau = float(pv.utils.wdm(u, v, "tau"))
   assert abs(tau - 0.5) < 0.06
 
 

@@ -562,12 +562,12 @@ class TestPFNRInheritedAPI:
     expected = np.log(np.clip(m.pdf(uv), 1e-20, None)).sum()
     assert m.loglik(uv) == pytest.approx(expected)
 
-  def test_simulate_seed_dtype_and_inverse_rosenblatt(
+  def test_sample_seed_dtype_and_inverse_rosenblatt(
     self, patch_uniform: None, method: str
   ) -> None:
     m = self._fit(method)
-    first = m.simulate(12, seeds=[42])
-    second = m.simulate(12, seeds=[42])
+    first = m.sample(12, seeds=[42])
+    second = m.sample(12, seeds=[42])
 
     assert isinstance(first, torch.Tensor)
     assert first.shape == (12, 2)
@@ -578,7 +578,7 @@ class TestPFNRInheritedAPI:
     assert isinstance(recovered, torch.Tensor)
     assert torch.all((recovered > 0.0) & (recovered < 1.0))
 
-  def test_simulate_qrng_with_conditional_x(
+  def test_sample_qrng_with_conditional_x(
     self, patch_uniform: None, method: str
   ) -> None:
     uv = np.column_stack(
@@ -586,7 +586,7 @@ class TestPFNRInheritedAPI:
     )
     x = np.linspace(-1.0, 1.0, 30)[:, None]
     m = make_pfnr(method=method).fit(uv, x)
-    out = m.simulate(
+    out = m.sample(
       8,
       x=torch.linspace(-0.5, 0.5, 8)[:, None],
       qrng=True,
@@ -844,7 +844,7 @@ def test_real_tabpfn_smoke() -> None:
     parameters=np.array([[theta]], dtype=np.float64),
   )
   rng = np.random.default_rng(42)
-  uv = cop.simulate(200, seeds=[int(rng.integers(1, 1_000_000))])
+  uv = cop.sample(200, seeds=[int(rng.integers(1, 1_000_000))])
   u, v = uv[:, 0], uv[:, 1]
 
   try:
